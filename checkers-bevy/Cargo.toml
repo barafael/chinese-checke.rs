@@ -1,0 +1,12 @@
+[package]
+name = "checkers-bevy"
+edition.workspace = true
+version.workspace = true
+description = "Bevy front-end for the machine-checked Chinese Checkers rules"
+
+[dependencies]
+bevy = "0.19"
+checkers-core.workspace = true
+
+[lints]
+workspace = true

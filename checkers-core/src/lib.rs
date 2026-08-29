@@ -42,6 +42,7 @@
 //! that the LaTeX in [`law::Law::STATEMENT`] means what the check computes. That
 //! last gap needs a human reader, which is why statement and check sit together.
 
+pub mod audit;
 pub mod geometry;
 pub mod law;
 pub mod laws;
@@ -49,6 +50,7 @@ pub mod position;
 pub mod rules;
 pub mod spec;
 
+pub use audit::{PositionFault, audit_position};
 pub use geometry::{Coord, Dir};
 pub use law::{Evidence, Law, LawInfo, Violation};
 pub use position::{Move, MoveKind, Player, Position};

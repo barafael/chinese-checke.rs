@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["checkers-core", "checkers-model", "checkers-spec-gen"]
+members = ["checkers-bevy","checkers-core", "checkers-model", "checkers-spec-gen"]
 
 [workspace.package]
 edition = "2024"
