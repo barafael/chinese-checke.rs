@@ -62,6 +62,7 @@ fn main() {
         }))
         .insert_resource(ClearColor(Color::srgb(0.09, 0.09, 0.11)))
         .init_resource::<Session>()
+        .init_resource::<StatusVisible>()
         .add_systems(Startup, setup)
         .add_systems(
             Update,
@@ -69,9 +70,11 @@ fn main() {
                 handle_buttons,
                 handle_clicks,
                 handle_keys,
+                toggle_status,
                 sync_pieces,
                 sync_highlights,
                 sync_status,
+                sync_status_visibility,
                 sync_buttons,
             )
                 .chain(),
@@ -343,6 +346,20 @@ struct Overlay;
 #[derive(Component)]
 struct StatusText;
 
+/// Whether the status panel is shown. Toggled with `T`.
+///
+/// Kept out of [`Session`] because it is a view preference, not game state:
+/// folding it in would make every toggle look like a position change to the
+/// `is_changed()` gates the sync systems rely on.
+#[derive(Resource)]
+struct StatusVisible(bool);
+
+impl Default for StatusVisible {
+    fn default() -> Self {
+        Self(true)
+    }
+}
+
 /// The two turn-control buttons.
 #[derive(Component, Clone, Copy, PartialEq, Eq)]
 enum ControlButton {
@@ -404,7 +421,7 @@ fn setup(
         TextColor(Color::srgb(0.85, 0.85, 0.88)),
         Node {
             position_type: PositionType::Absolute,
-            top: Val::Px(10.0),
+            bottom: Val::Px(10.0),
             left: Val::Px(12.0),
             ..default()
         },
@@ -530,6 +547,34 @@ fn handle_keys(keys: Res<ButtonInput<KeyCode>>, mut session: ResMut<Session>) {
         *session = Session::default();
         session.message = "New game".into();
     }
+}
+
+/// `T` toggles the status panel.
+///
+/// Separate from [`sync_status`], which early-outs unless the session changed:
+/// folding the toggle in there would leave a keypress with no visible effect
+/// until the player's next move.
+fn toggle_status(keys: Res<ButtonInput<KeyCode>>, mut visible: ResMut<StatusVisible>) {
+    if keys.just_pressed(KeyCode::KeyT) {
+        visible.0 = !visible.0;
+    }
+}
+
+fn sync_status_visibility(
+    visible: Res<StatusVisible>,
+    mut text: Query<&mut Visibility, With<StatusText>>,
+) {
+    if !visible.is_changed() {
+        return;
+    }
+    let Ok(mut v) = text.single_mut() else {
+        return;
+    };
+    *v = if visible.0 {
+        Visibility::Inherited
+    } else {
+        Visibility::Hidden
+    };
 }
 
 /// Redraw pieces from the position being displayed.
@@ -681,7 +726,7 @@ fn sync_status(session: Res<Session>, mut text: Query<&mut Text, With<StatusText
     **text = format!(
         "{header}{staged}\n{}\n{} laws checked at startup  |  invariants checked each turn\n\
          Click a piece, then a highlighted hole. Jumps chain one hop at a time.\n\
-         Enter confirms, Backspace cancels, U undoes a hop, R restarts.",
+         Enter confirms, Backspace cancels, U undoes a hop, R restarts, T hides this.",
         session.message,
         LAWS.len()
     );
