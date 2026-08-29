@@ -57,6 +57,7 @@ one place, and that the strongest claims are additionally Kani-proven.
 | `checkers-core` | Engine-free rules. Laws, geometry, Kani proofs. |
 | `checkers-model` | Naive reference implementation, for differential testing. |
 | `checkers-spec-gen` | Generates `specs/` from the law registry. |
+| `checkers-bevy` | Playable front-end. Renders and takes input; holds no rules. |
 | `specs/` | **Generated.** Do not edit; regenerate instead. |
 | `docs/superseded/` | The original hand-written prose. Not authoritative. |
 
@@ -85,6 +86,7 @@ Code cites **law IDs**, never section numbers.
 
 ```sh
 cargo test                                          # all laws + tests
+cargo run -p checkers-bevy                          # play
 cargo doc --open                                    # rustdoc with rendered math
 cargo run -p checkers-spec-gen -- specs/specification.md          # regenerate
 cargo run -p checkers-spec-gen -- --check specs/specification.md  # CI staleness gate
@@ -131,3 +133,32 @@ bound makes Kani diverge. `rotate_n` is therefore a loop-free `match` over
 `n % 6` rather than an idiomatic `fold` — an earlier `fold` version sent Kani
 unwinding past 6900 iterations. Keep functions intended for proof branch-bounded
 and arithmetic.
+
+## Playing
+
+`cargo run -p checkers-bevy`
+
+Steps commit immediately. Jumps are **staged**: selecting a piece shows only the
+destinations reachable in **one** hop; clicking one moves the piece, keeps it
+selected, and reveals the next hop. Nothing is committed until you confirm, so
+the whole chain can be abandoned.
+
+| Input | Effect |
+|---|---|
+| Click own piece | Select it |
+| Click a highlighted hole | Take one hop, or make a step |
+| Enter / Confirm button | End the jump turn |
+| Backspace / Cancel button | Abandon the turn |
+| U | Undo the last hop |
+| Escape | Clear the selection |
+| R | Restart |
+
+Confirming before the piece has actually moved is refused. That is not a corner
+case to be tidied away: a piece can hop out over a blocker and straight back, so
+a turn can have taken two hops and still be at its origin — which chapter 9
+treats as not moving.
+
+The front-end holds no rules. Destinations come from `checkers-core` and moves
+are *found* rather than constructed, so there is no code path to an illegal
+position. It checks the full law registry once at startup and the position
+invariants after every committed turn.

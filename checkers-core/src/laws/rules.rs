@@ -23,6 +23,7 @@ use crate::rules::{
     legal_moves,
 };
 use crate::spec::Chapter;
+use crate::turn::{JumpTurn, single_hop_destinations};
 
 /// A deterministic sequence of positions to check invariants over: the initial
 /// position, then positions reached by playing a fixed pseudo-random game.
@@ -1147,3 +1148,198 @@ impl Law for CampsAreUnrestricted {
     }
 }
 register_law!(CampsAreUnrestricted, CAMPS_ARE_UNRESTRICTED);
+
+/// Iterating single hops reaches exactly the transitive closure.
+///
+/// The staged interface in `checkers-bevy` lets a player take one hop at a time,
+/// so it must not be able to reach anywhere the atomic rules would forbid, nor
+/// be blocked from anywhere they allow.
+pub struct SingleHopsReachTheClosure;
+
+impl Law for SingleHopsReachTheClosure {
+    const ID: &'static str = "CC-TURN-HOP-CLOSURE";
+    const STATEMENT: &'static str =
+        r"\{y : x \leadsto_s y\} = \text{closure of single hops from } x";
+    const CHAPTER: Chapter = Chapter::JumpSequences;
+    const SUMMARY: &'static str =
+        "Chaining single hops reaches exactly the destinations the closure allows.";
+    const EVIDENCE: Evidence = Evidence::Property;
+    type Subject = (Position, Coord);
+
+    fn holds((pos, origin): &(Position, Coord)) -> Result<(), String> {
+        let Some(player) = pos.occupant(*origin) else {
+            return Ok(());
+        };
+
+        // Breadth-first over single hops, as a player clicking would explore.
+        let mut seen = HashSet::from([*origin]);
+        let mut frontier = vec![*origin];
+        let mut reached = HashSet::new();
+
+        while let Some(cur) = frontier.pop() {
+            // Blockers never move during a turn, so the piece's own position is
+            // the only thing that changes: place it at `cur` and enumerate.
+            let mut scratch = pos.clone();
+            if cur != *origin {
+                scratch.set(*origin, None);
+                scratch.set(cur, Some(player));
+            }
+            for d in single_hop_destinations(&scratch, cur) {
+                if seen.insert(d) {
+                    reached.insert(d);
+                    frontier.push(d);
+                }
+            }
+        }
+
+        let closure = jump_destinations(pos, *origin);
+        if reached != closure {
+            let missing = closure.difference(&reached).count();
+            let extra = reached.difference(&closure).count();
+            return Err(format!(
+                "staged hops from ({},{}) reach {} destination(s) but the closure has {}: \
+                 {missing} unreachable, {extra} extra",
+                origin.q,
+                origin.r,
+                reached.len(),
+                closure.len()
+            ));
+        }
+        Ok(())
+    }
+
+    fn subjects() -> Vec<(Position, Coord)> {
+        jump_scenarios()
+    }
+}
+register_law!(SingleHopsReachTheClosure, SINGLE_HOPS_REACH_THE_CLOSURE);
+
+/// A single hop is one jump, never a chain.
+///
+/// If this were false, a staged interface would let a player skip intermediate
+/// holes, which would make the route it records a fiction.
+pub struct SingleHopIsOneJump;
+
+impl Law for SingleHopIsOneJump {
+    const ID: &'static str = "CC-TURN-HOP-ONE";
+    const STATEMENT: &'static str = r"\forall y \in H(s,x):\ \exists d \in D:\ y = x + 2d";
+    const CHAPTER: Chapter = Chapter::JumpSequences;
+    const SUMMARY: &'static str =
+        "Every single-hop destination lies exactly two holes away in one direction.";
+    const EVIDENCE: Evidence = Evidence::Property;
+    type Subject = (Position, Coord);
+
+    fn holds((pos, origin): &(Position, Coord)) -> Result<(), String> {
+        let Some(player) = pos.occupant(*origin) else {
+            return Ok(());
+        };
+
+        for dest in single_hop_destinations(pos, *origin) {
+            // Must be x + 2d for some direction d, with that d legal.
+            let matching = Dir::ALL
+                .iter()
+                .find(|d| origin.jump_dest(**d) == dest)
+                .copied();
+            let Some(d) = matching else {
+                return Err(format!(
+                    "({},{}) is not x+2d from ({},{})",
+                    dest.q, dest.r, origin.q, origin.r
+                ));
+            };
+            if !is_legal_jump(pos, player, *origin, d) {
+                return Err(format!(
+                    "({},{}) was offered but the jump is not legal",
+                    dest.q, dest.r
+                ));
+            }
+            if origin.distance(dest) != 2 {
+                return Err(format!(
+                    "({},{}) is at distance {} from the origin, expected 2",
+                    dest.q,
+                    dest.r,
+                    origin.distance(dest)
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn subjects() -> Vec<(Position, Coord)> {
+        jump_scenarios()
+    }
+}
+register_law!(SingleHopIsOneJump, SINGLE_HOP_IS_ONE_JUMP);
+
+/// A staged turn always yields a move the atomic rules accept.
+pub struct StagedTurnYieldsLegalMove;
+
+impl Law for StagedTurnYieldsLegalMove {
+    const ID: &'static str = "CC-TURN-STAGED-LEGAL";
+    const STATEMENT: &'static str =
+        r"\text{hops } h_1\ldots h_k \text{ legal} \implies (x, h_k) \in M(s,i)";
+    const CHAPTER: Chapter = Chapter::MoveGeneration;
+    const SUMMARY: &'static str =
+        "Any sequence of legal single hops commits to a move the rules already allow.";
+    const EVIDENCE: Evidence = Evidence::Property;
+    type Subject = (Position, Coord);
+
+    fn holds((pos, origin): &(Position, Coord)) -> Result<(), String> {
+        let Some(player) = pos.occupant(*origin) else {
+            return Ok(());
+        };
+        let Some(mut turn) = JumpTurn::begin(pos, player, *origin) else {
+            return Err("could not begin a turn on an owned piece".into());
+        };
+
+        // A turn with no hops must refuse to commit.
+        if turn.to_move().is_ok() {
+            return Err("a turn with no hops was committable".into());
+        }
+
+        // Walk greedily up to a few hops, checking each commit point.
+        let legal = legal_moves(pos, player);
+        for _ in 0..4 {
+            let Some(next) = turn.next_hops().first().copied() else {
+                break;
+            };
+            if !turn.hop(next) {
+                return Err(format!(
+                    "a legal hop to ({},{}) was refused",
+                    next.q, next.r
+                ));
+            }
+            // A turn that has hopped back to its origin is deliberately NOT
+            // committable: it has taken hops but moved nowhere, which chapter 9
+            // treats as not moving at all.
+            if turn.current() == *origin {
+                if turn.to_move().is_ok() {
+                    return Err("a turn ending at its origin was committable".into());
+                }
+                continue;
+            }
+
+            let mv = turn.to_move().map_err(|e| {
+                format!("a turn with {} hop(s) refused to commit: {e}", turn.hops())
+            })?;
+
+            if !legal.contains(&mv) {
+                return Err(format!(
+                    "staged turn to ({},{}) is not among the legal moves",
+                    mv.destination.q, mv.destination.r
+                ));
+            }
+            // The recorded route must start at the origin and end at the move's
+            // destination.
+            let route = mv.route.as_ref().ok_or("committed move carries no route")?;
+            if route.first() != Some(origin) || route.last() != Some(&mv.destination) {
+                return Err("the recorded route does not span origin to destination".into());
+            }
+        }
+        Ok(())
+    }
+
+    fn subjects() -> Vec<(Position, Coord)> {
+        jump_scenarios()
+    }
+}
+register_law!(StagedTurnYieldsLegalMove, STAGED_TURN_YIELDS_LEGAL_MOVE);

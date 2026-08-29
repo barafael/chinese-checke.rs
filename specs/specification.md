@@ -18,8 +18,8 @@ Each numbered chapter states the rules in prose and mathematics. The **laws** li
 6. [Players, pieces, and the initial position](#players) — 4 laws
 7. [Adjacent moves](#steps) — 2 laws
 8. [Jumps](#jumps) — 4 laws
-9. [Jump sequences and reachability](#jump-sequences) — 3 laws
-10. [Move representation and generation](#move-generation) — 3 laws
+9. [Jump sequences and reachability](#jump-sequences) — 5 laws
+10. [Move representation and generation](#move-generation) — 4 laws
 11. [Applying a move](#applying) — 1 law
 12. [Turn order, passing, and termination](#turns) — 3 laws
 13. [The winning condition](#winning) — 1 law
@@ -32,8 +32,8 @@ Each numbered chapter states the rules in prose and mathematics. The **laws** li
 |---|---|
 | exhaustive | 15 |
 | proof (Kani) | 11 |
-| property test | 12 |
-| **total** | **38** |
+| property test | 15 |
+| **total** | **41** |
 
 Each law records how strongly it is established:
 
@@ -484,6 +484,26 @@ $$
 
 *Evidence: exhaustive*
 
+##### `CC-TURN-HOP-CLOSURE`
+
+Chaining single hops reaches exactly the destinations the closure allows.
+
+$$
+\{y : x \leadsto_s y\} = \text{closure of single hops from } x
+$$
+
+*Evidence: property test*
+
+##### `CC-TURN-HOP-ONE`
+
+Every single-hop destination lies exactly two holes away in one direction.
+
+$$
+\forall y \in H(s,x):\ \exists d \in D:\ y = x + 2d
+$$
+
+*Evidence: property test*
+
 ## 10. Move representation and generation <a id="move-generation"></a>
 
 A move is identified by its kind, origin, and destination — not by the route taken. Distinct jump routes to the same hole produce the same resulting position, so they are the same move; counting them separately inflates move counts and any search built on them.
@@ -520,6 +540,16 @@ Every generated move starts on one of the player's pieces and ends on the board.
 
 $$
 \forall m \in M(s,i):\ x, y \in V \ \land\ s(x) = i
+$$
+
+*Evidence: property test*
+
+##### `CC-TURN-STAGED-LEGAL`
+
+Any sequence of legal single hops commits to a move the rules already allow.
+
+$$
+\text{hops } h_1\ldots h_k \text{ legal} \implies (x, h_k) \in M(s,i)
 $$
 
 *Evidence: property test*

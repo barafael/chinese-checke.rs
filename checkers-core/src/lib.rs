@@ -49,6 +49,7 @@ pub mod laws;
 pub mod position;
 pub mod rules;
 pub mod spec;
+pub mod turn;
 
 pub use audit::{PositionFault, audit_position};
 pub use geometry::{Coord, Dir};
@@ -56,3 +57,4 @@ pub use law::{Evidence, Law, LawInfo, Violation};
 pub use position::{Move, MoveKind, Player, Position};
 pub use rules::{Game, Outcome};
 pub use spec::Chapter;
+pub use turn::{JumpTurn, single_hop_destinations};
