@@ -20,6 +20,27 @@ bevy_matchbox = { git = "https://github.com/barafael/matchbox.git" }
 postcard = { version = "1", features = ["alloc"] }
 serde = { version = "1", features = ["derive"] }
 
+[profile.release]
+codegen-units = 1
+# LTO is off, and for this workspace that is a correctness matter rather than a
+# build-time one. The law registry is a `linkme` distributed slice, which is
+# `#[used]` linker statics; current rustc drops those under both thin and fat
+# LTO. In omdurman (same mechanism, via bevy_reflect's `inventory`) that shows
+# up as an MSVC link failure. Here it would be *silent*: `LAWS` would come up
+# empty, `verify_all()` would check nothing, and the app would start happily
+# claiming to validate against a specification it never read.
+#
+# `laws_are_registered` in checkers-core guards the outcome rather than trusting
+# this line to stay put.
+lto = false
+
+# Web builds. Trunk runs wasm-opt -O2 on top of this (data-wasm-opt in
+# index.html), so favour runtime speed over size here.
+[profile.wasm-release]
+inherits = "release"
+opt-level = 2
+strip = "debuginfo"
+
 [workspace.lints.clippy]
 all = "warn"
 

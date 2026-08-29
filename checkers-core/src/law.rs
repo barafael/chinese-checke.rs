@@ -220,3 +220,62 @@ pub fn for_chapter(chapter: Chapter) -> Vec<&'static LawInfo> {
     laws.sort_by_key(|l| l.id);
     laws
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The registry is not empty, and no law's ID is blank or duplicated.
+    ///
+    /// This exists because [`LAWS`] is a `linkme` distributed slice — `#[used]`
+    /// linker statics, which current rustc **drops under LTO**. The failure is
+    /// silent in the worst way: `LAWS` comes up empty, `verify_all()` iterates
+    /// nothing and returns `Ok`, and the app starts announcing that it validated
+    /// against a specification it never actually read.
+    ///
+    /// `lto = false` in the workspace manifest is the fix; this test is what
+    /// notices if that line is ever removed, or if a future toolchain strips the
+    /// statics anyway.
+    #[test]
+    fn laws_are_registered() {
+        assert!(
+            !LAWS.is_empty(),
+            "the law registry is empty: linkme registration was stripped, \
+             so verify_all() would silently check nothing"
+        );
+
+        // A lower bound, not an exact count, so adding laws does not fail the
+        // build. Partial stripping would still be caught.
+        assert!(
+            LAWS.len() >= 40,
+            "only {} law(s) registered; expected at least 40, so registration \
+             looks partially stripped",
+            LAWS.len()
+        );
+
+        let mut ids: Vec<&str> = LAWS.iter().map(|l| l.id).collect();
+        ids.sort_unstable();
+        assert!(
+            ids.iter().all(|id| !id.is_empty()),
+            "every law needs a non-empty ID"
+        );
+
+        let before = ids.len();
+        ids.dedup();
+        assert_eq!(
+            ids.len(),
+            before,
+            "duplicate law IDs: two laws would collide in the generated document"
+        );
+    }
+
+    /// Every registered law actually passes. `tests/laws.rs` covers this too,
+    /// but having it here means `cargo test -p checkers-core` alone is enough to
+    /// catch a broken law.
+    #[test]
+    fn every_law_holds() {
+        if let Err(violation) = verify_all() {
+            panic!("a registered law does not hold: {violation}");
+        }
+    }
+}
