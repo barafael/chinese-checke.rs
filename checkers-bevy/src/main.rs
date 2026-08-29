@@ -20,6 +20,19 @@
 //! | Backspace, or the Cancel button | Abandon the whole turn |
 //! | U | Undo the last hop |
 //! | Escape | Clear the selection |
+//! | T | Show/hide the status panel |
+//!
+//! # Lobby and networked play
+//!
+//! The app opens in a lobby ([`lobby`]): peers sharing a room id find each other
+//! over WebRTC, the host assigns seats, and Enter starts the game once everyone
+//! is ready. A solo player presses Enter on an empty roster.
+//!
+//! Moves are never applied where they are made. They are queued in
+//! [`Session::outbox`] and applied only when they come back **host-sequenced**
+//! ([`net`]), which gives every peer one identical order. Solo play takes the
+//! same path — the lone peer sequences for itself — so the networked code is
+//! exercised even with one player.
 //!
 //! Confirming before any hop is refused: chapter 9 requires a jump turn to move
 //! the piece, and a turn ending where it began is indistinguishable from not
@@ -40,12 +53,17 @@
 //! position. That distinction is what [`checkers_core::audit`] exists for.
 
 mod board_view;
+mod lobby;
+mod net;
 
 use bevy::prelude::*;
 use board_view::{HOLE_RADIUS, HOLE_SPACING, PIECE_RADIUS, coord_to_world, world_to_coord};
 use checkers_core::audit::audit_position;
 use checkers_core::geometry::{Coord, all_holes, camp_of, on_board};
 use checkers_core::law::{LAWS, verify_all};
+// Aliased because `bevy::prelude` also exports a `Move` (a picking event), and
+// an unqualified `Move` here silently resolves to Bevy's.
+use checkers_core::position::Move as GameMove;
 use checkers_core::position::{MoveKind, Player, Position};
 use checkers_core::rules::{Game, Outcome, legal_moves};
 use checkers_core::turn::{JumpTurn, single_hop_destinations, step_destinations};
@@ -63,7 +81,13 @@ fn main() {
         .insert_resource(ClearColor(Color::srgb(0.09, 0.09, 0.11)))
         .init_resource::<Session>()
         .init_resource::<StatusVisible>()
+        .init_state::<AppState>()
+        .add_plugins(lobby::plugin)
         .add_systems(Startup, setup)
+        .add_systems(
+            OnEnter(AppState::InGame),
+            (lobby::apply_seats, spawn_board).chain(),
+        )
         .add_systems(
             Update,
             (
@@ -71,15 +95,29 @@ fn main() {
                 handle_clicks,
                 handle_keys,
                 toggle_status,
+                // Drains the outbox and applies only host-sequenced moves, so
+                // it must run after input and before the view syncs.
+                net::pump,
                 sync_pieces,
                 sync_highlights,
                 sync_status,
                 sync_status_visibility,
                 sync_buttons,
             )
-                .chain(),
+                .chain()
+                .run_if(in_state(AppState::InGame)),
         )
         .run();
+}
+
+/// Lobby first, then the board. Networked play needs seats assigned before the
+/// game is playable, and the same gate keeps a solo player's flow unchanged —
+/// they simply press Enter on an empty roster.
+#[derive(States, Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+enum AppState {
+    #[default]
+    Lobby,
+    InGame,
 }
 
 /// What the player is currently doing.
@@ -101,6 +139,17 @@ struct Session {
     game: Game,
     selection: Selection,
     message: String,
+    /// Which player this peer may move. `None` in solo play, where every player
+    /// is controlled locally, or when spectating a full game.
+    local_player: Option<Player>,
+    /// Moves this peer has committed but that are not yet applied.
+    ///
+    /// Moves are never applied where they are made. They go here, and
+    /// [`net::pump`] submits them for sequencing; the game advances only when
+    /// the move comes back sequenced. In solo play the pump sequences locally in
+    /// the same frame, so the delay is invisible — but the code path is the same
+    /// one, which is why solo play exercises it.
+    outbox: Vec<GameMove>,
 }
 
 impl Default for Session {
@@ -109,6 +158,8 @@ impl Default for Session {
             game: Game::new(),
             selection: Selection::None,
             message: "Click one of your pieces".into(),
+            local_player: None,
+            outbox: Vec::new(),
         }
     }
 }
@@ -164,7 +215,24 @@ impl Session {
         }
     }
 
+    /// May this peer act right now?
+    ///
+    /// `None` means solo play, where every player is driven locally. Otherwise
+    /// the peer may only move on its own turn — enforced here so an out-of-turn
+    /// click never reaches the outbox, and again by the rules on the receiving
+    /// side, which reject any move that is not currently legal.
+    fn may_act(&self) -> bool {
+        match self.local_player {
+            None => true,
+            Some(p) => p == self.game.turn(),
+        }
+    }
+
     fn select(&mut self, hole: Coord) {
+        if !self.may_act() {
+            self.message = format!("Waiting for player {}", self.game.turn().index());
+            return;
+        }
         let player = self.game.turn();
         if self.game.position().occupant(hole) != Some(player) {
             return;
@@ -207,7 +275,7 @@ impl Session {
                     });
 
                 if let Some(mv) = step {
-                    self.game.play(&mv);
+                    self.outbox.push(mv);
                     self.clear_selection();
                     self.message = format!(
                         "Player {} stepped ({},{}) -> ({},{})",
@@ -217,7 +285,6 @@ impl Session {
                         hole.q,
                         hole.r
                     );
-                    self.after_turn();
                     return;
                 }
 
@@ -260,7 +327,7 @@ impl Session {
         let hops = turn.hops();
         let dest = mv.destination;
 
-        self.game.play(&mv);
+        self.outbox.push(mv);
         self.clear_selection();
         self.message = format!(
             "Player {} jumped {hops} hop(s) to ({},{})",
@@ -268,7 +335,6 @@ impl Session {
             dest.q,
             dest.r
         );
-        self.after_turn();
     }
 
     /// Abandon the staged turn without touching the game.
@@ -296,17 +362,6 @@ impl Session {
             // offered again.
             let origin = turn.origin();
             self.selection = Selection::Piece { origin };
-        }
-    }
-
-    /// Audit the position and auto-pass any blocked players.
-    fn after_turn(&mut self) {
-        audit(self.game.position());
-
-        while !self.game.is_over() && self.game.legal_moves().is_empty() {
-            let stuck = self.game.turn();
-            self.game.pass();
-            self.message = format!("{} — player {} passed", self.message, stuck.index());
         }
     }
 }
@@ -379,20 +434,24 @@ fn player_colour(player: Player) -> Color {
     }
 }
 
-fn setup(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<ColorMaterial>>,
-) {
-    // Check the board and initial position before drawing anything. The full
-    // law registry is worth its cost once, at startup.
+/// Verify the specification and spawn the camera. Runs once, before the lobby:
+/// the app refuses to show anything at all if its own laws do not hold.
+fn setup(mut commands: Commands) {
+    // The full law registry is worth its cost once, at startup.
     if let Err(violation) = verify_all() {
         panic!("the specification does not hold: {violation}");
     }
     audit(&Position::initial());
 
     commands.spawn(Camera2d);
+}
 
+/// Spawn the board, status panel, and turn controls on entering the game.
+fn spawn_board(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
+) {
     let hole_mesh = meshes.add(Circle::new(HOLE_RADIUS));
     let hole_mat = materials.add(Color::srgb(0.22, 0.22, 0.26));
     let camp_mat = materials.add(Color::srgb(0.30, 0.30, 0.36));
