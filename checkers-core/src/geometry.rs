@@ -313,15 +313,24 @@ mod proofs {
         assert_eq!(rotate_n(c, 3), c.negate());
     }
 
-    /// `CC-GEO-HEX-CAMP-DISJOINT`: $H_4 \cap C_0 = \varnothing$.
+    /// `CC-GEO-HEX-CAMP-DISJOINT`: $H_4 \cap C_i = \varnothing$ for **every** $i$.
     ///
     /// Disjointness alone is vacuous — a camp predicate that is always false
     /// satisfies it. [`camps_and_hexagon_are_populated`] supplies the
     /// non-emptiness that makes this meaningful.
+    ///
+    /// Quantifying over a symbolic camp rather than only $C_0$ is load-bearing.
+    /// Fault injection found that dropping the $|q+r| \le 4$ constraint — which
+    /// turns the hexagon into an 81-hole rhombus — swallows $C_1$ and $C_4$
+    /// whole while leaving $C_0$ untouched, and still yields $|V| = 121$ because
+    /// the 20 holes the rhombus gains are exactly the 20 it absorbs. The
+    /// $C_0$-only form of this harness, central symmetry, and the board-size
+    /// count all passed on that board.
     #[kani::proof]
-    fn hex_and_base_camp_are_disjoint() {
+    fn hex_and_camps_are_disjoint() {
         let c = any_coord();
-        assert!(!(in_hex(c) && in_base_camp(c)));
+        let i = any_camp();
+        assert!(!(in_hex(c) && in_camp(c, i)));
     }
 
     /// `CC-GEO-NONVACUOUS`: the regions are populated, with the right sizes.
