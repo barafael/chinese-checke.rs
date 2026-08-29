@@ -21,7 +21,26 @@
 //! reach by iterating single hops. `CC-TURN-HOP-CLOSURE` checks that.
 
 use crate::geometry::{Coord, Dir, on_board};
-use crate::position::{Move, Player, Position, is_legal_jump};
+use crate::position::{Move, Player, Position, is_legal_jump, is_legal_step};
+
+/// Destinations reachable by a single adjacent step from `origin`.
+///
+/// The counterpart to [`single_hop_destinations`]. Without it, callers that want
+/// one piece's steps have to enumerate [`crate::rules::legal_moves`] for *all* of
+/// a player's pieces and filter by origin and kind, which computes every jump
+/// closure only to discard it.
+pub fn step_destinations(pos: &Position, origin: Coord) -> Vec<Coord> {
+    let Some(player) = pos.occupant(origin) else {
+        return Vec::new();
+    };
+    let mut out: Vec<Coord> = Dir::ALL
+        .iter()
+        .map(|d| origin.neighbour(*d))
+        .filter(|to| is_legal_step(pos, player, origin, *to))
+        .collect();
+    out.sort();
+    out
+}
 
 /// Destinations reachable by **exactly one** jump from `origin`.
 ///
@@ -43,18 +62,23 @@ pub fn single_hop_destinations(pos: &Position, origin: Coord) -> Vec<Coord> {
 /// Why a staged jump turn could not be committed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommitError {
-    /// No hop has been taken, so there is nothing to commit. A turn must move
-    /// the piece somewhere other than where it started (chapter 9).
+    /// No hop has been taken yet, so there is nothing to commit.
     NoHopsTaken,
+    /// Hops were taken, but the piece is back where it started. Chapter 9 treats
+    /// a turn ending at its origin as not moving at all.
+    ReturnedToOrigin { hops: usize },
 }
 
 impl core::fmt::Display for CommitError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            CommitError::NoHopsTaken => write!(
+            CommitError::NoHopsTaken => {
+                write!(f, "a jump turn must take at least one hop")
+            }
+            CommitError::ReturnedToOrigin { hops } => write!(
                 f,
-                "a jump turn must take at least one hop; ending where it began \
-                 is indistinguishable from not moving"
+                "the piece is back where it started after {hops} hop(s); a turn \
+                 ending at its origin is indistinguishable from not moving"
             ),
         }
     }
@@ -92,10 +116,6 @@ impl JumpTurn {
         })
     }
 
-    pub fn player(&self) -> Player {
-        self.player
-    }
-
     pub fn origin(&self) -> Coord {
         self.origin
     }
@@ -131,8 +151,11 @@ impl JumpTurn {
     }
 
     /// Can the turn end here?
+    ///
+    /// Defined as "[`Self::to_move`] succeeds", so the two cannot disagree about
+    /// which turns are committable.
     pub fn can_commit(&self) -> bool {
-        self.hops() > 0 && self.current() != self.origin
+        self.to_move().is_ok()
     }
 
     /// Take one hop to `dest`.
@@ -167,8 +190,11 @@ impl JumpTurn {
     /// Carries the full route for presentation, but its identity is
     /// `(kind, origin, destination)` as chapter 10 requires.
     pub fn to_move(&self) -> Result<Move, CommitError> {
-        if !self.can_commit() {
+        if self.hops() == 0 {
             return Err(CommitError::NoHopsTaken);
+        }
+        if self.current() == self.origin {
+            return Err(CommitError::ReturnedToOrigin { hops: self.hops() });
         }
         Ok(Move::jump(self.origin, self.current()).with_route(self.path.clone()))
     }
@@ -177,22 +203,11 @@ impl JumpTurn {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rules::{Game, jump_destinations};
-    use std::collections::HashSet;
-
-    fn two_hop_setup() -> (Position, Coord) {
-        // Piece at the origin with blockers two apart, so two hops chain.
-        let mut pos = Position::empty();
-        let origin = Coord::new(0, 0);
-        pos.set(origin, Some(Player::ALL[0]));
-        pos.set(Coord::new(1, 0), Some(Player::ALL[1]));
-        pos.set(Coord::new(3, 0), Some(Player::ALL[1]));
-        (pos, origin)
-    }
+    use crate::rules::{Game, jump_destinations, two_hop_position};
 
     #[test]
     fn single_hops_do_not_chain() {
-        let (pos, origin) = two_hop_setup();
+        let (pos, origin) = two_hop_position();
         let hops = single_hop_destinations(&pos, origin);
         assert_eq!(
             hops,
@@ -208,7 +223,7 @@ mod tests {
 
     #[test]
     fn hopping_advances_and_reveals_the_next_hop() {
-        let (pos, origin) = two_hop_setup();
+        let (pos, origin) = two_hop_position();
         let mut turn = JumpTurn::begin(&pos, Player::ALL[0], origin).unwrap();
 
         assert_eq!(turn.hops(), 0);
@@ -227,7 +242,7 @@ mod tests {
 
     #[test]
     fn illegal_hops_are_refused_and_change_nothing() {
-        let (pos, origin) = two_hop_setup();
+        let (pos, origin) = two_hop_position();
         let mut turn = JumpTurn::begin(&pos, Player::ALL[0], origin).unwrap();
 
         // A hole reachable only by chaining is not a legal single hop.
@@ -242,7 +257,7 @@ mod tests {
 
     #[test]
     fn undo_restores_the_previous_hole() {
-        let (pos, origin) = two_hop_setup();
+        let (pos, origin) = two_hop_position();
         let mut turn = JumpTurn::begin(&pos, Player::ALL[0], origin).unwrap();
 
         assert!(!turn.undo(), "nothing to undo yet");
@@ -260,7 +275,7 @@ mod tests {
 
     #[test]
     fn committing_with_no_hops_is_refused() {
-        let (pos, origin) = two_hop_setup();
+        let (pos, origin) = two_hop_position();
         let turn = JumpTurn::begin(&pos, Player::ALL[0], origin).unwrap();
         assert_eq!(turn.to_move(), Err(CommitError::NoHopsTaken));
     }
@@ -290,50 +305,16 @@ mod tests {
         assert_eq!(game.position().occupant(dest), Some(player));
     }
 
-    /// The staged interface must not expand what is reachable: iterating single
-    /// hops reaches exactly the closure of chapter 9.
-    #[test]
-    fn iterated_single_hops_reach_exactly_the_closure() {
-        let (pos, origin) = two_hop_setup();
-
-        // Breadth-first over single hops, mirroring what a player could do.
-        let mut seen = HashSet::from([origin]);
-        let mut frontier = vec![origin];
-        let mut reached = HashSet::new();
-        while let Some(cur) = frontier.pop() {
-            // Re-walking to `cur` is unnecessary because blockers never move
-            // during a turn: place the piece at `cur` and enumerate from there.
-            let mut scratch = pos.clone();
-            if cur != origin {
-                scratch.set(origin, None);
-                scratch.set(cur, Some(Player::ALL[0]));
-            }
-            let turn = JumpTurn::begin(&scratch, Player::ALL[0], cur).unwrap();
-            for d in turn.next_hops() {
-                if seen.insert(d) {
-                    reached.insert(d);
-                    frontier.push(d);
-                }
-            }
-        }
-
-        assert_eq!(
-            reached,
-            jump_destinations(&pos, origin),
-            "staged hops must reach exactly the closure"
-        );
-    }
-
     #[test]
     fn beginning_on_an_empty_or_foreign_hole_fails() {
-        let (pos, _) = two_hop_setup();
+        let (pos, _) = two_hop_position();
         assert!(JumpTurn::begin(&pos, Player::ALL[0], Coord::new(0, 3)).is_none());
         assert!(JumpTurn::begin(&pos, Player::ALL[0], Coord::new(1, 0)).is_none());
     }
 
     #[test]
     fn the_preview_shows_hops_without_committing() {
-        let (pos, origin) = two_hop_setup();
+        let (pos, origin) = two_hop_position();
         let mut turn = JumpTurn::begin(&pos, Player::ALL[0], origin).unwrap();
         turn.hop(Coord::new(2, 0));
 

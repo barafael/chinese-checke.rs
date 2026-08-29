@@ -18,7 +18,7 @@ Each numbered chapter states the rules in prose and mathematics. The **laws** li
 6. [Players, pieces, and the initial position](#players) — 4 laws
 7. [Adjacent moves](#steps) — 2 laws
 8. [Jumps](#jumps) — 4 laws
-9. [Jump sequences and reachability](#jump-sequences) — 5 laws
+9. [Jump sequences and reachability](#jump-sequences) — 6 laws
 10. [Move representation and generation](#move-generation) — 4 laws
 11. [Applying a move](#applying) — 1 law
 12. [Turn order, passing, and termination](#turns) — 3 laws
@@ -30,10 +30,10 @@ Each numbered chapter states the rules in prose and mathematics. The **laws** li
 
 | Evidence | Laws |
 |---|---|
-| exhaustive | 15 |
+| exhaustive | 16 |
 | proof (Kani) | 11 |
 | property test | 15 |
-| **total** | **41** |
+| **total** | **42** |
 
 Each law records how strongly it is established:
 
@@ -503,6 +503,16 @@ $$
 $$
 
 *Evidence: property test*
+
+##### `CC-TURN-NO-NULL-MOVE`
+
+A staged turn whose piece is back at its origin cannot be committed.
+
+$$
+\text{current} = \text{origin} \implies \neg\text{commit}
+$$
+
+*Evidence: exhaustive*
 
 ## 10. Move representation and generation <a id="move-generation"></a>
 

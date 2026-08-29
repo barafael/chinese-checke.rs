@@ -48,7 +48,7 @@ use checkers_core::geometry::{Coord, all_holes, camp_of, on_board};
 use checkers_core::law::{LAWS, verify_all};
 use checkers_core::position::{MoveKind, Player, Position};
 use checkers_core::rules::{Game, Outcome, legal_moves};
-use checkers_core::turn::{JumpTurn, single_hop_destinations};
+use checkers_core::turn::{JumpTurn, single_hop_destinations, step_destinations};
 
 fn main() {
     App::new()
@@ -136,13 +136,11 @@ impl Session {
         match &self.selection {
             Selection::None => Vec::new(),
             Selection::Piece { origin } => {
+                // One piece's own steps and first hops. Filtering `legal_moves`
+                // would compute every other piece's jump closure and throw it
+                // away — about 150x the work for the same answer.
                 let pos = self.game.position();
-                let player = self.game.turn();
-                let mut out: Vec<Coord> = legal_moves(pos, player)
-                    .into_iter()
-                    .filter(|m| m.origin == *origin && m.kind == MoveKind::Step)
-                    .map(|m| m.destination)
-                    .collect();
+                let mut out = step_destinations(pos, *origin);
                 out.extend(single_hop_destinations(pos, *origin));
                 out.sort();
                 out.dedup();
@@ -330,11 +328,10 @@ fn audit(position: &Position) {
 #[derive(Component)]
 struct HoleMarker;
 
-/// A rendered piece, tagged with the hole it represents.
+/// A rendered piece. Carries no data: pieces are rebuilt from the position
+/// wholesale, so nothing needs to look up which hole an entity came from.
 #[derive(Component)]
-struct PieceMarker {
-    hole: Coord,
-}
+struct PieceMarker;
 
 /// Anything drawn on top of the board that is rebuilt whenever the selection
 /// changes: destination dots, the selection ring, and the staged jump trail.
@@ -543,7 +540,7 @@ fn sync_pieces(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
-    existing: Query<(Entity, &PieceMarker)>,
+    existing: Query<Entity, With<PieceMarker>>,
     session: Res<Session>,
 ) {
     if !session.is_changed() {
@@ -551,22 +548,15 @@ fn sync_pieces(
     }
     let position = session.display_position();
 
-    // Skip if every rendered piece still matches.
-    let rendered: Vec<Coord> = existing.iter().map(|(_, m)| m.hole).collect();
-    let occupied: Vec<Coord> = all_holes()
-        .into_iter()
-        .filter(|c| position.occupant(*c).is_some())
-        .collect();
-    if rendered.len() == occupied.len() && rendered.iter().all(|c| occupied.contains(c)) {
-        return;
-    }
-
-    for (e, _) in existing.iter() {
+    // Unconditional despawn-and-respawn. The previous early-out compared only
+    // which holes were occupied, not by whom, and only ran when the session had
+    // already changed — so it never actually skipped anything.
+    for e in existing.iter() {
         commands.entity(e).despawn();
     }
 
     let mesh = meshes.add(Circle::new(PIECE_RADIUS));
-    for c in all_holes() {
+    for &c in position.holes() {
         let Some(player) = position.occupant(c) else {
             continue;
         };
@@ -575,7 +565,7 @@ fn sync_pieces(
             Mesh2d(mesh.clone()),
             MeshMaterial2d(materials.add(player_colour(player))),
             Transform::from_xyz(p.x, p.y, 1.0),
-            PieceMarker { hole: c },
+            PieceMarker,
         ));
     }
 }
@@ -676,15 +666,15 @@ fn sync_status(session: Res<Session>, mut text: Query<&mut Text, With<StatusText
     };
 
     let staged = match &session.selection {
-        Selection::Jumping { turn } => format!(
-            "  |  staging {} hop(s){}",
-            turn.hops(),
-            if turn.can_commit() {
-                ""
-            } else {
-                " (back at start — cannot confirm)"
-            }
-        ),
+        Selection::Jumping { turn } => {
+            // Take the reason from the error itself rather than restating it, so
+            // the two cannot drift apart.
+            let why = match turn.to_move() {
+                Ok(_) => String::new(),
+                Err(e) => format!(" — {e}"),
+            };
+            format!("  |  staging {} hop(s){why}", turn.hops())
+        }
         _ => String::new(),
     };
 

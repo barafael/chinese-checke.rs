@@ -25,6 +25,19 @@ use crate::rules::{
 use crate::spec::Chapter;
 use crate::turn::{JumpTurn, single_hop_destinations};
 
+/// A tiny xorshift step, shared by the sample generators below.
+///
+/// `checkers-core` deliberately depends only on `linkme`, so it cannot borrow
+/// `checkers-model`'s `Prng` — and these generators are compiled into the library,
+/// not just its tests, since laws run via `verify_all`. One local helper is the
+/// honest middle ground.
+fn next_index(state: &mut u64, len: usize) -> usize {
+    *state ^= *state << 13;
+    *state ^= *state >> 7;
+    *state ^= *state << 17;
+    (*state % len.max(1) as u64) as usize
+}
+
 /// A deterministic sequence of positions to check invariants over: the initial
 /// position, then positions reached by playing a fixed pseudo-random game.
 ///
@@ -40,11 +53,7 @@ fn sample_positions(count: usize) -> Vec<Position> {
         if moves.is_empty() {
             continue;
         }
-        // xorshift, inlined to avoid a dependency
-        state ^= state << 13;
-        state ^= state >> 7;
-        state ^= state << 17;
-        let mv = &moves[(state % moves.len() as u64) as usize];
+        let mv = &moves[next_index(&mut state, moves.len())];
         pos = apply(&pos, mv);
         out.push(pos.clone());
     }
@@ -62,10 +71,7 @@ fn jump_scenarios() -> Vec<(Position, Coord)> {
         let mut occupied = Vec::new();
         let n = 6 + (state % 30) as usize;
         for _ in 0..n {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            let c = holes[(state % holes.len() as u64) as usize];
+            let c = holes[next_index(&mut state, holes.len())];
             if pos.is_empty_hole(c) {
                 pos.set(c, Some(Player::wrapping(occupied.len() as u8)));
                 occupied.push(c);
@@ -1235,7 +1241,8 @@ impl Law for SingleHopIsOneJump {
         };
 
         for dest in single_hop_destinations(pos, *origin) {
-            // Must be x + 2d for some direction d, with that d legal.
+            // Must be x + 2d for some direction d, with that d legal. The
+            // distance is then 2 by construction, so it needs no separate check.
             let matching = Dir::ALL
                 .iter()
                 .find(|d| origin.jump_dest(**d) == dest)
@@ -1250,14 +1257,6 @@ impl Law for SingleHopIsOneJump {
                 return Err(format!(
                     "({},{}) was offered but the jump is not legal",
                     dest.q, dest.r
-                ));
-            }
-            if origin.distance(dest) != 2 {
-                return Err(format!(
-                    "({},{}) is at distance {} from the origin, expected 2",
-                    dest.q,
-                    dest.r,
-                    origin.distance(dest)
                 ));
             }
         }
@@ -1308,13 +1307,9 @@ impl Law for StagedTurnYieldsLegalMove {
                     next.q, next.r
                 ));
             }
-            // A turn that has hopped back to its origin is deliberately NOT
-            // committable: it has taken hops but moved nowhere, which chapter 9
-            // treats as not moving at all.
+            // Turns that end at their origin are CC-TURN-NO-NULL-MOVE's concern,
+            // not this law's.
             if turn.current() == *origin {
-                if turn.to_move().is_ok() {
-                    return Err("a turn ending at its origin was committable".into());
-                }
                 continue;
             }
 
@@ -1343,3 +1338,64 @@ impl Law for StagedTurnYieldsLegalMove {
     }
 }
 register_law!(StagedTurnYieldsLegalMove, STAGED_TURN_YIELDS_LEGAL_MOVE);
+
+/// A staged turn that ends where it began cannot be committed.
+///
+/// The closure-level form of this rule already has its own law
+/// (`CC-JUMP-REVISIT`, which excludes the origin from `jump_destinations`). The
+/// staged form needs its own too, rather than being checked as a side condition
+/// inside `CC-TURN-STAGED-LEGAL`: a claim buried in another law's body is exactly
+/// the drift this registry exists to prevent.
+pub struct StagedTurnCannotBeANullMove;
+
+impl Law for StagedTurnCannotBeANullMove {
+    const ID: &'static str = "CC-TURN-NO-NULL-MOVE";
+    const STATEMENT: &'static str = r"\text{current} = \text{origin} \implies \neg\text{commit}";
+    const CHAPTER: Chapter = Chapter::JumpSequences;
+    const SUMMARY: &'static str =
+        "A staged turn whose piece is back at its origin cannot be committed.";
+    const EVIDENCE: Evidence = Evidence::Exhaustive;
+    type Subject = ();
+
+    fn holds((): &()) -> Result<(), String> {
+        // A piece with a blocker beside it can hop out and straight back, so the
+        // case is reachable rather than hypothetical.
+        let mut pos = Position::empty();
+        let origin = Coord::new(0, 0);
+        pos.set(origin, Some(Player::ALL[0]));
+        pos.set(Coord::new(1, 0), Some(Player::ALL[1]));
+
+        let Some(mut turn) = JumpTurn::begin(&pos, Player::ALL[0], origin) else {
+            return Err("could not begin a turn on an owned piece".into());
+        };
+
+        if !turn.hop(Coord::new(2, 0)) {
+            return Err("the piece could not hop over its blocker".into());
+        }
+        if !turn.can_commit() {
+            return Err("a turn one hop from its origin should be committable".into());
+        }
+
+        if !turn.hop(origin) {
+            return Err("the piece could not hop back over its blocker".into());
+        }
+        if turn.hops() != 2 {
+            return Err(format!("expected 2 hops, found {}", turn.hops()));
+        }
+        if turn.can_commit() {
+            return Err("a turn back at its origin was committable".into());
+        }
+        if turn.to_move().is_ok() {
+            return Err("to_move accepted a turn that moved nowhere".into());
+        }
+        Ok(())
+    }
+
+    fn subjects() -> Vec<()> {
+        vec![()]
+    }
+}
+register_law!(
+    StagedTurnCannotBeANullMove,
+    STAGED_TURN_CANNOT_BE_A_NULL_MOVE
+);

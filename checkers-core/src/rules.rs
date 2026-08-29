@@ -320,3 +320,17 @@ pub fn frozen_position() -> Position {
     }
     pos
 }
+
+/// A piece with two blockers in line, so single hops chain twice.
+///
+/// Exported next to [`blocked_position`] and [`frozen_position`] so tests in
+/// other crates can share one definition of this fixture rather than each
+/// rebuilding it.
+pub fn two_hop_position() -> (Position, Coord) {
+    let mut pos = Position::empty();
+    let origin = Coord::new(0, 0);
+    pos.set(origin, Some(Player::ALL[0]));
+    pos.set(Coord::new(1, 0), Some(Player::ALL[1]));
+    pos.set(Coord::new(3, 0), Some(Player::ALL[1]));
+    (pos, origin)
+}

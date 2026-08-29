@@ -57,4 +57,4 @@ pub use law::{Evidence, Law, LawInfo, Violation};
 pub use position::{Move, MoveKind, Player, Position};
 pub use rules::{Game, Outcome};
 pub use spec::Chapter;
-pub use turn::{JumpTurn, single_hop_destinations};
+pub use turn::{JumpTurn, single_hop_destinations, step_destinations};
