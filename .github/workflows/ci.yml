@@ -28,11 +28,23 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
-      # Bevy needs these to build on a bare runner.
+      # Bevy links native windowing, audio, and input on Linux. omdurman's
+      # workflow installs nothing because it only ever builds for wasm, which
+      # links none of this — so this list is not inherited from there. Without
+      # libwayland-dev the `wayland-sys` build script fails pkg-config lookup and
+      # the whole workspace stops compiling.
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libasound2-dev libudev-dev
+          sudo apt-get install -y \
+            libasound2-dev \
+            libudev-dev \
+            libwayland-dev \
+            libxkbcommon-dev \
+            libx11-dev \
+            libxcursor-dev \
+            libxi-dev \
+            libxrandr-dev
 
       - run: cargo fmt --all --check
 
@@ -68,11 +80,8 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
 
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libasound2-dev libudev-dev
-
+      # No apt packages: checkers-core has no Bevy dependency, so nothing here
+      # links native windowing.
       - name: Does the law registry build for the web yet?
         run: cargo check -p checkers-core --target wasm32-unknown-unknown
 
