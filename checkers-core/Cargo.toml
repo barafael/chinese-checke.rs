@@ -1,0 +1,14 @@
+[package]
+name = "checkers-core"
+edition.workspace = true
+version.workspace = true
+description = "Engine-free Chinese Checkers rules, with the specification's laws as Rust types"
+
+[dependencies]
+linkme.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true

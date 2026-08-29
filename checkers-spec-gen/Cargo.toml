@@ -1,0 +1,11 @@
+[package]
+name = "checkers-spec-gen"
+edition.workspace = true
+version.workspace = true
+description = "Generates the specification's law inventory from the checkers-core registry"
+
+[dependencies]
+checkers-core.workspace = true
+
+[lints]
+workspace = true

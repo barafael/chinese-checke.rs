@@ -1,0 +1,8 @@
+[build]
+# rustdoc has no native math support: it strips \(...\) and passes $$ through as
+# literal text. Injecting KaTeX's auto-render into every page's <head> is the
+# only way to get rendered math in rustdoc output.
+#
+# NOTE: this must be a rustdoc *flag*. `#![doc(html_in_header = ...)]` as a crate
+# attribute is rejected by cargo ("unknown doc attribute").
+rustdocflags = ["--html-in-header", "assets/katex-header.html"]

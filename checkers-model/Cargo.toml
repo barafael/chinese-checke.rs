@@ -1,0 +1,10 @@
+[package]
+name = "checkers-model"
+edition.workspace = true
+version.workspace = true
+description = "Naive reference implementation, used as the differential model"
+
+[dependencies]
+
+[lints]
+workspace = true
