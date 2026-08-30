@@ -1,22 +1,13 @@
 name: Deploy to GitHub Pages
 
-# BLOCKED: this workflow cannot succeed yet, and is deliberately not triggered
-# on push so it does not report a red main branch for a known reason.
-#
-# `linkme` — the distributed slice the law registry is built on — has no
-# wasm32-unknown-unknown implementation: `cargo check -p checkers-core --target
-# wasm32-unknown-unknown` fails with "distributed_slice is not implemented for
-# this platform". That is the whole workspace, not just the app, so there is
-# nothing to deploy until link-time registration is replaced on that target.
-#
-# Fixing it means giving up compile-time-guaranteed registration or making the
-# registry conditional (e.g. an inventory-style ctor on wasm, or a generated
-# const array behind a cfg). Both weaken the property that a declared law
-# cannot go unchecked, so it is a real design decision rather than a build fix.
-#
-# Kept here, runnable by hand, so the Pages/Trunk setup is ready the day the
-# registry works on wasm.
+# `linkme` has no wasm32 implementation, so web builds get their law registry
+# from the generated array in checkers-core/src/laws_generated.rs instead. That
+# file is a derivative of the native link-time collection and can go stale, so
+# this workflow refuses to deploy a board whose registry disagrees with the
+# linker — see the "law registry" step below.
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -52,11 +43,17 @@ jobs:
           curl -LsSf https://github.com/trunk-rs/trunk/releases/latest/download/trunk-x86_64-unknown-linux-gnu.tar.gz \
             | tar -xz -C ~/.cargo/bin
 
-      # Fail the deploy rather than shipping a board that cannot validate
-      # itself. `laws_are_registered` also catches a linkme slice stripped by
-      # LTO, which would otherwise leave verify_all() checking nothing.
-      - name: Verify the law registry
-        run: cargo test -p checkers-core --lib
+      # Fail the deploy rather than shipping a board that cannot validate itself.
+      #
+      # This runs natively, where `linkme` works, so it is the last point at
+      # which the generated wasm registry can be compared against the authority
+      # it was derived from. `--check-registry` catches a stale file and
+      # `laws_are_registered` catches a slice stripped by LTO; without both, the
+      # web build could come up with a short registry and still report success.
+      - name: The wasm law registry matches the linker
+        run: |
+          cargo run -p checkers-spec-gen -- --check-registry
+          cargo test -p checkers-core --lib
 
       - name: Build
         env:

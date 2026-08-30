@@ -2,10 +2,9 @@
 <!--
   Trunk entry point for the web build.
 
-  Not deployable yet: `linkme`, which backs the law registry, has no
-  wasm32-unknown-unknown implementation, so the workspace does not compile for
-  the web. See .github/workflows/deploy.yml for the details and what fixing it
-  would cost.
+  The web build gets its law registry from checkers-core/src/laws_generated.rs
+  rather than `linkme`, which has no wasm32 implementation. CI checks that file
+  against the native linker before deploying.
 -->
 <html lang="en">
 <head>

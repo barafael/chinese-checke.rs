@@ -52,11 +52,14 @@ jobs:
 
       - run: cargo test --workspace
 
-      # The generated specification must match the laws it was generated from.
-      # Without this gate the document silently drifts from the code, which is
-      # the one failure this whole design exists to prevent.
+      # Both generated artefacts must match the registry they came from. Without
+      # these gates the document and the wasm registry silently drift from the
+      # code, which is the one failure this whole design exists to prevent.
       - name: Specification is up to date
         run: cargo run -p checkers-spec-gen -- --check specs/specification.md
+
+      - name: The wasm law registry is up to date
+        run: cargo run -p checkers-spec-gen -- --check-registry
 
       # `.cargo/config.toml` already sets rustdocflags; RUSTDOCFLAGS *replaces*
       # that rather than adding to it, so the header has to be repeated here.
@@ -65,14 +68,12 @@ jobs:
         env:
           RUSTDOCFLAGS: --html-in-header assets/katex-header.html -D warnings
 
-  # Tracks the GitHub Pages blocker (see deploy.yml): `linkme` has no wasm32
-  # implementation, so the whole workspace fails to build for the web. This job
-  # is expected to fail today; it exists so that when the registry gains wasm
-  # support — or is replaced — CI says so instead of the knowledge being lost in
-  # a comment.
+  # The web target is a real gate now that the generated registry stands in for
+  # `linkme`, which has no wasm32 implementation. Checks the whole app, not just
+  # the core: `wasm32` is the only target where the generated array is compiled
+  # at all, so a malformed one is invisible everywhere else.
   wasm:
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 
@@ -80,10 +81,18 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
 
-      # No apt packages: checkers-core has no Bevy dependency, so nothing here
-      # links native windowing.
-      - name: Does the law registry build for the web yet?
-        run: cargo check -p checkers-core --target wasm32-unknown-unknown
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-wasm-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-wasm-
+
+      # No apt packages: nothing in a wasm build links native windowing.
+      - name: Build for the web
+        run: cargo check -p checkers-bevy --target wasm32-unknown-unknown
 
   # Kani cannot run on Windows and is slow, so the geometry proofs are checked
   # here rather than in the pre-commit hook. Separate job: it is much slower

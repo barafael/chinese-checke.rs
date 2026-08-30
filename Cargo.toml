@@ -20,6 +20,19 @@ bevy_matchbox = { git = "https://github.com/barafael/matchbox.git" }
 postcard = { version = "1", features = ["alloc"] }
 serde = { version = "1", features = ["derive"] }
 
+# The WebRTC dependency tree that came with multiplayer pushed the debug build
+# past a hard MSVC limit: `LNK1140: limit exceeded for program database`, which
+# fails the link of `checkers-bevy` outright and so blocks the whole test suite
+# on Windows.
+#
+# `debug = "line-tables-only"` keeps what is actually used day to day — file and
+# line numbers in panics and backtraces — while dropping the type and variable
+# descriptions that make the PDB enormous. Stepping in a debugger loses variable
+# inspection; if you need that, build the one crate you are debugging with
+# `-C debuginfo=2` rather than restoring it here for 400+ dependencies.
+[profile.dev]
+debug = "line-tables-only"
+
 [profile.release]
 codegen-units = 1
 # LTO is off, and for this workspace that is a correctness matter rather than a

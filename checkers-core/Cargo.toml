@@ -4,7 +4,10 @@ edition.workspace = true
 version.workspace = true
 description = "Engine-free Chinese Checkers rules, with the specification's laws as Rust types"
 
-[dependencies]
+# `linkme` provides the law registry by link-time collection, which it does not
+# implement for wasm32. Web builds use the generated array in
+# `src/laws_generated.rs` instead, so they do not need the crate at all.
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
 linkme.workspace = true
 
 [dev-dependencies]

@@ -31,6 +31,8 @@
 
 use core::fmt::Debug;
 
+// wasm has no distributed slice; the registry is a generated array there.
+#[cfg(not(target_family = "wasm"))]
 use linkme::distributed_slice;
 
 use crate::spec::Chapter;
@@ -106,12 +108,48 @@ impl core::fmt::Display for Violation {
 
 impl core::error::Error for Violation {}
 
-/// Every law registers itself here at link time. Nothing maintains this by hand.
+/// Every law, however this target manages to collect them.
 ///
-/// Iterate it to check every law ([`crate::law::verify_all`]) or to generate the
+/// Iterate it to check every law ([`verify_all`]) or to generate the
 /// specification document.
+///
+/// # Two mechanisms, one authority
+///
+/// On native targets this is a `linkme` distributed slice: each
+/// [`crate::register_law!`] places its record in a named linker section and the
+/// linker concatenates them. Registration is therefore *unforgettable* — the
+/// law is collected because it exists, and there is no list to update.
+///
+/// `linkme` has no `wasm32` implementation (WebAssembly has no
+/// linker-defined section-boundary symbols to take the address of), so web
+/// builds use [`generated::LAWS`] instead — an array emitted by
+/// `checkers-spec-gen` from the native build, where the linker *did* do the
+/// collecting.
+///
+/// That makes native the authority and the generated file a derivative. The
+/// derivative can go stale, so two things guard it:
+///
+/// - `cargo run -p checkers-spec-gen -- --check-registry` fails if the file
+///   disagrees with the linker. CI runs it, and so does the deploy workflow
+///   before it builds.
+/// - `tests::the_generated_registry_matches_the_linker` compares law
+///   *identities*, not just counts, on every native `cargo test`.
+///
+/// This is weaker than link-time collection — a forgotten regeneration is
+/// possible where a forgotten registration was not — but it is *mechanically
+/// checked* rather than trusted, which is the most that can be had while
+/// wasm lacks the primitive.
+#[cfg(not(target_family = "wasm"))]
 #[distributed_slice]
 pub static LAWS: [LawInfo];
+
+#[cfg(target_family = "wasm")]
+pub use generated::LAWS;
+
+#[cfg(target_family = "wasm")]
+mod generated {
+    include!("laws_generated.rs");
+}
 
 /// A normative claim from the specification.
 ///
@@ -156,34 +194,60 @@ pub trait Law {
     }
 }
 
-/// Register a [`Law`] in the [`LAWS`] slice.
+/// Build a [`LawInfo`] from a [`Law`] type.
 ///
-/// The second argument is the name of the generated static; it only needs to be
-/// unique within its module.
+/// Used by [`crate::register_law!`] and by the generated wasm registry, so the
+/// two cannot describe a law differently.
 #[macro_export]
-macro_rules! register_law {
-    ($law:ty, $slot:ident) => {
-        #[$crate::law::reexport::distributed_slice($crate::law::LAWS)]
-        static $slot: $crate::law::LawInfo = $crate::law::LawInfo {
+macro_rules! law_info {
+    ($law:ty) => {
+        $crate::law::LawInfo {
             id: <$law as $crate::law::Law>::ID,
             statement: <$law as $crate::law::Law>::STATEMENT,
             chapter: <$law as $crate::law::Law>::CHAPTER,
             summary: <$law as $crate::law::Law>::SUMMARY,
             evidence: <$law as $crate::law::Law>::EVIDENCE,
             verify: || <$law as $crate::law::Law>::verify(),
-        };
+        }
     };
+}
+
+/// Register a [`Law`] in the [`LAWS`] slice.
+///
+/// The second argument names the generated static; it only needs to be unique
+/// within its module.
+///
+/// On `wasm32` this expands to nothing: `linkme` cannot collect anything there,
+/// so the entries come from the generated array instead (see [`LAWS`]). The
+/// invocation is still what the generator reads to *find* the law, so it stays
+/// in the source on every target.
+#[cfg(not(target_family = "wasm"))]
+#[macro_export]
+macro_rules! register_law {
+    ($law:ty, $slot:ident) => {
+        #[$crate::law::reexport::distributed_slice($crate::law::LAWS)]
+        static $slot: $crate::law::LawInfo = $crate::law_info!($law);
+    };
+}
+
+#[cfg(target_family = "wasm")]
+#[macro_export]
+macro_rules! register_law {
+    ($law:ty, $slot:ident) => {};
 }
 
 /// Re-exports for [`crate::register_law!`]; not part of the public API.
 #[doc(hidden)]
 pub mod reexport {
+    #[cfg(not(target_family = "wasm"))]
     pub use linkme::distributed_slice;
 }
 
 /// Check every registered law. Used by `tests/laws.rs`.
 pub fn verify_all() -> Result<(), Violation> {
-    for law in LAWS {
+    // `.iter()` rather than `for law in LAWS`: on wasm this is an array, which
+    // would be moved out of a static.
+    for law in LAWS.iter() {
         (law.verify)()?;
     }
     Ok(())
@@ -266,6 +330,66 @@ mod tests {
             ids.len(),
             before,
             "duplicate law IDs: two laws would collide in the generated document"
+        );
+    }
+
+    /// The generated wasm registry lists exactly the laws the linker collected.
+    ///
+    /// On native targets [`LAWS`] is authoritative; the generated array is a
+    /// derivative that the web build depends on. A derivative can go stale,
+    /// which is precisely what link-time collection used to make impossible, so
+    /// the staleness has to be caught somewhere.
+    ///
+    /// This compares the type names referenced by the generated file with the
+    /// law types the linker knows about. Adding a law and forgetting
+    /// `--emit-registry` fails here, on the *native* test run, rather than
+    /// silently shipping a short registry to the web.
+    ///
+    /// Only runs on native: on wasm the generated file *is* `LAWS`, so comparing
+    /// them would be a tautology.
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn the_generated_registry_matches_the_linker() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/laws_generated.rs");
+        let source = std::fs::read_to_string(path)
+            .unwrap_or_else(|e| panic!("cannot read the generated registry at {path}: {e}"));
+
+        let entries = source
+            .lines()
+            .filter(|l| l.trim().starts_with("crate::law_info!("))
+            .count();
+
+        // The generator records the IDs the linker gave it, so identities can be
+        // compared and not just counts: a law swapped for another leaves the
+        // count untouched.
+        let recorded: Vec<&str> = source
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("// law-ids: "))
+            .unwrap_or_default()
+            .split(',')
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        let mut live: Vec<&str> = LAWS.iter().map(|l| l.id).collect();
+        live.sort_unstable();
+
+        assert!(
+            entries > 0,
+            "the generated registry has no entries; run \
+             `cargo run -p checkers-spec-gen -- --emit-registry`"
+        );
+        assert_eq!(
+            entries,
+            LAWS.len(),
+            "the generated registry lists {entries} law(s) but the linker \
+             collected {}. Regenerate with \
+             `cargo run -p checkers-spec-gen -- --emit-registry`.",
+            LAWS.len()
+        );
+        assert_eq!(
+            recorded, live,
+            "the generated registry is for a different set of laws. Regenerate \
+             with `cargo run -p checkers-spec-gen -- --emit-registry`."
         );
     }
 

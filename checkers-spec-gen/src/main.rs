@@ -11,13 +11,22 @@
 //! beside its code; this is the right view for reading the specification as a
 //! specification.
 //!
+//! It also generates the wasm law registry, for the same reason: the registry
+//! and the document are both views of one link-time-collected truth. See
+//! [`registry`].
+//!
 //! ```text
 //! cargo run -p checkers-spec-gen -- specs/specification.md
 //! cargo run -p checkers-spec-gen -- --check specs/specification.md
+//! cargo run -p checkers-spec-gen -- --emit-registry
+//! cargo run -p checkers-spec-gen -- --check-registry
 //! ```
+
+mod registry;
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use checkers_core::law::{Evidence, LawInfo, all_in_reading_order, for_chapter};
@@ -158,13 +167,56 @@ fn render() -> String {
     out
 }
 
+/// The workspace root, derived from this crate's manifest directory so the tool
+/// works regardless of the caller's working directory.
+fn workspace_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("the crate directory has a parent")
+        .to_path_buf()
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
+
+    // Registry modes take no path: the destination is fixed, because the file is
+    // `include!`d from a known location in checkers-core.
+    match args.as_slice() {
+        [flag] if flag == "--emit-registry" => {
+            return match registry::emit(&workspace_root()) {
+                Ok(n) => {
+                    println!("wrote {}: {n} laws", registry::GENERATED_PATH);
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("{e}");
+                    ExitCode::FAILURE
+                }
+            };
+        }
+        [flag] if flag == "--check-registry" => {
+            return match registry::check(&workspace_root()) {
+                Ok(n) => {
+                    println!("{} is up to date: {n} laws", registry::GENERATED_PATH);
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("{e}");
+                    ExitCode::FAILURE
+                }
+            };
+        }
+        _ => {}
+    }
+
     let (check_only, path) = match args.as_slice() {
         [flag, path] if flag == "--check" => (true, path.clone()),
         [path] => (false, path.clone()),
         _ => {
-            eprintln!("usage: checkers-spec-gen [--check] <output.md>");
+            eprintln!(
+                "usage: checkers-spec-gen [--check] <output.md>\n       \
+                 checkers-spec-gen --emit-registry | --check-registry"
+            );
             return ExitCode::from(2);
         }
     };
