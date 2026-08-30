@@ -1,63 +1,35 @@
 //! Headless tests for the front-end's logic.
 //!
-//! No window and no rendering: these drive the same rules the app drives, and
-//! check the coordinate mapping that turns a click into a hole. Anything that
-//! needs a GPU is out of scope, but the parts that can be wrong *silently* —
-//! picking the wrong hole, offering an illegal destination — are covered here.
+//! No window and no rendering: these drive the same rules the app drives. The
+//! coordinate mapping itself is covered by `board_view`'s unit tests — the
+//! library half of this crate makes the real functions importable, so no copy
+//! is kept here. What remains is what those do not cover: that the parts which
+//! can fail *silently* — offering an illegal destination, playing a move the
+//! rules did not offer — stay correct over whole games.
 
+use bevy::math::Vec2;
 use checkers_core::audit::audit_position;
 use checkers_core::geometry::{Coord, all_holes, on_board};
 use checkers_core::law::verify_all;
 use checkers_core::position::{MoveKind, Player, Position};
 use checkers_core::rules::{Game, Outcome, jump_destinations, legal_moves};
 
-/// Mirrors `board_view::coord_to_world`. Duplicated because the binary's modules
-/// are not importable from an integration test; the round-trip properties below
-/// are what matter, and `board_view`'s own unit tests cover the real functions.
-fn coord_to_world(c: Coord) -> (f32, f32) {
-    const SPACING: f32 = 34.0;
-    let scale = SPACING / 3.0_f32.sqrt();
-    (
-        scale * 3.0_f32.sqrt() * (c.q as f32 + c.r as f32 / 2.0),
-        -scale * 1.5 * c.r as f32,
-    )
-}
-
-fn world_to_coord(x: f32, y: f32) -> Coord {
-    const SPACING: f32 = 34.0;
-    let scale = SPACING / 3.0_f32.sqrt();
-    let qf = (x / (scale * 3.0_f32.sqrt())) - (-y / (scale * 1.5)) / 2.0;
-    let rf = -y / (scale * 1.5);
-    let sf = -qf - rf;
-
-    let (mut q, mut r, s) = (qf.round(), rf.round(), sf.round());
-    let (dq, dr, ds) = ((q - qf).abs(), (r - rf).abs(), (s - sf).abs());
-    if dq > dr && dq > ds {
-        q = -r - s;
-    } else if dr > ds {
-        r = -q - s;
-    }
-    Coord::new(q as i32, r as i32)
-}
-
-#[test]
-fn every_hole_round_trips_through_screen_space() {
-    for c in all_holes() {
-        let (x, y) = coord_to_world(c);
-        assert_eq!(world_to_coord(x, y), c, "{c:?} did not round-trip");
-    }
-}
-
 /// A click anywhere in a hole's neighbourhood resolves to that hole.
 #[test]
 fn clicks_near_a_hole_centre_resolve_to_it() {
     for c in all_holes() {
-        let (x, y) = coord_to_world(c);
-        for (dx, dy) in [(8.0, 0.0), (-8.0, 0.0), (0.0, 8.0), (0.0, -8.0), (5.0, 5.0)] {
+        let centre = checkers_bevy::board_view::coord_to_world(c);
+        for offset in [
+            Vec2::X * 8.0,
+            -Vec2::X * 8.0,
+            Vec2::Y * 8.0,
+            -Vec2::Y * 8.0,
+            Vec2::new(5.0, 5.0),
+        ] {
             assert_eq!(
-                world_to_coord(x + dx, y + dy),
+                checkers_bevy::board_view::world_to_coord(centre + offset),
                 c,
-                "{c:?} offset by ({dx},{dy}) resolved elsewhere"
+                "{c:?} offset by {offset:?} resolved elsewhere"
             );
         }
     }
