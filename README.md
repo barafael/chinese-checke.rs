@@ -55,7 +55,7 @@ one place, and that the strongest claims are additionally Kani-proven.
 | Crate | Role |
 |---|---|
 | `checkers-core` | Engine-free rules. Laws, geometry, Kani proofs. |
-| `checkers-model` | Naive reference implementation, for differential testing. |
+| `checkers-model` | Naive reference implementation, played in lockstep against `checkers-core` by its `tests/differential.rs`. |
 | `checkers-spec-gen` | Generates `specs/` from the law registry. |
 | `checkers-bevy` | Playable front-end. Renders and takes input; holds no rules. |
 | `specs/` | **Generated.** Do not edit; regenerate instead. |

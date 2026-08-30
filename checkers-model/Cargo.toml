@@ -2,9 +2,12 @@
 name = "checkers-model"
 edition.workspace = true
 version.workspace = true
-description = "Naive reference implementation, used as the differential model"
+description = "Naive reference implementation, differentially tested against checkers-core"
 
 [dependencies]
+
+[dev-dependencies]
+checkers-core.workspace = true
 
 [lints]
 workspace = true

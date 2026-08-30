@@ -1,10 +1,13 @@
 //! Naive reference implementation of star-shaped (six-player) Chinese Checkers.
 //!
-//! **Prototype.** This is the workspace's *differential model*: a deliberately
-//! simple, obviously-correct implementation that an optimised engine can be
-//! tested against. It is not tuned, not `no_std`, and uses `HashMap`/`HashSet`
-//! throughout where a real engine would use a packed 121-cell array and
-//! bitboards.
+//! **Differential model.** This is the workspace's independent oracle: a
+//! deliberately simple, obviously-correct implementation that is played in
+//! lockstep against `checkers-core` by `tests/differential.rs`, which compares
+//! geometry, occupancy, legal move sets, jump closures, win flags, and
+//! outcomes after every ply. It shares no code with `checkers-core` — not even
+//! the PRNG — so agreement is evidence rather than tautology. It is not tuned
+//! and uses `HashMap`/`HashSet` throughout where a real engine would use a
+//! packed 121-cell array and bitboards.
 //!
 //! Normative claims live in `checkers-core` as registered `Law` impls; cite law
 //! IDs rather than section numbers.
