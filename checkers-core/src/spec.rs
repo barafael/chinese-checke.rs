@@ -12,8 +12,6 @@
 //! - renumbering is impossible, because there are no numbers to get wrong;
 //! - the generator can order and group laws deterministically.
 
-use core::cmp::Ordering;
-
 /// A chapter of the specification, in reading order.
 ///
 /// The `repr(u8)` discriminants *are* the reading order: keep the declaration
@@ -372,11 +370,6 @@ impl Chapter {
             }
         }
     }
-}
-
-/// Order chapters by reading position rather than by name.
-pub fn by_reading_order(a: Chapter, b: Chapter) -> Ordering {
-    a.number().cmp(&b.number())
 }
 
 #[cfg(test)]
