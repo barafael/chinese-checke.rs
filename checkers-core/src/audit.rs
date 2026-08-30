@@ -8,21 +8,23 @@
 //! [`audit_position`] instead applies the position invariants to one given
 //! position. It is O(holes) and safe to call on every state change, which is what
 //! a front-end needs in order to fail loudly on a corrupted board.
+//!
+//! Only the checks that can actually fire live here. "At most one piece per
+//! hole" and "no piece off the board" are structural: a [`Position`] is a map
+//! from board holes to occupants, and off-board writes panic in
+//! [`Position::set`]. Occupied and empty counts are arithmetic corollaries of
+//! the six per-player counts. Adding checks for those would be decoration, not
+//! validation.
 
-use crate::geometry::all_holes;
-use crate::position::{HOLES, PIECES_PER_PLAYER, PLAYERS, Player, Position};
+use crate::position::{HOLES, PIECES_PER_PLAYER, Player, Position};
 
 /// A position invariant that was violated.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PositionFault {
     /// A player owns the wrong number of pieces.
     PieceCount { player: u8, found: usize },
-    /// The number of occupied holes is wrong.
-    OccupiedCount { found: usize },
-    /// The number of empty holes is wrong.
-    EmptyCount { found: usize },
-    /// A piece sits somewhere that is not a board hole.
-    OffBoard,
+    /// The position is not backed by the 121-hole board.
+    HoleTable { found: usize },
 }
 
 impl core::fmt::Display for PositionFault {
@@ -33,19 +35,11 @@ impl core::fmt::Display for PositionFault {
                 "player {player} owns {found} pieces, expected {PIECES_PER_PLAYER} \
                  (law CC-POS-PIECES)"
             ),
-            PositionFault::OccupiedCount { found } => write!(
+            PositionFault::HoleTable { found } => write!(
                 f,
-                "{found} holes occupied, expected {} (law CC-POS-OCCUPANCY)",
-                PLAYERS * PIECES_PER_PLAYER
+                "the hole table has {found} entries, expected {HOLES} \
+                 (law CC-GEO-CARDINALITY)"
             ),
-            PositionFault::EmptyCount { found } => write!(
-                f,
-                "{found} holes empty, expected {} (law CC-POS-OCCUPANCY)",
-                HOLES - PLAYERS * PIECES_PER_PLAYER
-            ),
-            PositionFault::OffBoard => {
-                write!(f, "a piece is not on a board hole (law CC-MOVE-ONBOARD)")
-            }
         }
     }
 }
@@ -57,8 +51,6 @@ impl core::error::Error for PositionFault {}
 /// Linear in the number of holes, so callers may run it on every state change.
 /// Use this in a front-end; use [`crate::law::verify_all`] in tests.
 pub fn audit_position(pos: &Position) -> Result<(), PositionFault> {
-    let mut occupied = 0;
-
     for player in Player::ALL {
         let n = pos.count_of(player);
         if n != PIECES_PER_PLAYER {
@@ -67,20 +59,12 @@ pub fn audit_position(pos: &Position) -> Result<(), PositionFault> {
                 found: n,
             });
         }
-        occupied += n;
     }
 
-    if occupied != PLAYERS * PIECES_PER_PLAYER {
-        return Err(PositionFault::OccupiedCount { found: occupied });
-    }
-
-    let empty = pos.empty_count();
-    if empty != HOLES - PLAYERS * PIECES_PER_PLAYER {
-        return Err(PositionFault::EmptyCount { found: empty });
-    }
-
-    if pos.holes().len() != HOLES || all_holes().len() != HOLES {
-        return Err(PositionFault::OffBoard);
+    if pos.holes().len() != HOLES {
+        return Err(PositionFault::HoleTable {
+            found: pos.holes().len(),
+        });
     }
 
     Ok(())
@@ -89,7 +73,7 @@ pub fn audit_position(pos: &Position) -> Result<(), PositionFault> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::geometry::Coord;
+    use crate::position::PLAYERS;
     use crate::rules::{apply, legal_moves};
 
     #[test]
@@ -167,11 +151,5 @@ mod tests {
             elapsed.as_millis() < 2000,
             "1000 audits took {elapsed:?}, too slow for per-move use"
         );
-    }
-
-    #[test]
-    fn off_board_holes_are_not_board_holes() {
-        // Sanity: the audit's hole-count check is meaningful.
-        assert!(!crate::geometry::on_board(Coord::new(9, 9)));
     }
 }
