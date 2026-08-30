@@ -1,11 +1,12 @@
 //! Board geometry: coordinates, directions, rotation, and the star.
 //!
-//! Everything here is written **loop-free** so that the Kani harnesses at the
-//! bottom of this file can prove the geometry laws over the whole domain. A
-//! symbolic loop bound makes bounded model checking diverge — an early version
-//! of [`rotate_n`] written as `(0..n).fold(..)` sent Kani unwinding past 6900
-//! iterations before it was killed. The `match` below is the price of
-//! provability, and it is a cheap one.
+//! Everything here is written so that the Kani harnesses at the bottom of this
+//! file can prove the geometry laws over the whole domain. What bounded model
+//! checking cannot tolerate is a **symbolic** loop bound: an early version of
+//! [`rotate_n`] written as `(0..n).fold(..)` sent Kani unwinding past 6900
+//! iterations before it was killed, so it is a loop-free `match` over `n % 6`.
+//! Loops over a *fixed* bound are fine — Kani unrolls them, and the proofs
+//! below use some — so [`camp_of`] may loop over the six camps.
 //!
 //! Laws proven about this module: see [`crate::laws::geometry`].
 
@@ -47,15 +48,14 @@ impl Coord {
 
     /// Hex distance.
     pub const fn distance(self, other: Self) -> i32 {
-        let dq = (self.q - other.q).abs();
-        let dr = (self.r - other.r).abs();
-        let ds = (self.s() - other.s()).abs();
-        if dq >= dr && dq >= ds {
-            dq
-        } else if dr >= ds {
-            dr
+        let (dq, dr) = (self.q - other.q, self.r - other.r);
+        let (aq, ar, as_) = (dq.abs(), dr.abs(), (dq + dr).abs());
+        if aq >= ar && aq >= as_ {
+            aq
+        } else if ar >= as_ {
+            ar
         } else {
-            ds
+            as_
         }
     }
 }
@@ -190,22 +190,18 @@ pub const fn on_board(c: Coord) -> bool {
 }
 
 /// Which camp contains `c`, if any.
+///
+/// A fixed-bound loop is const and Kani-friendly (see the module notes); the
+/// six-way chain it replaces was pure repetition.
 pub const fn camp_of(c: Coord) -> Option<u32> {
-    if in_camp(c, 0) {
-        Some(0)
-    } else if in_camp(c, 1) {
-        Some(1)
-    } else if in_camp(c, 2) {
-        Some(2)
-    } else if in_camp(c, 3) {
-        Some(3)
-    } else if in_camp(c, 4) {
-        Some(4)
-    } else if in_camp(c, 5) {
-        Some(5)
-    } else {
-        None
+    let mut i: u32 = 0;
+    while i < 6 {
+        if in_camp(c, i) {
+            return Some(i);
+        }
+        i += 1;
     }
+    None
 }
 
 /// Coordinates outside this bound cannot be on the board, so proofs and

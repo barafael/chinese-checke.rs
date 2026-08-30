@@ -8,6 +8,28 @@
 
 use crate::geometry::{Coord, Dir, all_holes, in_camp, on_board};
 
+/// The holes of each camp, computed once on first use.
+///
+/// [`Player::start_camp`] and [`Position::has_won`] run on every committed
+/// move and every law sample; deriving them from [`all_holes`] per call would
+/// re-enumerate the bounding box each time.
+fn camp_holes(camp: usize) -> &'static [Coord] {
+    static CAMPS: std::sync::OnceLock<Vec<Vec<Coord>>> = std::sync::OnceLock::new();
+    CAMPS
+        .get_or_init(|| {
+            (0..PLAYERS)
+                .map(|i| {
+                    all_holes()
+                        .into_iter()
+                        .filter(|c| in_camp(*c, i as u32))
+                        .collect()
+                })
+                .collect()
+        })
+        .get(camp % PLAYERS)
+        .expect("camp index is taken modulo PLAYERS")
+}
+
 /// Number of players, and equally the number of camps.
 pub const PLAYERS: usize = 6;
 /// Pieces per player, and equally the size of a camp.
@@ -61,15 +83,12 @@ impl Player {
 
     /// Holes of this player's starting camp.
     pub fn start_camp(self) -> Vec<Coord> {
-        all_holes()
-            .into_iter()
-            .filter(|c| in_camp(*c, self.0 as u32))
-            .collect()
+        camp_holes(self.index() as usize).to_vec()
     }
 
     /// Holes of this player's target camp, $O_i = C_{(i+3) \bmod 6}$.
     pub fn target_camp(self) -> Vec<Coord> {
-        self.opposite().start_camp()
+        camp_holes(self.opposite().index() as usize).to_vec()
     }
 }
 
@@ -186,10 +205,9 @@ impl Position {
 
     /// Has `player` occupied every hole of their target camp? (chapter 13)
     pub fn has_won(&self, player: Player) -> bool {
-        player
-            .target_camp()
-            .into_iter()
-            .all(|c| self.occupant(c) == Some(player))
+        camp_holes(player.opposite().index() as usize)
+            .iter()
+            .all(|&c| self.occupant(c) == Some(player))
     }
 }
 
