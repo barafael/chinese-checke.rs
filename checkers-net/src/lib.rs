@@ -47,7 +47,8 @@ use serde::{Deserialize, Serialize};
 ///   not control. Only peer-introduction traffic crosses it — game moves travel
 ///   peer-to-peer once WebRTC connects — but the connection itself is real.
 /// - Room names share that server's namespace, so the default room
-///   (`"checkers"`) could collide with anyone else using it.
+///   ([`RoomId::DEFAULT`]) could collide with anyone else using it. The lobby
+///   lets the player pick a different one.
 ///
 /// Point `MATCHBOX_SERVER` at your own `matchbox_server` for anything beyond
 /// local testing.
@@ -196,6 +197,24 @@ pub struct NetState {
 }
 
 impl NetState {
+    /// Forget everything tied to the old room, keeping only this peer's name.
+    ///
+    /// Every other field is per-room and wrong the moment the room changes: the
+    /// peer list and `my_id` come from that socket, `is_host` was computed from
+    /// those peers, the seats were assigned by that host, and the sequence
+    /// counters number that room's moves. Carrying any of them over means
+    /// arriving in a new room already believing you are the host of it, or
+    /// dropping its first moves as duplicates.
+    ///
+    /// The name survives because it identifies the player, not the session.
+    pub fn leave_room(&mut self) {
+        let name = std::mem::take(&mut self.name);
+        *self = Self {
+            name,
+            ..Self::default()
+        };
+    }
+
     /// Am I the sequencing authority? True for the host, and for a solo peer so
     /// that a single player can start before anyone else joins.
     pub fn sequences(&self) -> bool {
@@ -220,8 +239,39 @@ impl NetState {
     }
 }
 
+/// Why a room name was refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoomIdError {
+    Empty,
+    TooLong {
+        len: usize,
+    },
+    /// The offending character, so the message can name it rather than saying
+    /// "invalid".
+    BadChar(char),
+}
+
+impl core::fmt::Display for RoomIdError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            RoomIdError::Empty => write!(f, "a room name cannot be empty"),
+            RoomIdError::TooLong { len } => write!(
+                f,
+                "a room name may be at most {} characters, got {len}",
+                RoomId::MAX_LEN
+            ),
+            RoomIdError::BadChar(c) => write!(
+                f,
+                "'{c}' is not allowed in a room name; use letters, digits, '-' or '_'"
+            ),
+        }
+    }
+}
+
+impl core::error::Error for RoomIdError {}
+
 /// The room to join. Peers sharing a room id find each other.
-#[derive(Resource, Clone)]
+#[derive(Resource, Clone, Debug, PartialEq, Eq)]
 pub struct RoomId(pub String);
 
 impl Default for RoomId {
@@ -231,7 +281,45 @@ impl Default for RoomId {
         // two unrelated peers joined, this build lost the host election, and it
         // sat in the lobby forever waiting for a `Start` that those peers — a
         // different game entirely — were never going to send.
-        Self("chinese-checkers-rs-v1".into())
+        Self(Self::DEFAULT.into())
+    }
+}
+
+impl RoomId {
+    pub const DEFAULT: &'static str = "chinese-checkers-rs-v1";
+
+    /// Long enough for a descriptive name, short enough to type and to read
+    /// back to someone over the phone.
+    pub const MAX_LEN: usize = 40;
+
+    /// Validate a room name typed by the player.
+    ///
+    /// The name is interpolated into the signaling URL's path, so it is
+    /// restricted to characters that need no escaping: letters, digits, `-` and
+    /// `_`. That rules out `/`, which would otherwise let a typo silently
+    /// redirect the socket to a different path, and whitespace, which is
+    /// invisible in a name two people are trying to match.
+    ///
+    /// ASCII-only, deliberately: the point of a room name here is that two
+    /// people can agree on it out of band and type it identically, and
+    /// non-ASCII invites homoglyph and normalisation mismatches that look like
+    /// the network being broken.
+    pub fn parse(name: &str) -> Result<Self, RoomIdError> {
+        if name.is_empty() {
+            return Err(RoomIdError::Empty);
+        }
+        if name.chars().count() > Self::MAX_LEN {
+            return Err(RoomIdError::TooLong {
+                len: name.chars().count(),
+            });
+        }
+        if let Some(c) = name
+            .chars()
+            .find(|c| !(c.is_ascii_alphanumeric() || *c == '-' || *c == '_'))
+        {
+            return Err(RoomIdError::BadChar(c));
+        }
+        Ok(Self(name.to_string()))
     }
 }
 
@@ -366,5 +454,120 @@ mod tests {
     fn my_player_is_none_until_the_host_assigns_a_seat() {
         let net = NetState::default();
         assert!(net.my_player().is_none(), "no id and no seats yet");
+    }
+}
+
+#[cfg(test)]
+mod room_tests {
+    use super::*;
+
+    #[test]
+    fn the_default_room_is_valid() {
+        assert_eq!(
+            RoomId::parse(RoomId::DEFAULT),
+            Ok(RoomId(RoomId::DEFAULT.into())),
+            "the default must survive its own validator"
+        );
+        assert_eq!(RoomId::default().0, RoomId::DEFAULT);
+    }
+
+    #[test]
+    fn ordinary_names_are_accepted() {
+        for name in ["a", "game", "Room_7", "my-game-2", "ABC123"] {
+            assert!(RoomId::parse(name).is_ok(), "{name} should be accepted");
+        }
+    }
+
+    #[test]
+    fn an_empty_name_is_refused() {
+        assert_eq!(RoomId::parse(""), Err(RoomIdError::Empty));
+    }
+
+    #[test]
+    fn an_overlong_name_is_refused() {
+        let long = "a".repeat(RoomId::MAX_LEN + 1);
+        assert_eq!(
+            RoomId::parse(&long),
+            Err(RoomIdError::TooLong {
+                len: RoomId::MAX_LEN + 1
+            })
+        );
+        // The boundary itself is allowed.
+        assert!(RoomId::parse(&"a".repeat(RoomId::MAX_LEN)).is_ok());
+    }
+
+    /// A slash would redirect the socket to a different URL path, and
+    /// whitespace is invisible in a name two people are trying to match. Both
+    /// must be refused rather than silently reinterpreted.
+    #[test]
+    fn characters_that_would_change_the_url_are_refused() {
+        for (name, bad) in [
+            ("a/b", '/'),
+            ("a b", ' '),
+            ("a?b", '?'),
+            ("a#b", '#'),
+            ("a:b", ':'),
+            ("a.b", '.'),
+            ("../evil", '.'),
+        ] {
+            assert_eq!(
+                RoomId::parse(name),
+                Err(RoomIdError::BadChar(bad)),
+                "{name} must be refused"
+            );
+        }
+    }
+
+    /// Non-ASCII invites homoglyph and normalisation mismatches, which present
+    /// as two peers in "the same" room never seeing each other.
+    #[test]
+    fn non_ascii_is_refused() {
+        assert_eq!(RoomId::parse("café"), Err(RoomIdError::BadChar('é')));
+        assert_eq!(RoomId::parse("рум"), Err(RoomIdError::BadChar('р')));
+    }
+
+    /// Every refusal must name the problem, since the message is shown to the
+    /// player as the only explanation of why nothing happened.
+    #[test]
+    fn every_error_explains_itself() {
+        assert!(RoomIdError::Empty.to_string().contains("empty"));
+
+        let long = RoomIdError::TooLong { len: 99 }.to_string();
+        assert!(long.contains("99"), "{long}");
+        assert!(long.contains(&RoomId::MAX_LEN.to_string()), "{long}");
+
+        let bad = RoomIdError::BadChar('/').to_string();
+        assert!(bad.contains('/'), "must name the character: {bad}");
+    }
+
+    /// Leaving a room must not carry that room's identity into the next one.
+    #[test]
+    fn leaving_a_room_forgets_everything_but_the_name() {
+        let mut net = NetState {
+            is_host: true,
+            next_seq: 12,
+            last_applied_seq: Some(11),
+            name: "ada".into(),
+            status: "stale".into(),
+            seats: vec![Seat {
+                peer: "p".into(),
+                name: "p".into(),
+                player: Some(0),
+                ready: true,
+            }],
+            ..NetState::default()
+        };
+
+        net.leave_room();
+
+        assert_eq!(net.name, "ada", "the player's name is not per-room");
+        assert!(!net.is_host, "host status belongs to the old room");
+        assert!(net.seats.is_empty(), "seats were assigned by the old host");
+        assert!(net.peers.is_empty());
+        assert_eq!(net.my_id, None, "the id came from the old socket");
+        assert_eq!(net.next_seq, 0);
+        assert_eq!(net.last_applied_seq, None, "or the first move looks stale");
+        assert!(net.greeted.is_empty());
+        assert!(net.status.is_empty());
     }
 }

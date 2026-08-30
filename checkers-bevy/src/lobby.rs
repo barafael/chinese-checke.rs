@@ -9,6 +9,13 @@
 //! a hypothetical either: the buttons were once laid out below the bottom of
 //! the window, behind the taskbar, and so never drawn at all.
 //!
+//! # Choosing the room
+//!
+//! `R` opens the room field; Enter joins, Esc cancels. Changing the room
+//! **reopens the socket**, because the room is part of the signaling URL — see
+//! [`edit_room`]. Editing is modal, and every other key is suppressed while it
+//! holds the keyboard, or typing a name containing `s` would start a game.
+//!
 //! # Choosing the seating
 //!
 //! `2`, `3`, `6`, or `Tab` to cycle; see [`crate::setup`] for what a seating is
@@ -44,6 +51,8 @@
 //! keeps the assignment rule stateless — a guest never has to reconcile two
 //! sources of truth about which player it commands.
 
+use bevy::input::ButtonState;
+use bevy::input::keyboard::KeyboardInput;
 use bevy::prelude::*;
 use bevy_matchbox::prelude::*;
 use checkers_net::{CH_RELIABLE, NetMsg, NetState, RoomId, Seat, broadcast, decode};
@@ -70,10 +79,17 @@ pub enum LobbyButton {
     /// Pick a seating. One button per option rather than a cycling control, so
     /// the current choice and the alternatives are visible at once.
     Seats(Seating),
+    /// Open the room-name field.
+    Room,
 }
 
 #[derive(Component)]
 struct RosterText;
+
+/// The room line: current room, the edit buffer while typing, and any
+/// validation error.
+#[derive(Component)]
+struct RoomText;
 
 /// The chosen seating, set in the lobby and read when the game starts.
 ///
@@ -87,6 +103,7 @@ pub fn plugin(app: &mut App) {
     app.init_resource::<NetState>()
         .init_resource::<RoomId>()
         .init_resource::<ChosenSeating>()
+        .init_resource::<RoomEdit>()
         .add_systems(OnEnter(AppState::Lobby), (checkers_net::open_socket, spawn))
         .add_systems(OnExit(AppState::Lobby), despawn)
         .add_systems(
@@ -94,14 +111,29 @@ pub fn plugin(app: &mut App) {
             (
                 elect_host,
                 pump_socket,
-                choose_seating,
-                handle_buttons,
+                // First, and the rest are suppressed while it holds the
+                // keyboard: typing a room named "solo" must not start a game on
+                // the `s`.
+                edit_room,
+                open_room_field.run_if(not_editing),
+                (choose_seating, handle_buttons).run_if(not_editing),
                 sync_seat_buttons,
                 draw_roster,
+                draw_room,
             )
                 .chain()
                 .run_if(in_state(AppState::Lobby)),
         );
+}
+
+/// Whether the room field has the keyboard.
+///
+/// Every other lobby key is gated on this. Without it each character typed is
+/// also a command — `s` starts a solo game, `2` changes the seating, Enter
+/// starts a shared one — so the field would be unusable for any name containing
+/// them, which is nearly all of them.
+pub fn not_editing(edit: Res<RoomEdit>) -> bool {
+    !edit.active && !edit.consumed_input
 }
 
 /// Highlight the chosen seating.
@@ -151,6 +183,75 @@ fn button(parent: &mut ChildSpawnerCommands, label: &str, tag: LobbyButton) {
 const IDLE: Color = Color::srgb(0.22, 0.22, 0.27);
 const CHOSEN: Color = Color::srgb(0.20, 0.45, 0.28);
 
+/// The room-name editor.
+///
+/// Editing is *modal*: while [`RoomEdit::active`] every other lobby key is
+/// suppressed, because the alternative is that typing a room called "solo"
+/// starts a solo game on the `s`. A mode is the smaller evil here, and `Esc`
+/// always leaves it.
+#[derive(Resource, Default)]
+pub struct RoomEdit {
+    pub active: bool,
+    /// What has been typed so far. Only committed to [`RoomId`] on Enter, so an
+    /// abandoned edit cannot leave the socket pointing somewhere unintended.
+    pub buffer: String,
+    /// Why the last commit was refused, shown beneath the field.
+    pub error: String,
+    /// Set for the rest of the frame in which the field handled a keypress.
+    ///
+    /// Closing the field is not enough on its own. The lobby systems are
+    /// `.chain()`ed, so `handle_buttons` runs *after* `edit_room` in the same
+    /// frame: committing with Enter cleared `active`, and the very same Enter
+    /// then fell through and started the game. Typing a room name dropped
+    /// straight onto the board.
+    ///
+    /// A run condition cannot see "this frame's input was already used", so the
+    /// editor records it. Cleared at the top of each `edit_room` run.
+    pub consumed_input: bool,
+}
+
+/// What a keypress does to the room-name editor.
+///
+/// Returned rather than applied so the decision is testable without a window;
+/// [`edit_room`] is the thin system that performs it.
+#[derive(Debug, PartialEq, Eq)]
+pub enum EditAction {
+    /// Add to the buffer.
+    Insert(char),
+    Backspace,
+    /// Commit the buffer as the new room.
+    Commit,
+    /// Abandon the edit, keeping the current room.
+    Cancel,
+    /// Not for the editor.
+    Ignore,
+}
+
+/// Classify one keypress during editing.
+///
+/// `text` is [`bevy::input::keyboard::KeyboardInput::text`], which respects the
+/// keyboard layout — reading `key_code` instead would give a US-layout guess and
+/// type the wrong characters on this machine's keyboard.
+pub fn edit_action(key: KeyCode, text: Option<&str>) -> EditAction {
+    match key {
+        KeyCode::Enter | KeyCode::NumpadEnter => return EditAction::Commit,
+        KeyCode::Escape => return EditAction::Cancel,
+        KeyCode::Backspace => return EditAction::Backspace,
+        _ => {}
+    }
+    // A single character only: `text` can hold two when a dead key did not
+    // combine, and a room name is not the place to resolve that.
+    match text.and_then(|t| {
+        let mut chars = t.chars();
+        chars.next().filter(|_| chars.next().is_none())
+    }) {
+        // Control characters arrive here as text on some platforms; they are not
+        // valid in a room name and must not enter the buffer.
+        Some(c) if !c.is_control() => EditAction::Insert(c),
+        _ => EditAction::Ignore,
+    }
+}
+
 /// The lobby is one **flex column filling the window**, not a set of
 /// absolutely-positioned corners.
 ///
@@ -184,6 +285,25 @@ fn spawn(mut commands: Commands, room: Res<RoomId>, chosen: Res<ChosenSeating>) 
                 TextColor(Color::srgb(0.88, 0.88, 0.9)),
                 RosterText,
             ));
+
+            // The room field. Its text is driven by `draw_roster`, which is also
+            // where the editing caret and any validation error appear.
+            col.spawn((
+                Text::new(String::new()),
+                TextFont {
+                    font_size: FontSize::Px(15.0),
+                    ..default()
+                },
+                TextColor(Color::srgb(0.72, 0.72, 0.78)),
+                RoomText,
+            ));
+            col.spawn(Node {
+                column_gap: Val::Px(10.0),
+                ..default()
+            })
+            .with_children(|row| {
+                button(row, "Change room (R)", LobbyButton::Room);
+            });
 
             // Seating, with the keys that also set it.
             col.spawn((
@@ -462,6 +582,84 @@ fn seating_from_keys(keys: &ButtonInput<KeyCode>, current: Seating) -> Option<Se
 
 /// Choose the seating, from the digit keys, `Tab`, or the seat buttons.
 ///
+/// Drive the room-name editor, and rejoin on commit.
+///
+/// Changing the room means **reopening the socket**: the room is baked into the
+/// signaling URL, so editing [`RoomId`] alone would change the label and nothing
+/// else — a control that appears to work and does not. Removing
+/// `MatchboxSocket` makes `open_socket` run again on the next entry to the
+/// lobby, and [`NetState::leave_room`] discards everything the old room's
+/// socket told us.
+pub fn edit_room(
+    mut commands: Commands,
+    mut keys: MessageReader<KeyboardInput>,
+    mut edit: ResMut<RoomEdit>,
+    mut room: ResMut<RoomId>,
+    mut net: ResMut<NetState>,
+    mut next_state: ResMut<NextState<AppState>>,
+) {
+    // Only ever true for the remainder of the frame that set it.
+    edit.consumed_input = false;
+
+    if !edit.active {
+        // Drain regardless: a buffered keypress from before the field opened
+        // must not appear in it later.
+        keys.clear();
+        return;
+    }
+
+    for event in keys.read() {
+        if event.state != ButtonState::Pressed {
+            continue;
+        }
+        // Whatever this key turns out to mean, it belonged to the field. Set
+        // before the match so that closing the field below cannot let the same
+        // press through to `handle_buttons` later in the chain.
+        edit.consumed_input = true;
+        match edit_action(event.key_code, event.text.as_deref()) {
+            EditAction::Insert(c) => {
+                // Bounded here as well as in `parse`, so the field cannot grow
+                // without limit and then be refused wholesale.
+                if edit.buffer.chars().count() < RoomId::MAX_LEN {
+                    edit.buffer.push(c);
+                    edit.error.clear();
+                }
+            }
+            EditAction::Backspace => {
+                edit.buffer.pop();
+                edit.error.clear();
+            }
+            EditAction::Cancel => {
+                edit.active = false;
+                edit.buffer.clear();
+                edit.error.clear();
+            }
+            EditAction::Commit => match RoomId::parse(&edit.buffer) {
+                Ok(parsed) => {
+                    edit.active = false;
+                    edit.error.clear();
+                    if parsed == *room {
+                        // Same room: rejoining would drop the peers already here
+                        // for no reason.
+                        net.status = format!("Already in room \"{}\".", room.0);
+                        continue;
+                    }
+                    info!(from = %room.0, to = %parsed.0, "changing room");
+                    *room = parsed;
+                    net.leave_room();
+                    net.status = format!("Joining room \"{}\"...", room.0);
+                    // Drop the old socket and re-enter the lobby, which reopens
+                    // it against the new room.
+                    commands.remove_resource::<MatchboxSocket>();
+                    next_state.set(AppState::Lobby);
+                }
+                Err(why) => edit.error = why.to_string(),
+            },
+            EditAction::Ignore => {}
+        }
+    }
+}
+
 /// A system of its own rather than part of the button handling, because it needs
 /// nothing from the socket. That makes it directly drivable in a headless test —
 /// which matters, since the wiring from keypress to dealt board is exactly what
@@ -496,6 +694,37 @@ pub fn choose_seating(
     }
 }
 
+/// Open the room field, from `R` or the button.
+///
+/// Its own system rather than a branch of [`handle_buttons`], which otherwise
+/// needs the room and the editor purely to service this one case — and had grown
+/// past what clippy will accept in parameters, which was a fair signal that two
+/// concerns had been put in one place.
+fn open_room_field(
+    buttons: Query<(&Interaction, &LobbyButton), Changed<Interaction>>,
+    keys: Res<ButtonInput<KeyCode>>,
+    room: Res<RoomId>,
+    mut edit: ResMut<RoomEdit>,
+    mut net: ResMut<NetState>,
+) {
+    let clicked = buttons
+        .iter()
+        .any(|(i, b)| *i == Interaction::Pressed && matches!(b, LobbyButton::Room));
+    if !(clicked || keys.just_pressed(KeyCode::KeyR)) {
+        return;
+    }
+
+    edit.active = true;
+    // Seeded with the current room, so a small change does not mean retyping the
+    // whole name.
+    edit.buffer = room.0.clone();
+    edit.error.clear();
+    // Marked as consuming input: `R` opened the field, and must not also be read
+    // by the systems chained after this one.
+    edit.consumed_input = true;
+    net.status = "Editing room name. Enter joins, Esc cancels.".into();
+}
+
 fn handle_buttons(
     buttons: Query<(&Interaction, &LobbyButton), Changed<Interaction>>,
     keys: Res<ButtonInput<KeyCode>>,
@@ -523,8 +752,8 @@ fn handle_buttons(
             LobbyButton::Ready => ready = true,
             LobbyButton::Start => start = true,
             LobbyButton::Solo => solo = true,
-            // Handled by `choose_seating`.
-            LobbyButton::Seats(_) => {}
+            // Handled by their own systems.
+            LobbyButton::Room | LobbyButton::Seats(_) => {}
         }
     }
 
@@ -627,6 +856,30 @@ fn draw_roster(
         out.push_str(&format!("\n\n{}", net.status));
     }
     **text = out;
+}
+
+/// Draw the room line: the current room, or the field while editing.
+///
+/// A caret is appended while editing so it is obvious the keyboard is captured —
+/// otherwise a modal field looks identical to a dead one, and the player has no
+/// way to tell why `S` stopped working.
+fn draw_room(room: Res<RoomId>, edit: Res<RoomEdit>, mut text: Query<&mut Text, With<RoomText>>) {
+    if !room.is_changed() && !edit.is_changed() {
+        return;
+    }
+    let Ok(mut text) = text.single_mut() else {
+        return;
+    };
+
+    **text = if edit.active {
+        let mut out = format!("Room: {}_\n  Enter joins, Esc cancels.", edit.buffer);
+        if !edit.error.is_empty() {
+            out.push_str(&format!("\n  {}", edit.error));
+        }
+        out
+    } else {
+        format!("Room: {}   (R to change)", room.0)
+    };
 }
 
 /// Build the game for the chosen seating and seat the local player.
@@ -837,6 +1090,60 @@ mod tests {
             Seating::default().indices(),
             "a non-default choice must not be sent as the default"
         );
+    }
+
+    /// Typing must reach the buffer, using the layout-aware `text` field.
+    #[test]
+    fn ordinary_characters_are_inserted() {
+        for (key, text, want) in [
+            (KeyCode::KeyA, Some("a"), 'a'),
+            (KeyCode::KeyZ, Some("Z"), 'Z'),
+            (KeyCode::Digit4, Some("4"), '4'),
+            (KeyCode::Minus, Some("-"), '-'),
+            // Whatever the layout produced, not what the key code suggests: on a
+            // German keyboard the key labelled Y reports "z".
+            (KeyCode::KeyY, Some("z"), 'z'),
+        ] {
+            assert_eq!(edit_action(key, text), EditAction::Insert(want));
+        }
+    }
+
+    #[test]
+    fn the_editing_keys_are_recognised() {
+        assert_eq!(edit_action(KeyCode::Enter, None), EditAction::Commit);
+        assert_eq!(edit_action(KeyCode::NumpadEnter, None), EditAction::Commit);
+        assert_eq!(edit_action(KeyCode::Escape, None), EditAction::Cancel);
+        assert_eq!(edit_action(KeyCode::Backspace, None), EditAction::Backspace);
+    }
+
+    /// Enter, Escape and Backspace must act even when the platform also reports
+    /// text for them, or committing would instead type a control character into
+    /// the name.
+    #[test]
+    fn the_editing_keys_win_over_any_text_they_report() {
+        assert_eq!(edit_action(KeyCode::Enter, Some("\r")), EditAction::Commit);
+        assert_eq!(
+            edit_action(KeyCode::Backspace, Some("\u{8}")),
+            EditAction::Backspace
+        );
+        assert_eq!(
+            edit_action(KeyCode::Escape, Some("\u{1b}")),
+            EditAction::Cancel
+        );
+    }
+
+    /// A keypress with no usable text must do nothing rather than insert junk.
+    #[test]
+    fn keys_without_usable_text_are_ignored() {
+        // Modifiers and function keys report no text.
+        assert_eq!(edit_action(KeyCode::ShiftLeft, None), EditAction::Ignore);
+        assert_eq!(edit_action(KeyCode::F5, None), EditAction::Ignore);
+        // A control character reported as text is not a room-name character.
+        assert_eq!(edit_action(KeyCode::Tab, Some("\t")), EditAction::Ignore);
+        // An uncombined dead key can report two characters; refuse rather than
+        // guess which was meant.
+        assert_eq!(edit_action(KeyCode::KeyA, Some("^a")), EditAction::Ignore);
+        assert_eq!(edit_action(KeyCode::KeyA, Some("")), EditAction::Ignore);
     }
 
     #[test]
