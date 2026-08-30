@@ -8,9 +8,9 @@
 // Regenerate:      cargo run -p checkers-spec-gen -- --emit-registry
 // Check freshness: cargo run -p checkers-spec-gen -- --check-registry
 
-// law-ids: CC-APPLY-NET,CC-DIR-INVOLUTION,CC-GEO-BASE-CAMP,CC-GEO-CAMP-OF,CC-GEO-CARDINALITY,CC-GEO-CONTACT,CC-GEO-DISJOINT,CC-GEO-INWARD-BAD,CC-GEO-INWARD-CONTACT,CC-GEO-NONVACUOUS,CC-GEO-OPPOSITE,CC-GEO-ROT-EXACT,CC-GEO-ROT-NEG,CC-GEO-ROT-ORDER,CC-GEO-ROT-STEP,CC-GEO-SYMMETRY,CC-INV-PRESERVED,CC-JUMP-ANY-OWNER,CC-JUMP-CLOSURE,CC-JUMP-DISPLACEMENT,CC-JUMP-LEGAL,CC-JUMP-NO-CAPTURE,CC-JUMP-OMEGA,CC-JUMP-REVISIT,CC-MOVE-DEDUP,CC-MOVE-IDENTITY,CC-MOVE-ONBOARD,CC-POS-INITIAL,CC-POS-OCCUPANCY,CC-POS-PIECES,CC-POS-TARGET,CC-STEP-DISPLACE,CC-STEP-LEGAL,CC-TURN-BLOCKED,CC-TURN-CYCLE,CC-TURN-HOP-CLOSURE,CC-TURN-HOP-ONE,CC-TURN-NO-NULL-MOVE,CC-TURN-PASS,CC-TURN-STAGED-LEGAL,CC-VAR-CAMP-FREE,CC-WIN-CONDITION
+// law-ids: CC-APPLY-NET,CC-DIR-INVOLUTION,CC-GEO-BASE-CAMP,CC-GEO-CAMP-OF,CC-GEO-CARDINALITY,CC-GEO-CONTACT,CC-GEO-DISJOINT,CC-GEO-INWARD-BAD,CC-GEO-INWARD-CONTACT,CC-GEO-NONVACUOUS,CC-GEO-OPPOSITE,CC-GEO-ROT-EXACT,CC-GEO-ROT-NEG,CC-GEO-ROT-ORDER,CC-GEO-ROT-STEP,CC-GEO-SYMMETRY,CC-INV-PRESERVED,CC-JUMP-ANY-OWNER,CC-JUMP-CLOSURE,CC-JUMP-DISPLACEMENT,CC-JUMP-LEGAL,CC-JUMP-NO-CAPTURE,CC-JUMP-OMEGA,CC-JUMP-REVISIT,CC-MOVE-DEDUP,CC-MOVE-IDENTITY,CC-MOVE-ONBOARD,CC-POS-INITIAL,CC-POS-OCCUPANCY,CC-POS-PIECES,CC-POS-TARGET,CC-STEP-DISPLACE,CC-STEP-LEGAL,CC-TURN-BLOCKED,CC-TURN-CYCLE,CC-TURN-HOP-CLOSURE,CC-TURN-HOP-ONE,CC-TURN-NO-NULL-MOVE,CC-TURN-PASS,CC-TURN-PASS-RESET,CC-TURN-STAGED-LEGAL,CC-VAR-CAMP-FREE,CC-WIN-CONDITION
 
-pub static LAWS: [crate::law::LawInfo; 42] = [
+pub static LAWS: [crate::law::LawInfo; 43] = [
     crate::law_info!(crate::laws::geometry::BaseCampHoles),
     crate::law_info!(crate::laws::geometry::BoardCardinality),
     crate::law_info!(crate::laws::geometry::BoardIsCentrallySymmetric),
@@ -40,6 +40,7 @@ pub static LAWS: [crate::law::LawInfo; 42] = [
     crate::law_info!(crate::laws::rules::MovesStayOnBoard),
     crate::law_info!(crate::laws::rules::OccupancyAccounting),
     crate::law_info!(crate::laws::rules::OccupancyIsPositionDetermined),
+    crate::law_info!(crate::laws::rules::PassCounterResetsOnMove),
     crate::law_info!(crate::laws::rules::PassingAndDraw),
     crate::law_info!(crate::laws::rules::PieceConservation),
     crate::law_info!(crate::laws::rules::PlayPreservesInvariants),

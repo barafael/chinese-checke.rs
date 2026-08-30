@@ -21,7 +21,7 @@ Each numbered chapter states the rules in prose and mathematics. The **laws** li
 9. [Jump sequences and reachability](#jump-sequences) — 6 laws
 10. [Move representation and generation](#move-generation) — 4 laws
 11. [Applying a move](#applying) — 1 law
-12. [Turn order, passing, and termination](#turns) — 3 laws
+12. [Turn order, passing, and termination](#turns) — 4 laws
 13. [The winning condition](#winning) — 1 law
 14. [Position invariants](#invariants) — 1 law
 15. [Rule variants](#variants) — 1 law
@@ -30,10 +30,10 @@ Each numbered chapter states the rules in prose and mathematics. The **laws** li
 
 | Evidence | Laws |
 |---|---|
-| exhaustive | 16 |
+| exhaustive | 17 |
 | proof (Kani) | 11 |
 | property test | 15 |
-| **total** | **42** |
+| **total** | **43** |
 
 Each law records how strongly it is established:
 
@@ -624,6 +624,16 @@ A player with no move passes; six consecutive passes end the game in a draw.
 
 $$
 T_i(s) = \varnothing \implies \text{pass};\qquad \text{six passes} \implies \text{draw}
+$$
+
+*Evidence: exhaustive*
+
+##### `CC-TURN-PASS-RESET`
+
+A played move resets the pass counter, so a draw needs six passes after it.
+
+$$
+\mathrm{move}(s, i, m) \implies \mathrm{passes}(s \cdot m) = 0;\quad \text{draw} \iff \text{six passes in succession}
 $$
 
 *Evidence: exhaustive*

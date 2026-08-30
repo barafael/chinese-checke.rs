@@ -973,6 +973,79 @@ impl Law for PassingAndDraw {
 }
 register_law!(PassingAndDraw, PASSING_AND_DRAW);
 
+/// A played move resets the consecutive-pass counter.
+///
+/// The draw fires on six passes *in succession*, and the subtle half of that
+/// rule is the reset: a pass counted before a move must not survive it. The
+/// reset is observable only through scripted play. After any legal move the
+/// mover can always retrace it — stepping or jumping back is legal by chapter
+/// 8 — so a position that once had a move can never reach the all-stuck state
+/// in which six passes could accumulate during natural play. That is also why
+/// [`frozen_position`] is unreachable by legal play, and why
+/// `CC-TURN-PASS` exercises the pure-pass draw on it directly.
+///
+/// What nothing else pins is the reset, so this law scripts the mixed
+/// sequence over [`blocked_position`]: player 0 passes, player 1 (the only
+/// other player with pieces) moves, and play continues. A counter that
+/// survives the move keeps climbing across the interleaved passes and reaches
+/// six partway through the loop, wrongly ending the game — the loop's
+/// `is_over` assertion is what fails.
+pub struct PassCounterResetsOnMove;
+
+impl Law for PassCounterResetsOnMove {
+    const ID: &'static str = "CC-TURN-PASS-RESET";
+    const STATEMENT: &'static str =
+        r"\mathrm{move}(s, i, m) \implies \mathrm{passes}(s \cdot m) = 0;\quad \text{draw} \iff \text{six passes in succession}";
+    const CHAPTER: Chapter = Chapter::Turns;
+    const SUMMARY: &'static str =
+        "A played move resets the pass counter, so a draw needs six passes after it.";
+    const EVIDENCE: Evidence = Evidence::Exhaustive;
+    type Subject = ();
+
+    fn holds((): &()) -> Result<(), String> {
+        use crate::rules::Game;
+
+        // Fixture premise: in the blocked position player 0 is sealed in,
+        // players 2..5 hold no pieces, and player 1 — the blocker — can move.
+        // Without a mover the passes below would legitimately draw and prove
+        // nothing about the reset.
+        let pos = blocked_position();
+        if !legal_moves(&pos, Player::ALL[0]).is_empty()
+            || legal_moves(&pos, Player::ALL[1]).is_empty()
+        {
+            return Err("the blocked fixture must seal player 0 and leave player 1 a move".into());
+        }
+
+        let mut game = Game::from_position(pos, Player::ALL[0]);
+
+        // Pass when stuck, move when able. Player 1's first move vacates a
+        // frontier hole, which unseals player 0, so the sequence interleaves
+        // moves and passes from there on. On a correct implementation the
+        // counter is reset by every move and never reaches six; a counter
+        // that survives moves climbs past six and ends the game.
+        for ply in 0..12 {
+            if game.is_over() {
+                return Err(format!(
+                    "the game ended at ply {ply}, but passes interleaved with a \
+                     move never reach six in succession"
+                ));
+            }
+            let moves = game.legal_moves();
+            if moves.is_empty() {
+                game.pass();
+            } else {
+                game.play(&moves[0].clone());
+            }
+        }
+        Ok(())
+    }
+
+    fn subjects() -> Vec<()> {
+        vec![()]
+    }
+}
+register_law!(PassCounterResetsOnMove, PASS_COUNTER_RESETS_ON_MOVE);
+
 // ---------------------------------------------------------------------------
 // Chapter 13: winning
 // ---------------------------------------------------------------------------
