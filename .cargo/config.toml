@@ -5,4 +5,14 @@
 #
 # NOTE: this must be a rustdoc *flag*. `#![doc(html_in_header = ...)]` as a crate
 # attribute is rejected by cargo ("unknown doc attribute").
-rustdocflags = ["--html-in-header", "assets/katex-header.html"]
+#
+# `-D warnings` matches what CI enforces. Without it a broken intra-doc link is
+# a local warning and a CI failure, which is the wrong way round: two doc links
+# reached main that way. Note RUSTDOCFLAGS in the environment *replaces* this
+# list rather than extending it, so CI repeats the header path.
+rustdocflags = [
+    "--html-in-header",
+    "assets/katex-header.html",
+    "-D",
+    "warnings",
+]

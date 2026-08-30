@@ -24,7 +24,8 @@
 //!
 //! # How law types are discovered
 //!
-//! [`LawInfo`] carries a law's ID but not its Rust type path, and the generated
+//! [`checkers_core::law::LawInfo`] carries a law's ID but not its Rust type
+//! path, and the generated
 //! array needs the path. So the `register_law!` invocations are read from the
 //! source — the one place that names both the type and (through it) the ID.
 //!

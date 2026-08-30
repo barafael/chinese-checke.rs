@@ -122,7 +122,7 @@ impl core::error::Error for Violation {}
 ///
 /// `linkme` has no `wasm32` implementation (WebAssembly has no
 /// linker-defined section-boundary symbols to take the address of), so web
-/// builds use [`generated::LAWS`] instead — an array emitted by
+/// builds use the generated `laws_generated.rs` array instead — emitted by
 /// `checkers-spec-gen` from the native build, where the linker *did* do the
 /// collecting.
 ///
