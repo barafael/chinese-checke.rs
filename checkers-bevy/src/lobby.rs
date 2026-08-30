@@ -121,7 +121,7 @@ fn despawn(mut commands: Commands, ui: Query<Entity, With<LobbyUi>>) {
 
 /// What pressing Enter should do.
 ///
-/// Split out from [`handle_buttons`] because it is the part that was wrong: the
+/// Split out from `handle_buttons` because it is the part that was wrong: the
 /// original required a non-empty, all-ready roster, and a solo player's seat is
 /// only created once the socket connects and starts out `ready: false`. So a
 /// lone player faced a blank screen — the board only exists in

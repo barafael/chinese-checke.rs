@@ -44,23 +44,20 @@ place, and which is registered at link time so it cannot be documented without \
 being verified.
 ";
 
-fn evidence_note() -> String {
-    let mut s = String::new();
-    s.push_str("Each law records how strongly it is established:\n\n");
-    s.push_str("| Evidence | Meaning |\n|---|---|\n");
-    s.push_str(
-        "| proof (Kani) | Proven for the whole domain by bounded model checking. |\n\
-         | exhaustive | Checked over a finite domain by enumeration. |\n\
-         | property test | Checked over inputs from a generated strategy. |\n\
-         | example | Checked against fixed examples only. |\n\n",
-    );
-    s.push_str(
-        "`proof (Kani)` laws additionally re-check themselves in ordinary Rust, so \
-         `cargo test` exercises them on every platform; the proofs themselves need \
-         Linux or WSL, since Kani does not build on Windows.\n",
-    );
-    s
-}
+const EVIDENCE_NOTE: &str = "\
+Each law records how strongly it is established:
+
+| Evidence | Meaning |
+|---|---|
+| proof (Kani) | Proven for the whole domain by bounded model checking. |
+| exhaustive | Checked over a finite domain by enumeration. |
+| property test | Checked over inputs from a generated strategy. |
+| example | Checked against fixed examples only. |
+
+`proof (Kani)` laws additionally re-check themselves in ordinary Rust, so \
+`cargo test` exercises them on every platform; the proofs themselves need \
+Linux or WSL, since Kani does not build on Windows.
+";
 
 fn render_law(out: &mut String, law: &LawInfo) {
     writeln!(out, "##### `{}`\n", law.id).unwrap();
@@ -123,7 +120,7 @@ fn render_coverage(out: &mut String) {
         out.push('\n');
     }
 
-    out.push_str(&evidence_note());
+    out.push_str(EVIDENCE_NOTE);
     out.push('\n');
 }
 
