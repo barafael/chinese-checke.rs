@@ -137,7 +137,17 @@ pub enum NetMsg {
     /// Guest -> host: toggle my ready flag.
     Ready(bool),
     /// Host -> all: assignments are final, start playing.
-    Start { seats: Vec<Seat> },
+    ///
+    /// `players` carries which of the six players are seated, so every peer
+    /// deals the same board. Sent as indices rather than as the front-end's
+    /// `Seating` enum for the same reason [`Seat::player`] is a `u32`: the wire
+    /// format does not depend on the variant order of a type in a crate above
+    /// it, and a peer running a build that offers different seatings still
+    /// understands the set it is given.
+    ///
+    /// Without this a guest built its board from its own local default, so a
+    /// host starting a three-player game left the guest playing six.
+    Start { seats: Vec<Seat>, players: Vec<u32> },
 }
 
 pub fn encode(msg: &NetMsg) -> Option<Box<[u8]>> {

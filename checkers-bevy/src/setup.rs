@@ -121,6 +121,29 @@ impl Seating {
         self.players().len()
     }
 
+    /// The seated player indices, for [`checkers_net::NetMsg::Start`].
+    pub fn indices(self) -> Vec<u32> {
+        self.players()
+            .into_iter()
+            .map(|p| u32::from(p.index()))
+            .collect()
+    }
+
+    /// The seating a set of player indices names, if it is one this build knows.
+    ///
+    /// Order-insensitive and duplicate-tolerant, because it parses data from
+    /// another peer rather than from this process. `None` for anything
+    /// unrecognised — a peer running a build that offers a seating this one does
+    /// not, or a corrupt message. The caller decides what to do about it; this
+    /// does not guess, since guessing would deal a board that disagrees with the
+    /// rest of the table, which is the exact bug the field was added to fix.
+    pub fn from_indices(indices: &[u32]) -> Option<Seating> {
+        let mut wanted: Vec<u32> = indices.to_vec();
+        wanted.sort_unstable();
+        wanted.dedup();
+        Seating::ALL.into_iter().find(|s| s.indices() == wanted)
+    }
+
     /// The label shown in the lobby.
     pub fn label(self) -> &'static str {
         match self {
@@ -463,6 +486,55 @@ mod tests {
                 .unwrap_or_else(|f| panic!("conservation broke at ply {ply}: {f}"));
         }
         assert!(!game.is_over(), "60 plies should not finish a game");
+    }
+
+    /// Every seating must survive the wire round-trip, or a guest deals a
+    /// different board from the host — which is the bug the `players` field on
+    /// `NetMsg::Start` exists to prevent.
+    #[test]
+    fn every_seating_round_trips_through_indices() {
+        for seating in Seating::ALL {
+            let indices = seating.indices();
+            assert_eq!(
+                Seating::from_indices(&indices),
+                Some(seating),
+                "{seating:?} did not survive {indices:?}"
+            );
+        }
+    }
+
+    /// The indices come from another peer, so parsing must not depend on their
+    /// order or assume they are unique.
+    #[test]
+    fn parsing_indices_ignores_order_and_duplicates() {
+        assert_eq!(Seating::from_indices(&[3, 0]), Some(Seating::Two));
+        assert_eq!(Seating::from_indices(&[0, 3, 0, 3]), Some(Seating::Two));
+        assert_eq!(Seating::from_indices(&[4, 0, 2]), Some(Seating::Three));
+        assert_eq!(
+            Seating::from_indices(&[5, 4, 3, 2, 1, 0]),
+            Some(Seating::Six)
+        );
+    }
+
+    /// An unrecognised set must be refused rather than rounded to something
+    /// plausible. Dealing a *nearly* right board silently is worse than saying
+    /// the seating is unknown, because both peers then disagree without knowing.
+    #[test]
+    fn an_unknown_seating_is_refused() {
+        for bad in [
+            vec![],
+            vec![0],
+            vec![0, 1],          // sound, but not offered
+            vec![0, 1, 2, 3],    // four players
+            vec![0, 1, 2, 3, 4], // five
+            vec![9, 42],         // not player indices at all
+        ] {
+            assert_eq!(
+                Seating::from_indices(&bad),
+                None,
+                "{bad:?} must not be accepted"
+            );
+        }
     }
 
     #[test]

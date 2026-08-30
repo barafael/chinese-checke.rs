@@ -317,6 +317,7 @@ fn elect_host(socket: Option<ResMut<MatchboxSocket>>, mut net: ResMut<NetState>)
 fn pump_socket(
     socket: Option<ResMut<MatchboxSocket>>,
     mut net: ResMut<NetState>,
+    mut chosen: ResMut<ChosenSeating>,
     mut next_state: ResMut<NextState<AppState>>,
 ) {
     let Some(mut socket) = socket else {
@@ -373,8 +374,15 @@ fn pump_socket(
             }
             // Guests take the host's roster verbatim; it is the only authority.
             NetMsg::Roster(seats) => net.seats = seats,
-            NetMsg::Start { seats } => {
+            NetMsg::Start { seats, players } => {
                 net.seats = seats;
+                match adopt_seating(&players, chosen.0) {
+                    Ok(seating) => chosen.0 = seating,
+                    Err(complaint) => {
+                        warn!(?players, "unrecognised seating from host");
+                        net.status = complaint;
+                    }
+                }
                 next_state.set(AppState::InGame);
             }
             // Moves cannot arrive before the game starts, but a late duplicate
@@ -398,6 +406,40 @@ fn seat_for(net: &mut NetState, peer: &str, name: &str) {
         player,
         ready: false,
     });
+}
+
+/// Which seating to deal on receiving the host's `Start`.
+///
+/// The host's choice wins outright, because every peer must deal the same board.
+/// An unrecognised set means the host runs a build offering a seating this one
+/// does not; the local choice is kept and the player is told, rather than a
+/// different game being dealt in silence.
+///
+/// Returns the complaint as an `Err` payload so the caller decides where it is
+/// shown, and so a test can assert the player is actually told.
+fn adopt_seating(players: &[u32], current: Seating) -> Result<Seating, String> {
+    Seating::from_indices(players).ok_or_else(|| {
+        format!(
+            "The host chose a seating this build does not know ({players:?}); \
+             starting with {} instead.",
+            current.label()
+        )
+    })
+}
+
+/// The `Start` the host broadcasts: the final roster and the seating to deal.
+///
+/// A named function rather than an inline struct literal so a test can assert
+/// what actually goes on the wire. That is not ceremony: I injected a fault here
+/// — sending [`Seating::default`] instead of the host's choice, reproducing the
+/// exact bug this field was added to fix — and the whole suite still passed,
+/// because every test built its own `NetMsg::Start` and none covered the code
+/// that builds the real one.
+pub fn start_message(net: &NetState, seating: Seating) -> NetMsg {
+    NetMsg::Start {
+        seats: net.seats.clone(),
+        players: seating.indices(),
+    }
 }
 
 /// Which seating a keypress selects. `Tab` cycles, so the whole control is
@@ -459,6 +501,9 @@ fn handle_buttons(
     keys: Res<ButtonInput<KeyCode>>,
     socket: Option<ResMut<MatchboxSocket>>,
     mut net: ResMut<NetState>,
+    // Read-only: `choose_seating` owns the writing. Needed here so the host's
+    // `Start` can tell every peer which board to deal.
+    chosen: Res<ChosenSeating>,
     mut next_state: ResMut<NextState<AppState>>,
 ) {
     let mut ready = keys.just_pressed(KeyCode::Space);
@@ -525,10 +570,7 @@ fn handle_buttons(
         match start_decision(&net) {
             StartDecision::Solo => next_state.set(AppState::InGame),
             StartDecision::Multiplayer => {
-                let msg = NetMsg::Start {
-                    seats: net.seats.clone(),
-                };
-                broadcast(&mut socket, &peers, &msg);
+                broadcast(&mut socket, &peers, &start_message(&net, chosen.0));
                 next_state.set(AppState::InGame);
             }
             StartDecision::Refuse(why) => net.status = why,
@@ -719,6 +761,82 @@ mod tests {
             input.press(*key);
         }
         input
+    }
+
+    /// The host must broadcast the seating it *chose*, not a default.
+    ///
+    /// This is the test that was missing. Replacing `seating.indices()` with
+    /// `Seating::default().indices()` in `start_message` — the original bug,
+    /// where a guest dealt six players against a three-player host — passed the
+    /// entire suite before this existed, because every other test constructed
+    /// its own `NetMsg::Start`.
+    #[test]
+    fn the_start_message_carries_the_chosen_seating() {
+        let net = NetState::default();
+        for seating in Seating::ALL {
+            let NetMsg::Start { players, .. } = start_message(&net, seating) else {
+                panic!("start_message must build a Start");
+            };
+            assert_eq!(
+                players,
+                seating.indices(),
+                "{seating:?} must be the seating broadcast"
+            );
+            assert_eq!(
+                Seating::from_indices(&players),
+                Some(seating),
+                "{seating:?} must be recoverable by the guest"
+            );
+        }
+    }
+
+    /// The guest must adopt whatever the host sent, for every offered seating.
+    #[test]
+    fn a_guest_adopts_the_hosts_seating() {
+        for host in Seating::ALL {
+            // Start from a deliberately different local choice, so adopting is
+            // observable rather than coincidental.
+            let local = host.next();
+            assert_ne!(local, host, "the fixture needs two distinct seatings");
+            assert_eq!(adopt_seating(&host.indices(), local), Ok(host));
+        }
+    }
+
+    /// An unknown seating must keep the local choice *and* say so. Starting a
+    /// different game without a word is the failure this guards.
+    #[test]
+    fn an_unknown_seating_is_reported_not_silently_applied() {
+        let local = Seating::Three;
+        let complaint = adopt_seating(&[0, 1, 2, 3], local)
+            .expect_err("four players is not an offered seating");
+        assert!(
+            complaint.contains("does not know"),
+            "must say the seating is unknown: {complaint}"
+        );
+        assert!(
+            complaint.contains(local.label()),
+            "must name what it will use instead: {complaint}"
+        );
+    }
+
+    /// A seating other than the default must actually differ from it, or the
+    /// test above would pass against a hard-coded default by coincidence.
+    #[test]
+    fn the_broadcast_seating_is_not_always_the_default() {
+        let net = NetState::default();
+        let non_default = Seating::ALL
+            .into_iter()
+            .find(|s| *s != Seating::default())
+            .expect("more than one seating is offered");
+
+        let NetMsg::Start { players, .. } = start_message(&net, non_default) else {
+            panic!("start_message must build a Start");
+        };
+        assert_ne!(
+            players,
+            Seating::default().indices(),
+            "a non-default choice must not be sent as the default"
+        );
     }
 
     #[test]
