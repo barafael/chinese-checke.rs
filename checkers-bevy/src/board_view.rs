@@ -24,14 +24,13 @@ pub const BOARD_HALF_EXTENT: Vec2 = Vec2::new(204.0 + PIECE_RADIUS, 236.0 + PIEC
 
 /// Axial to screen, using the pointy-top convention.
 ///
-/// $x = \sqrt{3}\,(q + r/2)$ and $y = -\tfrac{3}{2} r$; the $y$ negation puts
-/// increasing `r` downward, matching how the board is conventionally drawn while
-/// Bevy's world axes point up.
+/// $x = s\,(q + r/2)$ and $y = -\tfrac{\sqrt{3}}{2} s\, r$ for hole spacing
+/// $s$; the $y$ negation puts increasing `r` downward, matching how the board
+/// is conventionally drawn while Bevy's world axes point up.
 pub fn coord_to_world(c: Coord) -> Vec2 {
-    let scale = HOLE_SPACING / 3.0_f32.sqrt();
     Vec2::new(
-        scale * 3.0_f32.sqrt() * (c.q as f32 + c.r as f32 / 2.0),
-        -scale * 1.5 * c.r as f32,
+        HOLE_SPACING * (c.q as f32 + 0.5 * c.r as f32),
+        -HOLE_SPACING * 3.0_f32.sqrt() / 2.0 * c.r as f32,
     )
 }
 
@@ -41,9 +40,8 @@ pub fn coord_to_world(c: Coord) -> Vec2 {
 /// then correct the one that drifted furthest. Rounding `q` and `r`
 /// independently would pick the wrong hole near cell boundaries.
 pub fn world_to_coord(p: Vec2) -> Coord {
-    let scale = HOLE_SPACING / 3.0_f32.sqrt();
-    let qf = (p.x / (scale * 3.0_f32.sqrt())) - (-p.y / (scale * 1.5)) / 2.0;
-    let rf = -p.y / (scale * 1.5);
+    let rf = -2.0 * p.y / (HOLE_SPACING * 3.0_f32.sqrt());
+    let qf = p.x / HOLE_SPACING - rf / 2.0;
     let sf = -qf - rf;
 
     let (mut q, mut r, s) = (qf.round(), rf.round(), sf.round());
