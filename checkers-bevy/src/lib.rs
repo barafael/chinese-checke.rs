@@ -26,6 +26,7 @@
 pub mod board_view;
 pub mod lobby;
 pub mod net;
+pub mod setup;
 
 use bevy::prelude::*;
 use checkers_core::audit::audit_position;
@@ -34,8 +35,11 @@ use checkers_core::position::{Move as GameMove, MoveKind as GameMoveKind, Player
 use checkers_core::rules::Game;
 use checkers_core::turn::{JumpTurn, single_hop_destinations, step_destinations};
 
+use crate::setup::Seating;
+
 /// Lobby first, then the board. Networked play needs seats assigned before the
-/// game is playable; a solo player passes straight through with Enter.
+/// game is playable, and the lobby is also where the seating is chosen; a solo
+/// player passes straight through with `S`.
 ///
 /// Note that the board only exists in [`AppState::InGame`] — `spawn_board` runs
 /// on entering it. A lobby that cannot be left therefore shows an empty screen,
@@ -78,16 +82,28 @@ pub struct Session {
     /// the same frame, so the delay is invisible — but the code path is the same
     /// one, which is why solo play exercises it.
     outbox: Vec<GameMove>,
+    /// Who is seated. Chosen in the lobby, and needed afterwards because a
+    /// partial board is audited against its own seating rather than against the
+    /// six-player invariant.
+    pub seating: Seating,
 }
 
 impl Default for Session {
     fn default() -> Self {
+        Self::new(Seating::default())
+    }
+}
+
+impl Session {
+    /// A session for the given seating.
+    pub fn new(seating: Seating) -> Self {
         Self {
-            game: Game::new(),
+            game: seating.game(),
             selection: Selection::None,
             message: "Click one of your pieces".into(),
             local_player: None,
             outbox: Vec::new(),
+            seating,
         }
     }
 }
@@ -246,7 +262,7 @@ impl Session {
             Ok(mv) => mv,
             Err(e) => {
                 // Reachable: the piece hopped back to where it began.
-                self.message = format!("Cannot confirm — {e}");
+                self.message = format!("Cannot confirm - {e}");
                 return;
             }
         };
@@ -296,15 +312,26 @@ impl Session {
 
 fn hint(remaining: usize) -> String {
     if remaining == 0 {
-        "No further hops — press Enter to confirm.".into()
+        "No further hops - press Enter to confirm.".into()
     } else {
         format!("{remaining} further hop(s), or press Enter to confirm.")
     }
 }
 
 /// Hold the live position to the specification's invariants.
-pub fn audit(position: &Position) {
-    if let Err(fault) = audit_position(position) {
+///
+/// At six players this is the specification's own audit. With fewer, the
+/// six-player piece count cannot hold by construction, so the seating's
+/// restricted conservation check stands in — see [`setup`] for why the law is
+/// not weakened instead.
+pub fn audit(position: &Position, seating: Seating) {
+    if seating == Seating::Six {
+        if let Err(fault) = audit_position(position) {
+            panic!("specification violated while playing: {fault}");
+        }
+        return;
+    }
+    if let Err(fault) = seating.audit(position) {
         panic!("specification violated while playing: {fault}");
     }
 }

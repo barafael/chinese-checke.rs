@@ -24,9 +24,12 @@
 //! position. That distinction is what [`checkers_core::audit`] exists for.
 
 use bevy::prelude::*;
+// Not in the prelude, unlike the rest of the window API.
+use bevy::window::{Monitor, PrimaryMonitor};
 use checkers_bevy::board_view::{
     BOARD_HALF_EXTENT, HOLE_RADIUS, HOLE_SPACING, PIECE_RADIUS, coord_to_world, world_to_coord,
 };
+use checkers_bevy::setup::Seating;
 use checkers_bevy::{AppState, Selection, Session, audit, lobby, net};
 use checkers_core::geometry::{all_holes, camp_of, on_board};
 use checkers_core::law::{LAWS, verify_all};
@@ -38,10 +41,29 @@ fn main() {
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title: "Chinese Checkers".into(),
-                // The native window's starting size. On the web the canvas
-                // follows its parent instead, so this is only the initial
-                // backbuffer before the first resize.
-                resolution: (900u32, 980u32).into(),
+                // Two thirds of the monitor's *work area*, centred, so the whole
+                // window is on screen and nothing is under the taskbar.
+                //
+                // This is not cosmetic. The previous fixed 980px height exceeded
+                // the 912px work area on this display, so the bottom ~70 logical
+                // pixels were behind the taskbar — which is precisely where the
+                // lobby's buttons are anchored. They rendered correctly the whole
+                // time and were simply off-screen: a layout probe showed them at
+                // y=2307 of a 2450px surface, correctly sized. A blank-looking
+                // lobby with no visible controls was the symptom.
+                //
+                // The real size is set by `size_to_monitor` on the first frame,
+                // since the monitor is not known until winit has created the
+                // window. This is only the pre-resize backbuffer.
+                resolution: (900u32, 700u32).into(),
+                position: WindowPosition::Centered(MonitorSelection::Primary),
+                resize_constraints: WindowResizeConstraints {
+                    // Below this the board no longer fits and the camera starts
+                    // zooming out; there is no reason to allow less.
+                    min_width: 480.0,
+                    min_height: 480.0,
+                    ..default()
+                },
                 // Track the containing element rather than rendering at a fixed
                 // 900x980 and letting CSS stretch the result, which distorts the
                 // board. Safe here because `body` takes its size from the
@@ -58,6 +80,9 @@ fn main() {
         .init_state::<AppState>()
         .add_plugins(lobby::plugin)
         .add_systems(Startup, setup)
+        // Not state-scoped: the lobby is the first thing shown, and it is the
+        // screen whose buttons the old size hid.
+        .add_systems(Update, size_to_monitor)
         .add_systems(
             OnEnter(AppState::InGame),
             (lobby::apply_seats, spawn_board).chain(),
@@ -138,6 +163,60 @@ fn player_colour(player: Player) -> Color {
     }
 }
 
+/// Size the window to two thirds of the monitor and centre it.
+///
+/// Runs after startup rather than in the `Window` descriptor because the monitor
+/// is not known until winit has created the window; `Monitor` entities do not
+/// exist before then. Runs once, so the player can freely resize afterwards.
+///
+/// Two thirds of the *full* monitor rather than of the work area, because
+/// [`Monitor`] does not expose the work area — it has no notion of the taskbar.
+/// That is still the fix for the occlusion bug: at 2/3 the window is well inside
+/// the usable region, whereas the old fixed 980px height exceeded this display's
+/// 912px work area and pushed the lobby's bottom-anchored buttons underneath the
+/// taskbar.
+///
+/// The monitor reports physical pixels, so the logical size the window wants is
+/// divided by the scale factor — 2.5 on this display. Skipping that would ask
+/// for a window 2.5x too large.
+fn size_to_monitor(
+    mut windows: Query<&mut Window>,
+    monitors: Query<&Monitor, With<PrimaryMonitor>>,
+    mut done: Local<bool>,
+) {
+    if *done {
+        return;
+    }
+    let Ok(monitor) = monitors.single() else {
+        return;
+    };
+    let Ok(mut window) = windows.single_mut() else {
+        return;
+    };
+    *done = true;
+
+    let scale = if monitor.scale_factor > 0.0 {
+        monitor.scale_factor as f32
+    } else {
+        1.0
+    };
+    let logical = Vec2::new(
+        monitor.physical_width as f32 / scale,
+        monitor.physical_height as f32 / scale,
+    );
+    let wanted = logical * 2.0 / 3.0;
+
+    window.resolution.set(wanted.x, wanted.y);
+    window.position = WindowPosition::Centered(MonitorSelection::Primary);
+    info!(
+        "sized window to {}x{} logical ({}x{} monitor at {scale}x)",
+        wanted.x.round(),
+        wanted.y.round(),
+        monitor.physical_width,
+        monitor.physical_height
+    );
+}
+
 /// Verify the specification and spawn the camera. Runs once, before the lobby:
 /// the app refuses to show anything at all if its own laws do not hold.
 fn setup(mut commands: Commands) {
@@ -164,7 +243,7 @@ fn setup(mut commands: Commands) {
     if let Err(violation) = verify_all() {
         panic!("the specification does not hold: {violation}");
     }
-    audit(&Position::initial());
+    audit(&Position::initial(), Seating::Six);
 }
 
 /// Spawn the board, status panel, and turn controls on entering the game.
@@ -524,7 +603,7 @@ fn sync_status(session: Res<Session>, mut text: Query<&mut Text, With<StatusText
             // the two cannot drift apart.
             let why = match turn.to_move() {
                 Ok(_) => String::new(),
-                Err(e) => format!(" — {e}"),
+                Err(e) => format!(" - {e}"),
             };
             format!("  |  staging {} hop(s){why}", turn.hops())
         }

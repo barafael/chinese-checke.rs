@@ -137,11 +137,11 @@ fn apply_outbox_directly(session: &mut Session) {
 
 /// Audit the new position and pass over players with no legal move.
 fn after_turn(session: &mut Session) {
-    audit(session.game.position());
+    audit(session.game.position(), session.seating);
 
     while !session.game.is_over() && session.game.legal_moves().is_empty() {
         let stuck = session.game.turn();
         session.game.pass();
-        session.message = format!("{} — player {} passed", session.message, stuck.index());
+        session.message = format!("{} - player {} passed", session.message, stuck.index());
     }
 }

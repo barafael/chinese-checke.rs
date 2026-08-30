@@ -1,14 +1,27 @@
-//! Lobby screen: join a room, see who is here, get a seat, start.
+//! Lobby screen: join a room, choose how many players, see who is here, start.
 //!
 //! Built with plain Bevy UI rather than egui, to match the in-game buttons and
-//! to avoid a dependency for four widgets.
+//! to avoid a dependency for a handful of widgets.
+//!
+//! Every control has a key *and* a button, and neither is the primary: the keys
+//! are what the hints name, and the buttons exist because a lobby whose only
+//! affordances are typed is indistinguishable from an empty screen. That is not
+//! a hypothetical either: the buttons were once laid out below the bottom of
+//! the window, behind the taskbar, and so never drawn at all.
+//!
+//! # Choosing the seating
+//!
+//! `2`, `3`, `6`, or `Tab` to cycle; see [`crate::setup`] for what a seating is
+//! and why only those three counts are offered. Only the host may change it,
+//! since it describes the shared game rather than one peer's view of it.
 //!
 //! # Leaving the lobby
 //!
-//! **`S` always starts a solo game**, all six players driven locally, without
-//! consulting the network at all. That escape hatch is not a convenience: the
-//! board is only spawned on entering [`AppState::InGame`], so *any* way for the
-//! lobby to become unleaveable shows up as a blank window with no explanation.
+//! **`S` always starts a solo game**, every seated player driven locally,
+//! without consulting the network at all. That escape hatch is not a
+//! convenience: the board is only spawned on entering [`AppState::InGame`], so
+//! *any* way for the lobby to become unleaveable shows up as a blank window with
+//! no explanation.
 //!
 //! It has happened. Peers from an unrelated project shared the old default room
 //! on the public signaling server, this build lost the host election, and it
@@ -35,6 +48,7 @@ use bevy::prelude::*;
 use bevy_matchbox::prelude::*;
 use checkers_net::{CH_RELIABLE, NetMsg, NetState, RoomId, Seat, broadcast, decode};
 
+use crate::setup::Seating;
 use crate::{AppState, Session};
 
 /// Push the host's roster to every peer. The roster broadcast follows every
@@ -48,84 +62,163 @@ fn publish_roster(socket: &mut MatchboxSocket, net: &NetState, peers: &[PeerId])
 pub struct LobbyUi;
 
 #[derive(Component)]
-enum LobbyButton {
+pub enum LobbyButton {
     Ready,
     Start,
     /// Always available, never network-dependent.
     Solo,
+    /// Pick a seating. One button per option rather than a cycling control, so
+    /// the current choice and the alternatives are visible at once.
+    Seats(Seating),
 }
 
 #[derive(Component)]
 struct RosterText;
 
+/// The chosen seating, set in the lobby and read when the game starts.
+///
+/// A resource rather than a field of [`Session`] because the session is rebuilt
+/// from it on entering the game — reading a value out of the thing it
+/// initialises would be circular.
+#[derive(Resource, Default, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChosenSeating(pub Seating);
+
 pub fn plugin(app: &mut App) {
     app.init_resource::<NetState>()
         .init_resource::<RoomId>()
+        .init_resource::<ChosenSeating>()
         .add_systems(OnEnter(AppState::Lobby), (checkers_net::open_socket, spawn))
         .add_systems(OnExit(AppState::Lobby), despawn)
         .add_systems(
             Update,
-            (elect_host, pump_socket, handle_buttons, draw_roster)
+            (
+                elect_host,
+                pump_socket,
+                choose_seating,
+                handle_buttons,
+                sync_seat_buttons,
+                draw_roster,
+            )
                 .chain()
                 .run_if(in_state(AppState::Lobby)),
         );
 }
 
-fn spawn(mut commands: Commands, room: Res<RoomId>) {
-    commands.spawn((
-        Text::new(format!("Room \"{}\"\nConnecting…", room.0)),
-        TextFont {
-            font_size: FontSize::Px(17.0),
-            ..default()
-        },
-        TextColor(Color::srgb(0.88, 0.88, 0.9)),
-        Node {
-            position_type: PositionType::Absolute,
-            top: Val::Px(40.0),
-            left: Val::Px(40.0),
-            ..default()
-        },
-        RosterText,
-        LobbyUi,
-    ));
+/// Highlight the chosen seating.
+///
+/// Runs every frame but early-outs unless the choice changed, so clicking a
+/// seat button repaints once rather than continuously.
+fn sync_seat_buttons(
+    chosen: Res<ChosenSeating>,
+    mut buttons: Query<(&LobbyButton, &mut BackgroundColor)>,
+) {
+    if !chosen.is_changed() {
+        return;
+    }
+    for (button, mut bg) in buttons.iter_mut() {
+        if let LobbyButton::Seats(seating) = button {
+            bg.0 = if *seating == chosen.0 { CHOSEN } else { IDLE };
+        }
+    }
+}
 
+/// One button. Factored out because the lobby now spawns two rows of them and
+/// the padding, radius, and text styling must not drift between the rows.
+fn button(parent: &mut ChildSpawnerCommands, label: &str, tag: LobbyButton) {
+    parent
+        .spawn((
+            Button,
+            Node {
+                padding: UiRect::axes(Val::Px(14.0), Val::Px(8.0)),
+                border_radius: BorderRadius::all(Val::Px(5.0)),
+                ..default()
+            },
+            BackgroundColor(IDLE),
+            tag,
+        ))
+        .with_child((
+            Text::new(label),
+            TextFont {
+                font_size: FontSize::Px(15.0),
+                ..default()
+            },
+            TextColor(Color::srgb(0.9, 0.9, 0.92)),
+        ));
+}
+
+/// An unselected button, and the selected seating. Named because
+/// [`sync_seat_buttons`] has to reset to exactly the spawn colour.
+const IDLE: Color = Color::srgb(0.22, 0.22, 0.27);
+const CHOSEN: Color = Color::srgb(0.20, 0.45, 0.28);
+
+/// The lobby is one **flex column filling the window**, not a set of
+/// absolutely-positioned corners.
+///
+/// The previous layout anchored the buttons at `bottom: 40px`, which put them
+/// off-screen entirely on a display whose work area is shorter than the window:
+/// they were laid out at y=2307 of a 2450px surface, behind the taskbar. A
+/// window-filling column with the content at the top cannot place anything
+/// outside the window, whatever the window's size — so the failure mode is gone
+/// by construction rather than by choosing a better offset.
+fn spawn(mut commands: Commands, room: Res<RoomId>, chosen: Res<ChosenSeating>) {
     commands
         .spawn((
             Node {
-                position_type: PositionType::Absolute,
-                bottom: Val::Px(40.0),
-                left: Val::Px(40.0),
-                column_gap: Val::Px(10.0),
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                flex_direction: FlexDirection::Column,
+                align_items: AlignItems::FlexStart,
+                padding: UiRect::all(Val::Px(40.0)),
+                row_gap: Val::Px(18.0),
                 ..default()
             },
             LobbyUi,
         ))
-        .with_children(|row| {
-            for (label, tag) in [
-                ("Play solo (S)", LobbyButton::Solo),
-                ("Ready (Space)", LobbyButton::Ready),
-                ("Start shared (Enter)", LobbyButton::Start),
-            ] {
-                row.spawn((
-                    Button,
-                    Node {
-                        padding: UiRect::axes(Val::Px(14.0), Val::Px(8.0)),
-                        border_radius: BorderRadius::all(Val::Px(5.0)),
-                        ..default()
-                    },
-                    BackgroundColor(Color::srgb(0.22, 0.22, 0.27)),
-                    tag,
-                ))
-                .with_child((
-                    Text::new(label),
-                    TextFont {
-                        font_size: FontSize::Px(15.0),
-                        ..default()
-                    },
-                    TextColor(Color::srgb(0.9, 0.9, 0.92)),
-                ));
-            }
+        .with_children(|col| {
+            col.spawn((
+                Text::new(format!("Room \"{}\"\nConnecting...", room.0)),
+                TextFont {
+                    font_size: FontSize::Px(17.0),
+                    ..default()
+                },
+                TextColor(Color::srgb(0.88, 0.88, 0.9)),
+                RosterText,
+            ));
+
+            // Seating, with the keys that also set it.
+            col.spawn((
+                Text::new("Players  (2 / 3 / 6, or Tab to cycle)"),
+                TextFont {
+                    font_size: FontSize::Px(14.0),
+                    ..default()
+                },
+                TextColor(Color::srgb(0.62, 0.62, 0.68)),
+            ));
+            col.spawn(Node {
+                column_gap: Val::Px(10.0),
+                ..default()
+            })
+            .with_children(|row| {
+                for seating in Seating::ALL {
+                    button(row, seating.label(), LobbyButton::Seats(seating));
+                }
+            });
+
+            col.spawn(Node {
+                column_gap: Val::Px(10.0),
+                margin: UiRect::top(Val::Px(6.0)),
+                ..default()
+            })
+            .with_children(|row| {
+                button(row, "Play solo (S)", LobbyButton::Solo);
+                button(row, "Ready (Space)", LobbyButton::Ready);
+                button(row, "Start shared (Enter)", LobbyButton::Start);
+            });
         });
+
+    // Paint the initial choice, so the highlight is right on the first frame
+    // rather than only after the first interaction.
+    commands.insert_resource(*chosen);
 }
 
 fn despawn(mut commands: Commands, ui: Query<Entity, With<LobbyUi>>) {
@@ -307,6 +400,60 @@ fn seat_for(net: &mut NetState, peer: &str, name: &str) {
     });
 }
 
+/// Which seating a keypress selects. `Tab` cycles, so the whole control is
+/// reachable without knowing the individual digits.
+fn seating_from_keys(keys: &ButtonInput<KeyCode>, current: Seating) -> Option<Seating> {
+    if keys.just_pressed(KeyCode::Tab) {
+        return Some(current.next());
+    }
+    for (key, seating) in [
+        (KeyCode::Digit2, Seating::Two),
+        (KeyCode::Digit3, Seating::Three),
+        (KeyCode::Digit6, Seating::Six),
+    ] {
+        if keys.just_pressed(key) {
+            return Some(seating);
+        }
+    }
+    None
+}
+
+/// Choose the seating, from the digit keys, `Tab`, or the seat buttons.
+///
+/// A system of its own rather than part of the button handling, because it needs
+/// nothing from the socket. That makes it directly drivable in a headless test —
+/// which matters, since the wiring from keypress to dealt board is exactly what
+/// the pure-function tests could not cover.
+pub fn choose_seating(
+    buttons: Query<(&Interaction, &LobbyButton), Changed<Interaction>>,
+    keys: Res<ButtonInput<KeyCode>>,
+    mut net: ResMut<NetState>,
+    mut chosen: ResMut<ChosenSeating>,
+) {
+    let mut seats = seating_from_keys(&keys, chosen.0);
+    for (interaction, button) in buttons.iter() {
+        if *interaction == Interaction::Pressed
+            && let LobbyButton::Seats(s) = button
+        {
+            seats = Some(*s);
+        }
+    }
+
+    let Some(seating) = seats else {
+        return;
+    };
+
+    // Only the host decides the seating, since it is a property of the shared
+    // game rather than of one peer's view. A guest changing it locally would
+    // start a board that disagrees with everyone else's.
+    if net.peers.is_empty() || net.sequences() {
+        chosen.0 = seating;
+        net.status = format!("Seating: {}", seating.label());
+    } else {
+        net.status = "Only the host chooses the number of players.".into();
+    }
+}
+
 fn handle_buttons(
     buttons: Query<(&Interaction, &LobbyButton), Changed<Interaction>>,
     keys: Res<ButtonInput<KeyCode>>,
@@ -331,6 +478,8 @@ fn handle_buttons(
             LobbyButton::Ready => ready = true,
             LobbyButton::Start => start = true,
             LobbyButton::Solo => solo = true,
+            // Handled by `choose_seating`.
+            LobbyButton::Seats(_) => {}
         }
     }
 
@@ -347,7 +496,7 @@ fn handle_buttons(
             // No socket and no peers means `start_decision` already returned
             // Solo above, so reaching here needs an explanation rather than
             // silence.
-            net.status = "Still connecting… press S to play solo now.".into();
+            net.status = "Still connecting... press S to play solo now.".into();
         }
         return;
     };
@@ -390,9 +539,10 @@ fn handle_buttons(
 fn draw_roster(
     net: Res<NetState>,
     room: Res<RoomId>,
+    chosen: Res<ChosenSeating>,
     mut text: Query<&mut Text, With<RosterText>>,
 ) {
-    if !net.is_changed() {
+    if !net.is_changed() && !chosen.is_changed() {
         return;
     }
     let Ok(mut text) = text.single_mut() else {
@@ -400,10 +550,11 @@ fn draw_roster(
     };
 
     let mut out = format!(
-        "Room \"{}\"  |  {}  |  {} peer(s) connected\n\n",
+        "Room \"{}\"  |  {}  |  {} peer(s) connected  |  {}\n\n",
         room.0,
         if net.sequences() { "host" } else { "guest" },
-        net.peers.len()
+        net.peers.len(),
+        chosen.0.label(),
     );
     if net.seats.is_empty() {
         out.push_str("No other players yet.\n");
@@ -415,35 +566,46 @@ fn draw_roster(
             if seat.peer == me { ">" } else { " " },
             seat.name,
             seat.player.map_or("-".into(), |p| p.to_string()),
-            if seat.ready { "ready" } else { "…" },
+            if seat.ready { "ready" } else { "..." },
         ));
     }
 
     // Enter always does something, so say so plainly. The earlier wording
     // implied a solo player had to wait for peers that were never coming.
-    out.push_str(
-        "\nPress S to play solo now — all six players on one board.\n\
+    //
+    // The count comes from the chosen seating rather than being written out:
+    // hard-coding "all six players" left the hint contradicting the buttons
+    // directly above it whenever a shorter game was picked.
+    out.push_str(&format!(
+        "\nPress S to play solo now - all {} players on one board.\n\
          Enter starts a shared game; Space toggles ready when others are here.",
-    );
+        chosen.0.count()
+    ));
     if !net.status.is_empty() {
         out.push_str(&format!("\n\n{}", net.status));
     }
     **text = out;
 }
 
-/// Seat the local player once the game begins, so the in-game systems know
-/// which of the six players this peer is allowed to move.
-pub fn apply_seats(net: Res<NetState>, mut session: ResMut<Session>) {
+/// Build the game for the chosen seating and seat the local player.
+///
+/// The session is *rebuilt* here rather than mutated, because the seating
+/// determines the starting position and there is no meaningful way to reseat a
+/// board that has already been dealt. Runs on entering the game, before
+/// `spawn_board`.
+pub fn apply_seats(net: Res<NetState>, chosen: Res<ChosenSeating>, mut session: ResMut<Session>) {
+    *session = Session::new(chosen.0);
     session.local_player = net.my_player();
     session.message = match session.local_player {
-        Some(p) => format!("You are player {}", p.index()),
-        None => "Spectating".into(),
+        Some(p) => format!("You are player {} of {}", p.index(), chosen.0.count()),
+        None => format!("Playing all {} players locally", chosen.0.count()),
     };
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use checkers_core::position::Player;
     use checkers_net::Seat;
 
     fn seat(name: &str, ready: bool) -> Seat {
@@ -549,5 +711,90 @@ mod tests {
     /// goes through the tuple field.
     fn fake_peer() -> PeerId {
         PeerId(uuid::Uuid::from_u128(1))
+    }
+
+    fn keys(pressed: &[KeyCode]) -> ButtonInput<KeyCode> {
+        let mut input = ButtonInput::default();
+        for key in pressed {
+            input.press(*key);
+        }
+        input
+    }
+
+    #[test]
+    fn the_digits_select_their_seating() {
+        for (key, want) in [
+            (KeyCode::Digit2, Seating::Two),
+            (KeyCode::Digit3, Seating::Three),
+            (KeyCode::Digit6, Seating::Six),
+        ] {
+            assert_eq!(
+                seating_from_keys(&keys(&[key]), Seating::Six),
+                Some(want),
+                "{key:?} must select {want:?}"
+            );
+        }
+    }
+
+    /// Tab must reach every option, so the control is usable without knowing
+    /// which digits are valid — 4 and 5 are not.
+    #[test]
+    fn tab_cycles_through_every_seating() {
+        let mut current = Seating::default();
+        let mut seen = vec![current];
+        for _ in 0..Seating::ALL.len() {
+            current = seating_from_keys(&keys(&[KeyCode::Tab]), current)
+                .expect("Tab always selects something");
+            if !seen.contains(&current) {
+                seen.push(current);
+            }
+        }
+        assert_eq!(
+            seen.len(),
+            Seating::ALL.len(),
+            "Tab must reach every seating, saw {seen:?}"
+        );
+    }
+
+    #[test]
+    fn an_unrelated_key_selects_nothing() {
+        assert_eq!(
+            seating_from_keys(&keys(&[KeyCode::KeyX]), Seating::Six),
+            None
+        );
+        // 4 and 5 are not offered, and must not be silently accepted.
+        assert_eq!(
+            seating_from_keys(&keys(&[KeyCode::Digit4]), Seating::Six),
+            None
+        );
+        assert_eq!(
+            seating_from_keys(&keys(&[KeyCode::Digit5]), Seating::Six),
+            None
+        );
+    }
+
+    /// The seating must survive into the game. `apply_seats` rebuilds the
+    /// session from it, and a session built for two players must not be holding
+    /// a six-player board.
+    #[test]
+    fn the_chosen_seating_builds_the_session() {
+        for seating in Seating::ALL {
+            let session = Session::new(seating);
+            assert_eq!(session.seating, seating);
+            assert_eq!(
+                session.game.position().holes().len(),
+                121,
+                "the board is always the full star"
+            );
+            for player in Player::ALL {
+                let n = session.game.position().pieces_of(player).len();
+                let expected = if seating.players().contains(&player) {
+                    10
+                } else {
+                    0
+                };
+                assert_eq!(n, expected, "{seating:?}: player {}", player.index());
+            }
+        }
     }
 }
