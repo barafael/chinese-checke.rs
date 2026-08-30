@@ -56,7 +56,10 @@ fn key_of_core(mv: &CoreMove) -> Key {
 }
 
 fn move_keys_model(state: &ModelState, player: ModelPlayer) -> HashSet<Key> {
-    model_legal(state, player).iter().map(key_of_model).collect()
+    model_legal(state, player)
+        .iter()
+        .map(key_of_model)
+        .collect()
 }
 
 fn move_keys_core(pos: &CorePosition, player: CorePlayer) -> HashSet<Key> {
@@ -74,7 +77,11 @@ fn model_holes() -> Vec<ModelCoord> {
 fn assert_positions_agree(pos: &CorePosition, state: &ModelState, holes: &[ModelCoord], ctx: &str) {
     for &m in holes {
         let core_owner = pos.occupant(to_core(m)).map(|p| p.index());
-        assert_eq!(core_owner, state.owner(m), "{ctx}: occupancy differs at {m:?}");
+        assert_eq!(
+            core_owner,
+            state.owner(m),
+            "{ctx}: occupancy differs at {m:?}"
+        );
     }
 }
 
@@ -115,7 +122,10 @@ fn parallel_games_never_disagree() {
             for i in 0..6u8 {
                 let core_set = move_keys_core(core.position(), CorePlayer::wrapping(i));
                 let model_set = move_keys_model(model.state(), i);
-                assert_eq!(core_set, model_set, "{ctx}: move sets diverge for player {i}");
+                assert_eq!(
+                    core_set, model_set,
+                    "{ctx}: move sets diverge for player {i}"
+                );
             }
 
             // Win flags agree for everyone.
@@ -134,8 +144,9 @@ fn parallel_games_never_disagree() {
 
             // Choose a move from the (already compared) common set. Sorting
             // keeps a failure reproducible: same seed, same choices.
-            let mut moves: Vec<Key> =
-                move_keys_core(core.position(), core.turn()).into_iter().collect();
+            let mut moves: Vec<Key> = move_keys_core(core.position(), core.turn())
+                .into_iter()
+                .collect();
             moves.sort();
             if moves.is_empty() {
                 core.pass();
@@ -221,9 +232,11 @@ fn board_geometry_agrees() {
 
     let core_holes: HashSet<(i32, i32)> =
         core_all_holes().into_iter().map(|c| (c.q, c.r)).collect();
-    let model_holes: HashSet<(i32, i32)> =
-        board.holes().map(|c| (c.q, c.r)).collect();
-    assert_eq!(core_holes, model_holes, "the two crates build different stars");
+    let model_holes: HashSet<(i32, i32)> = board.holes().map(|c| (c.q, c.r)).collect();
+    assert_eq!(
+        core_holes, model_holes,
+        "the two crates build different stars"
+    );
 
     for c in core_all_holes() {
         let core_camp = camp_of(c).map(|i| i as u8);
