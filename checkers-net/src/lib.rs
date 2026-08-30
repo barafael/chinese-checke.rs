@@ -179,6 +179,10 @@ pub struct NetState {
     /// Human-readable explanation of the last refused action, shown in the
     /// lobby. Empty when there is nothing to explain.
     pub status: String,
+    /// Peers we have already sent our [`NetMsg::Hello`] to. Without this a
+    /// per-frame greet loop would flood the channel; disconnected peers may
+    /// stay listed here — a reconnect arrives with a fresh id anyway.
+    pub greeted: Vec<PeerId>,
 }
 
 impl NetState {

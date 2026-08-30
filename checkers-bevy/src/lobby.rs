@@ -21,9 +21,15 @@
 
 use bevy::prelude::*;
 use bevy_matchbox::prelude::*;
-use checkers_net::{CH_RELIABLE, NetMsg, NetState, RoomId, Seat, broadcast, decode, send_to};
+use checkers_net::{CH_RELIABLE, NetMsg, NetState, RoomId, Seat, broadcast, decode};
 
 use crate::{AppState, Session};
+
+/// Push the host's roster to every peer. The roster broadcast follows every
+/// roster change, so it lives in one place.
+fn publish_roster(socket: &mut MatchboxSocket, net: &NetState, peers: &[PeerId]) {
+    broadcast(socket, peers, &NetMsg::Roster(net.seats.clone()));
+}
 
 /// Marker for everything spawned by the lobby, so leaving despawns it wholesale.
 #[derive(Component)]
@@ -195,20 +201,31 @@ fn pump_socket(
         return;
     };
 
-    // Announce ourselves to peers we have not greeted. Cheap enough to redo on
-    // roster change; the host ignores a repeat Hello from a known peer.
+    // Announce ourselves to peers we have not greeted yet: once when we first
+    // have a name, and afterwards only to peers that join later. Greeting
+    // everyone every frame would flood the channel — the host ignores repeat
+    // Hellos, but the traffic is not free.
     let peers = net.peers.clone();
     let me = net.my_id.map(|id| id.to_string()).unwrap_or_default();
     if net.name.is_empty() && !me.is_empty() {
         net.name = format!("player-{}", &me[..me.len().min(4)]);
+    }
+    let unacquainted: Vec<PeerId> = peers
+        .iter()
+        .filter(|p| !net.greeted.contains(p))
+        .copied()
+        .collect();
+    if !net.name.is_empty() && !unacquainted.is_empty() {
         let hello = NetMsg::Hello {
             name: net.name.clone(),
         };
-        broadcast(&mut socket, &peers, &hello);
+        broadcast(&mut socket, &unacquainted, &hello);
         // The host's own seat is not created by a Hello it never receives.
         if net.sequences() {
-            seat_for(&mut net, &me, &me.clone());
+            let name = net.name.clone();
+            seat_for(&mut net, &me, &name);
         }
+        net.greeted.extend(unacquainted);
     }
 
     let inbox: Vec<(PeerId, Box<[u8]>)> = socket.channel_mut(CH_RELIABLE).receive();
@@ -220,8 +237,7 @@ fn pump_socket(
             NetMsg::Hello { name } => {
                 if net.sequences() {
                     seat_for(&mut net, &from.to_string(), &name);
-                    let roster = NetMsg::Roster(net.seats.clone());
-                    broadcast(&mut socket, &peers, &roster);
+                    publish_roster(&mut socket, &net, &peers);
                 }
             }
             NetMsg::Ready(ready) => {
@@ -230,8 +246,7 @@ fn pump_socket(
                     if let Some(seat) = net.seats.iter_mut().find(|s| s.peer == key) {
                         seat.ready = ready;
                     }
-                    let roster = NetMsg::Roster(net.seats.clone());
-                    broadcast(&mut socket, &peers, &roster);
+                    publish_roster(&mut socket, &net, &peers);
                 }
             }
             // Guests take the host's roster verbatim; it is the only authority.
@@ -244,16 +259,6 @@ fn pump_socket(
             // from a previous game in the same room could. Ignore rather than
             // mis-apply.
             NetMsg::Move(_) | NetMsg::Sequenced { .. } => {}
-        }
-    }
-
-    // Greet any peer that joined after us.
-    if !net.name.is_empty() {
-        for peer in &peers {
-            let hello = NetMsg::Hello {
-                name: net.name.clone(),
-            };
-            send_to(&mut socket, *peer, &hello);
         }
     }
 }
@@ -319,8 +324,7 @@ fn handle_buttons(
             if let Some(seat) = net.seats.iter_mut().find(|s| s.peer == me) {
                 seat.ready = now;
             }
-            let roster = NetMsg::Roster(net.seats.clone());
-            broadcast(&mut socket, &peers, &roster);
+            publish_roster(&mut socket, &net, &peers);
         } else {
             broadcast(&mut socket, &peers, &NetMsg::Ready(now));
         }
