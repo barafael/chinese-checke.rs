@@ -2334,6 +2334,7 @@ dependencies = [
  "bevy_matchbox",
  "checkers-core",
  "checkers-net",
+ "uuid",
 ]
 
 [[package]]

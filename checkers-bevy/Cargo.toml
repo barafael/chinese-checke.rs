@@ -10,5 +10,11 @@ bevy_matchbox.workspace = true
 checkers-core.workspace = true
 checkers-net.workspace = true
 
+# `PeerId` is a newtype over `Uuid` with no `FromStr`, so constructing a
+# placeholder peer for the lobby tests needs the crate directly. Already in the
+# tree via matchbox, so this adds no build.
+[dev-dependencies]
+uuid = "1"
+
 [lints]
 workspace = true

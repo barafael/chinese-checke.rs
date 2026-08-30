@@ -176,6 +176,9 @@ pub struct NetState {
     /// Highest applied sequence number, for dropping duplicate deliveries.
     pub last_applied_seq: Option<u32>,
     pub name: String,
+    /// Human-readable explanation of the last refused action, shown in the
+    /// lobby. Empty when there is nothing to explain.
+    pub status: String,
 }
 
 impl NetState {

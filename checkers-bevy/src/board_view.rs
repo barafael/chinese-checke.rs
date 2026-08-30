@@ -14,6 +14,14 @@ pub const HOLE_RADIUS: f32 = 7.0;
 /// Radius of a piece.
 pub const PIECE_RADIUS: f32 = 13.0;
 
+/// Half-extent of the star in world units, plus room for the piece radius.
+///
+/// The star spans x ∈ [-204, 204] and y ∈ [-236, 236] at [`HOLE_SPACING`]; the
+/// board is centred on the origin, so one half-extent describes both sides.
+/// Measured from [`crate::board_view::coord_to_world`] over every hole rather
+/// than derived by hand — see `the_board_fits_within_its_half_extent`.
+pub const BOARD_HALF_EXTENT: Vec2 = Vec2::new(204.0 + PIECE_RADIUS, 236.0 + PIECE_RADIUS);
+
 /// Axial to screen, using the pointy-top convention.
 ///
 /// $x = \sqrt{3}\,(q + r/2)$ and $y = -\tfrac{3}{2} r$; the $y$ negation puts
@@ -54,6 +62,39 @@ pub fn world_to_coord(p: Vec2) -> Coord {
 mod tests {
     use super::*;
     use checkers_core::geometry::all_holes;
+
+    /// [`BOARD_HALF_EXTENT`] must actually contain the board, or the camera-fit
+    /// system will crop it. A hand-written constant is exactly the kind of thing
+    /// that rots when `HOLE_SPACING` changes, so it is checked rather than
+    /// trusted.
+    #[test]
+    fn the_board_fits_within_its_half_extent() {
+        let mut worst = Vec2::ZERO;
+        for c in all_holes() {
+            let p = coord_to_world(c).abs();
+            worst = worst.max(p);
+        }
+
+        assert!(
+            worst.x + PIECE_RADIUS <= BOARD_HALF_EXTENT.x,
+            "board reaches x={} (+{PIECE_RADIUS} for the piece) but the half-extent is {}",
+            worst.x,
+            BOARD_HALF_EXTENT.x
+        );
+        assert!(
+            worst.y + PIECE_RADIUS <= BOARD_HALF_EXTENT.y,
+            "board reaches y={} (+{PIECE_RADIUS} for the piece) but the half-extent is {}",
+            worst.y,
+            BOARD_HALF_EXTENT.y
+        );
+
+        // Not wastefully large either: a half-extent much bigger than the board
+        // would leave the board small and the window mostly empty.
+        assert!(
+            worst.x + PIECE_RADIUS >= BOARD_HALF_EXTENT.x - 1.0,
+            "the half-extent is loose by more than a pixel in x"
+        );
+    }
 
     /// Every hole must round-trip: a hole whose centre maps back to a different
     /// hole would make clicks land on the wrong cell.

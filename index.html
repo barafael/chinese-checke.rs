@@ -22,10 +22,16 @@
       -webkit-user-select: none;
       user-select: none;
     }
+    /* Fill the viewport exactly. `min-width/height: 100vw/vh` let the canvas
+       grow past the viewport and produced scrollbars that `overflow: hidden`
+       then clipped, cropping the board. Fixed positioning pins it instead. */
     canvas {
       display: block;
-      min-width: 100vw;
-      min-height: 100vh;
+      position: fixed;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      outline: none;
       touch-action: none;
     }
     /* Shown until the wasm module takes over the page. */

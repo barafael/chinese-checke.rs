@@ -26,7 +26,9 @@
 //!
 //! The app opens in a lobby ([`lobby`]): peers sharing a room id find each other
 //! over WebRTC, the host assigns seats, and Enter starts the game once everyone
-//! is ready. A solo player presses Enter on an empty roster.
+//! is ready. With nobody else present, Enter starts a solo game in which all six
+//! players are driven locally — it does not wait for the socket, so an
+//! unreachable signaling server cannot strand the player on a blank screen.
 //!
 //! Moves are never applied where they are made. They are queued in
 //! [`Session::outbox`] and applied only when they come back **host-sequenced**
@@ -56,8 +58,11 @@ mod board_view;
 mod lobby;
 mod net;
 
+use bevy::camera::ScalingMode;
 use bevy::prelude::*;
-use board_view::{HOLE_RADIUS, HOLE_SPACING, PIECE_RADIUS, coord_to_world, world_to_coord};
+use board_view::{
+    BOARD_HALF_EXTENT, HOLE_RADIUS, HOLE_SPACING, PIECE_RADIUS, coord_to_world, world_to_coord,
+};
 use checkers_core::audit::audit_position;
 use checkers_core::geometry::{Coord, all_holes, camp_of, on_board};
 use checkers_core::law::{LAWS, verify_all};
@@ -73,7 +78,16 @@ fn main() {
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title: "Chinese Checkers".into(),
+                // The native window's starting size. On the web the canvas
+                // follows its parent instead, so this is only the initial
+                // backbuffer before the first resize.
                 resolution: (900u32, 980u32).into(),
+                // Track the containing element rather than rendering at a fixed
+                // 900x980 and letting CSS stretch the result, which distorts the
+                // board. Safe here because `body` takes its size from the
+                // viewport, not from the canvas — the feedback loop this field
+                // warns about needs a parent sized by its children.
+                fit_canvas_to_parent: true,
                 ..default()
             }),
             ..default()
@@ -111,8 +125,12 @@ fn main() {
 }
 
 /// Lobby first, then the board. Networked play needs seats assigned before the
-/// game is playable, and the same gate keeps a solo player's flow unchanged —
-/// they simply press Enter on an empty roster.
+/// game is playable; a solo player passes straight through with Enter.
+///
+/// Note that the board only exists in [`AppState::InGame`] — `spawn_board` runs
+/// on entering it. A lobby that cannot be left therefore shows an empty screen,
+/// which is why [`lobby::start_decision`] never makes starting conditional on
+/// the network.
 #[derive(States, Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 enum AppState {
     #[default]
@@ -437,13 +455,31 @@ fn player_colour(player: Player) -> Color {
 /// Verify the specification and spawn the camera. Runs once, before the lobby:
 /// the app refuses to show anything at all if its own laws do not hold.
 fn setup(mut commands: Commands) {
+    // Camera first. Verification takes roughly a second, and on wasm that runs
+    // on the browser's only thread — spawning the camera afterwards meant the
+    // tab painted nothing at all until the registry finished, which is
+    // indistinguishable from a hung build.
+    //
+    // `AutoMin` guarantees at least the board's extent is visible whatever the
+    // canvas aspect ratio, scaling to fit rather than cropping. That is what
+    // makes a resizable canvas safe: without it the board is drawn at a fixed
+    // 34px spacing and a narrow window simply cuts off the outer camps.
+    commands.spawn((
+        Camera2d,
+        Projection::from(OrthographicProjection {
+            scaling_mode: ScalingMode::AutoMin {
+                min_width: BOARD_HALF_EXTENT.x * 2.0,
+                min_height: BOARD_HALF_EXTENT.y * 2.0,
+            },
+            ..OrthographicProjection::default_2d()
+        }),
+    ));
+
     // The full law registry is worth its cost once, at startup.
     if let Err(violation) = verify_all() {
         panic!("the specification does not hold: {violation}");
     }
     audit(&Position::initial());
-
-    commands.spawn(Camera2d);
 }
 
 /// Spawn the board, status panel, and turn controls on entering the game.

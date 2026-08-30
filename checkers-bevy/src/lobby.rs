@@ -113,6 +113,43 @@ fn despawn(mut commands: Commands, ui: Query<Entity, With<LobbyUi>>) {
     }
 }
 
+/// What pressing Enter should do.
+///
+/// Split out from [`handle_buttons`] because it is the part that was wrong: the
+/// original required a non-empty, all-ready roster, and a solo player's seat is
+/// only created once the socket connects and starts out `ready: false`. So a
+/// lone player faced a blank screen — the board only exists in
+/// [`AppState::InGame`] — with Enter doing nothing and no explanation.
+#[derive(Debug, PartialEq, Eq)]
+pub enum StartDecision {
+    /// Nobody else is here: play all six players locally.
+    Solo,
+    /// Tell the peers and begin.
+    Multiplayer,
+    /// Refuse, with a reason to show the player.
+    Refuse(String),
+}
+
+pub fn start_decision(net: &NetState) -> StartDecision {
+    if net.peers.is_empty() {
+        return StartDecision::Solo;
+    }
+    if !net.sequences() {
+        return StartDecision::Refuse("Only the host can start the game.".into());
+    }
+    let waiting: Vec<&str> = net
+        .seats
+        .iter()
+        .filter(|s| !s.ready)
+        .map(|s| s.name.as_str())
+        .collect();
+    if waiting.is_empty() {
+        StartDecision::Multiplayer
+    } else {
+        StartDecision::Refuse(format!("Waiting for: {}", waiting.join(", ")))
+    }
+}
+
 /// Smallest `PeerId` hosts. Recomputed every frame so host loss self-heals.
 fn elect_host(socket: Option<ResMut<MatchboxSocket>>, mut net: ResMut<NetState>) {
     let Some(mut socket) = socket else {
@@ -255,7 +292,19 @@ fn handle_buttons(
         }
     }
 
+    // Starting must not depend on the socket. If the signaling server is
+    // unreachable — blocked, down, or just slow — a solo player would otherwise
+    // be stuck on a blank screen with no way forward and nothing explaining why.
+    if start && matches!(start_decision(&net), StartDecision::Solo) {
+        info!("starting a solo game");
+        next_state.set(AppState::InGame);
+        return;
+    }
+
     let Some(mut socket) = socket else {
+        if start {
+            net.status = "No connection yet — press Enter again to play solo.".into();
+        }
         return;
     };
     let peers = net.peers.clone();
@@ -277,15 +326,21 @@ fn handle_buttons(
         }
     }
 
-    // Only the host may start, and only once every seat is ready. Guests
-    // pressing Enter do nothing rather than starting a game the host has not
-    // agreed to.
-    if start && net.sequences() && !net.seats.is_empty() && net.seats.iter().all(|s| s.ready) {
-        let msg = NetMsg::Start {
-            seats: net.seats.clone(),
-        };
-        broadcast(&mut socket, &peers, &msg);
-        next_state.set(AppState::InGame);
+    // Every refusal states its reason: a button that silently does nothing is
+    // indistinguishable from a broken build, which is how the blank-screen bug
+    // presented.
+    if start {
+        match start_decision(&net) {
+            StartDecision::Solo => next_state.set(AppState::InGame),
+            StartDecision::Multiplayer => {
+                let msg = NetMsg::Start {
+                    seats: net.seats.clone(),
+                };
+                broadcast(&mut socket, &peers, &msg);
+                next_state.set(AppState::InGame);
+            }
+            StartDecision::Refuse(why) => net.status = why,
+        }
     }
 }
 
@@ -308,7 +363,7 @@ fn draw_roster(
         net.peers.len()
     );
     if net.seats.is_empty() {
-        out.push_str("Waiting for peers…\n");
+        out.push_str("No other players yet.\n");
     }
     let me = net.my_id.map(|id| id.to_string()).unwrap_or_default();
     for seat in &net.seats {
@@ -320,7 +375,17 @@ fn draw_roster(
             if seat.ready { "ready" } else { "…" },
         ));
     }
-    out.push_str("\nSpace toggles ready. The host starts once everyone is ready.");
+
+    // Enter always does something, so say so plainly. The earlier wording
+    // implied a solo player had to wait for peers that were never coming.
+    out.push_str(
+        "\nPress Enter to play — solo if nobody else has joined, \
+         all six players on one board.\n\
+         Space toggles ready when others are here; the host starts the game.",
+    );
+    if !net.status.is_empty() {
+        out.push_str(&format!("\n\n{}", net.status));
+    }
     **text = out;
 }
 
@@ -332,4 +397,90 @@ pub fn apply_seats(net: Res<NetState>, mut session: ResMut<Session>) {
         Some(p) => format!("You are player {}", p.index()),
         None => "Spectating".into(),
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use checkers_net::Seat;
+
+    fn seat(name: &str, ready: bool) -> Seat {
+        Seat {
+            peer: name.into(),
+            name: name.into(),
+            player: Some(0),
+            ready,
+        }
+    }
+
+    /// The bug this function was extracted for: with nobody else present, Enter
+    /// must start the game. It used to require a non-empty, all-ready roster,
+    /// and a solo player's seat is only created once the socket connects — and
+    /// starts out not ready. The board only exists in `InGame`, so the player
+    /// was left staring at a blank screen with Enter doing nothing.
+    #[test]
+    fn a_lone_player_can_always_start() {
+        let net = NetState::default();
+        assert!(net.peers.is_empty(), "the fixture has no peers");
+        assert!(net.seats.is_empty(), "and no seat has been created yet");
+        assert_eq!(start_decision(&net), StartDecision::Solo);
+    }
+
+    /// Specifically the socket-never-connected case: no id, no seat, no peers.
+    /// An unreachable signaling server must not be able to strand the player.
+    #[test]
+    fn an_unreachable_signaling_server_does_not_block_solo_play() {
+        // Default *is* the never-connected state, which is the point: no id, no
+        // seat, no peers is what a failed connection leaves behind.
+        let net = NetState::default();
+        assert_eq!(net.my_id, None, "no id without a connection");
+        assert!(net.seats.is_empty(), "and no seat");
+        assert_eq!(start_decision(&net), StartDecision::Solo);
+    }
+
+    #[test]
+    fn a_guest_is_told_only_the_host_can_start() {
+        let mut net = NetState::default();
+        // A peer is present and we are not the host.
+        net.peers.push(fake_peer());
+        net.is_host = false;
+        match start_decision(&net) {
+            StartDecision::Refuse(why) => assert!(why.contains("host"), "{why}"),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_host_is_told_who_it_is_waiting_for() {
+        let mut net = NetState::default();
+        net.peers.push(fake_peer());
+        net.is_host = true;
+        net.seats = vec![seat("ada", true), seat("grace", false)];
+
+        match start_decision(&net) {
+            StartDecision::Refuse(why) => {
+                assert!(why.contains("grace"), "should name who is not ready: {why}");
+                assert!(
+                    !why.contains("ada"),
+                    "should not name a ready player: {why}"
+                );
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_host_starts_once_everyone_is_ready() {
+        let mut net = NetState::default();
+        net.peers.push(fake_peer());
+        net.is_host = true;
+        net.seats = vec![seat("ada", true), seat("grace", true)];
+        assert_eq!(start_decision(&net), StartDecision::Multiplayer);
+    }
+
+    /// A stand-in peer. `PeerId` is a `Uuid` newtype with no `FromStr`, so this
+    /// goes through the tuple field.
+    fn fake_peer() -> PeerId {
+        PeerId(uuid::Uuid::from_u128(1))
+    }
 }
