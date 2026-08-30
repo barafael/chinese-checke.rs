@@ -23,7 +23,6 @@
 //! regenerates its own sample games, and it never inspects the caller's
 //! position. That distinction is what [`checkers_core::audit`] exists for.
 
-use bevy::camera::ScalingMode;
 use bevy::prelude::*;
 use checkers_bevy::board_view::{
     BOARD_HALF_EXTENT, HOLE_RADIUS, HOLE_SPACING, PIECE_RADIUS, coord_to_world, world_to_coord,
@@ -70,6 +69,7 @@ fn main() {
                 handle_clicks,
                 handle_keys,
                 toggle_status,
+                fit_camera_to_window,
                 // Drains the outbox and applies only host-sequenced moves, so
                 // it must run after input and before the view syncs.
                 net::pump,
@@ -146,20 +146,19 @@ fn setup(mut commands: Commands) {
     // tab painted nothing at all until the registry finished, which is
     // indistinguishable from a hung build.
     //
-    // `AutoMin` guarantees at least the board's extent is visible whatever the
-    // canvas aspect ratio, scaling to fit rather than cropping. That is what
-    // makes a resizable canvas safe: without it the board is drawn at a fixed
-    // 34px spacing and a narrow window simply cuts off the outer camps.
-    commands.spawn((
-        Camera2d,
-        Projection::from(OrthographicProjection {
-            scaling_mode: ScalingMode::AutoMin {
-                min_width: BOARD_HALF_EXTENT.x * 2.0,
-                min_height: BOARD_HALF_EXTENT.y * 2.0,
-            },
-            ..OrthographicProjection::default_2d()
-        }),
-    ));
+    // The default `WindowSize` scaling, deliberately.
+    //
+    // I first set `ScalingMode::AutoMin` over the board's extent, reasoning it
+    // would fit the board to any canvas. It does the opposite: `AutoMin` and
+    // `AutoMax` both *pin* the viewport to the given size in world units, so a
+    // 434-unit viewport in a 900px window magnifies everything by the ratio —
+    // and again by the display scale factor. The screenshot showed about a tenth
+    // of the board, with the UI text blown up to match.
+    //
+    // `WindowSize` maps one world unit to one pixel, which is what
+    // `HOLE_SPACING = 34` was chosen against. `fit_camera_to_window` handles the
+    // only case this leaves open: a window too small for the board.
+    commands.spawn(Camera2d);
 
     // The full law registry is worth its cost once, at startup.
     if let Err(violation) = verify_all() {
@@ -339,6 +338,34 @@ fn toggle_status(keys: Res<ButtonInput<KeyCode>>, mut visible: ResMut<StatusVisi
     if keys.just_pressed(KeyCode::KeyT) {
         visible.0 = !visible.0;
     }
+}
+
+/// Zoom out when the window is too small to show the whole board.
+///
+/// Only ever zooms *out*: at the default projection one world unit is one pixel,
+/// which is the scale `HOLE_SPACING` was designed for, so enlarging the board in
+/// a big window is not wanted. Scaling the projection rather than the entities
+/// keeps `coord_to_world` in one place, and clicks stay correct because
+/// `viewport_to_world_2d` applies the same projection.
+fn fit_camera_to_window(
+    windows: Query<&Window, Changed<Window>>,
+    mut projections: Query<&mut Projection, With<Camera2d>>,
+) {
+    let Ok(window) = windows.single() else {
+        return;
+    };
+    let Ok(mut projection) = projections.single_mut() else {
+        return;
+    };
+    let Projection::Orthographic(ortho) = &mut *projection else {
+        return;
+    };
+
+    let needed = BOARD_HALF_EXTENT * 2.0;
+    let available = Vec2::new(window.width(), window.height());
+    // `scale` divides: >1 shows more world per pixel, i.e. zooms out.
+    let shortfall = (needed / available).max_element();
+    ortho.scale = shortfall.max(1.0);
 }
 
 fn sync_status_visibility(

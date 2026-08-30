@@ -216,7 +216,12 @@ pub struct RoomId(pub String);
 
 impl Default for RoomId {
     fn default() -> Self {
-        Self("checkers".into())
+        // Namespaced, because the default signaling server is shared with other
+        // projects. The bare name `checkers` collided with live sessions there:
+        // two unrelated peers joined, this build lost the host election, and it
+        // sat in the lobby forever waiting for a `Start` that those peers — a
+        // different game entirely — were never going to send.
+        Self("chinese-checkers-rs-v1".into())
     }
 }
 

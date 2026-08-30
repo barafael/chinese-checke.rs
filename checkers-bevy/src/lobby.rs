@@ -3,6 +3,18 @@
 //! Built with plain Bevy UI rather than egui, to match the in-game buttons and
 //! to avoid a dependency for four widgets.
 //!
+//! # Leaving the lobby
+//!
+//! **`S` always starts a solo game**, all six players driven locally, without
+//! consulting the network at all. That escape hatch is not a convenience: the
+//! board is only spawned on entering [`AppState::InGame`], so *any* way for the
+//! lobby to become unleaveable shows up as a blank window with no explanation.
+//!
+//! It has happened. Peers from an unrelated project shared the old default room
+//! on the public signaling server, this build lost the host election, and it
+//! waited forever for a `Start` nobody was going to send. Enter still starts a
+//! shared game, but every way it can refuse names `S`.
+//!
 //! # Host election
 //!
 //! The peer with the lexicographically smallest `PeerId` hosts. That is not
@@ -39,6 +51,8 @@ pub struct LobbyUi;
 enum LobbyButton {
     Ready,
     Start,
+    /// Always available, never network-dependent.
+    Solo,
 }
 
 #[derive(Component)]
@@ -88,8 +102,9 @@ fn spawn(mut commands: Commands, room: Res<RoomId>) {
         ))
         .with_children(|row| {
             for (label, tag) in [
+                ("Play solo (S)", LobbyButton::Solo),
                 ("Ready (Space)", LobbyButton::Ready),
-                ("Start (Enter)", LobbyButton::Start),
+                ("Start shared (Enter)", LobbyButton::Start),
             ] {
                 row.spawn((
                     Button,
@@ -140,9 +155,20 @@ pub fn start_decision(net: &NetState) -> StartDecision {
     if net.peers.is_empty() {
         return StartDecision::Solo;
     }
+
+    // A guest cannot start a *shared* game, and must be told so rather than
+    // having Enter do nothing. This is not hypothetical: the old default room on
+    // the shared signaling server collided with another project's sessions, so
+    // this build found two peers, lost the host election, and sat in a lobby it
+    // could never leave — which is what a blank screen looked like from outside.
+    //
+    // Every refusal names `S` because that key never consults the network.
     if !net.sequences() {
-        return StartDecision::Refuse("Only the host can start the game.".into());
+        return StartDecision::Refuse(
+            "Only the host can start a shared game. Press S to play solo.".into(),
+        );
     }
+
     let waiting: Vec<&str> = net
         .seats
         .iter()
@@ -152,7 +178,10 @@ pub fn start_decision(net: &NetState) -> StartDecision {
     if waiting.is_empty() {
         StartDecision::Multiplayer
     } else {
-        StartDecision::Refuse(format!("Waiting for: {}", waiting.join(", ")))
+        StartDecision::Refuse(format!(
+            "Waiting for: {}. Press S to play solo instead.",
+            waiting.join(", ")
+        ))
     }
 }
 
@@ -286,7 +315,14 @@ fn handle_buttons(
     mut next_state: ResMut<NextState<AppState>>,
 ) {
     let mut ready = keys.just_pressed(KeyCode::Space);
-    let mut start = keys.just_pressed(KeyCode::Enter);
+    let mut start = keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::NumpadEnter);
+
+    // `S` starts a solo game unconditionally, without consulting the network at
+    // all. Enter's behaviour depends on peers and readiness, and every way that
+    // can refuse looks identical to a broken build, because the board only
+    // exists once the lobby is left. One key that always works is the difference
+    // between a bad lobby and an unusable game.
+    let mut solo = keys.just_pressed(KeyCode::KeyS);
     for (interaction, button) in buttons.iter() {
         if *interaction != Interaction::Pressed {
             continue;
@@ -294,13 +330,13 @@ fn handle_buttons(
         match button {
             LobbyButton::Ready => ready = true,
             LobbyButton::Start => start = true,
+            LobbyButton::Solo => solo = true,
         }
     }
 
-    // Starting must not depend on the socket. If the signaling server is
-    // unreachable — blocked, down, or just slow — a solo player would otherwise
-    // be stuck on a blank screen with no way forward and nothing explaining why.
-    if start && matches!(start_decision(&net), StartDecision::Solo) {
+    // Checked before the socket is even looked at, so nothing about the network
+    // can prevent it. `start` also plays solo when nobody else is present.
+    if solo || (start && matches!(start_decision(&net), StartDecision::Solo)) {
         info!("starting a solo game");
         next_state.set(AppState::InGame);
         return;
@@ -308,7 +344,10 @@ fn handle_buttons(
 
     let Some(mut socket) = socket else {
         if start {
-            net.status = "No connection yet — press Enter again to play solo.".into();
+            // No socket and no peers means `start_decision` already returned
+            // Solo above, so reaching here needs an explanation rather than
+            // silence.
+            net.status = "Still connecting… press S to play solo now.".into();
         }
         return;
     };
@@ -383,9 +422,8 @@ fn draw_roster(
     // Enter always does something, so say so plainly. The earlier wording
     // implied a solo player had to wait for peers that were never coming.
     out.push_str(
-        "\nPress Enter to play — solo if nobody else has joined, \
-         all six players on one board.\n\
-         Space toggles ready when others are here; the host starts the game.",
+        "\nPress S to play solo now — all six players on one board.\n\
+         Enter starts a shared game; Space toggles ready when others are here.",
     );
     if !net.status.is_empty() {
         out.push_str(&format!("\n\n{}", net.status));
@@ -470,6 +508,31 @@ mod tests {
                 );
             }
             other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    /// No refusal may be a dead end. The board only exists after the lobby, so a
+    /// refusal that does not tell the player how to proceed is indistinguishable
+    /// from the game being broken — which is exactly how the shared-room
+    /// deadlock presented.
+    #[test]
+    fn every_refusal_names_the_escape_hatch() {
+        let mut guest = NetState::default();
+        guest.peers.push(fake_peer());
+
+        let mut waiting = NetState::default();
+        waiting.peers.push(fake_peer());
+        waiting.is_host = true;
+        waiting.seats = vec![seat("ada", false)];
+
+        for net in [&guest, &waiting] {
+            match start_decision(net) {
+                StartDecision::Refuse(why) => assert!(
+                    why.contains("S to play solo"),
+                    "a refusal must offer the solo key: {why:?}"
+                ),
+                other => panic!("expected a refusal, got {other:?}"),
+            }
         }
     }
 
