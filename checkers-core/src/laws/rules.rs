@@ -18,25 +18,13 @@ use crate::position::{
     is_legal_step,
 };
 use crate::register_law;
+use crate::rng::Xorshift;
 use crate::rules::{
     Outcome, apply, apply_route, blocked_position, frozen_position, jump_destinations, jump_routes,
     legal_moves,
 };
 use crate::spec::Chapter;
 use crate::turn::{JumpTurn, single_hop_destinations};
-
-/// A tiny xorshift step, shared by the sample generators below.
-///
-/// `checkers-core` deliberately depends only on `linkme`, so it cannot borrow
-/// `checkers-model`'s `Prng` — and these generators are compiled into the library,
-/// not just its tests, since laws run via `verify_all`. One local helper is the
-/// honest middle ground.
-fn next_index(state: &mut u64, len: usize) -> usize {
-    *state ^= *state << 13;
-    *state ^= *state >> 7;
-    *state ^= *state << 17;
-    (*state % len.max(1) as u64) as usize
-}
 
 /// A deterministic sequence of positions to check invariants over: the initial
 /// position, then positions reached by playing a fixed pseudo-random game.
@@ -45,7 +33,7 @@ fn next_index(state: &mut u64, len: usize) -> usize {
 fn sample_positions(count: usize) -> Vec<Position> {
     let mut out = vec![Position::initial()];
     let mut pos = Position::initial();
-    let mut state: u64 = 0x5EED;
+    let mut rng = Xorshift::new(0x5EED);
 
     for ply in 0..count {
         let player = Player::wrapping((ply % PLAYERS) as u8);
@@ -53,7 +41,7 @@ fn sample_positions(count: usize) -> Vec<Position> {
         if moves.is_empty() {
             continue;
         }
-        let mv = &moves[next_index(&mut state, moves.len())];
+        let mv = &moves[rng.below(moves.len())];
         pos = apply(&pos, mv);
         out.push(pos.clone());
     }
@@ -64,14 +52,14 @@ fn sample_positions(count: usize) -> Vec<Position> {
 fn jump_scenarios() -> Vec<(Position, Coord)> {
     let holes = all_holes();
     let mut out = Vec::new();
-    let mut state: u64 = 0xC0FFEE;
+    let mut rng = Xorshift::new(0xC0FFEE);
 
     for _ in 0..60 {
         let mut pos = Position::empty();
         let mut occupied = Vec::new();
-        let n = 6 + (state % 30) as usize;
+        let n = 6 + rng.below(30);
         for _ in 0..n {
-            let c = holes[next_index(&mut state, holes.len())];
+            let c = holes[rng.below(holes.len())];
             if pos.is_empty_hole(c) {
                 pos.set(c, Some(Player::wrapping(occupied.len() as u8)));
                 occupied.push(c);
