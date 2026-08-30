@@ -994,8 +994,7 @@ pub struct PassCounterResetsOnMove;
 
 impl Law for PassCounterResetsOnMove {
     const ID: &'static str = "CC-TURN-PASS-RESET";
-    const STATEMENT: &'static str =
-        r"\mathrm{move}(s, i, m) \implies \mathrm{passes}(s \cdot m) = 0;\quad \text{draw} \iff \text{six passes in succession}";
+    const STATEMENT: &'static str = r"\mathrm{move}(s, i, m) \implies \mathrm{passes}(s \cdot m) = 0;\quad \text{draw} \iff \text{six passes in succession}";
     const CHAPTER: Chapter = Chapter::Turns;
     const SUMMARY: &'static str =
         "A played move resets the pass counter, so a draw needs six passes after it.";
