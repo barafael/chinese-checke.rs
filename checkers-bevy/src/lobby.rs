@@ -1038,7 +1038,10 @@ mod tests {
         net.peers.push(fake_peer());
         net.is_host = true;
         net.seats = vec![seat("ada", true), seat("grace", true)];
-        assert_eq!(start_decision(&net, Seating::Two), StartDecision::Multiplayer);
+        assert_eq!(
+            start_decision(&net, Seating::Two),
+            StartDecision::Multiplayer
+        );
     }
 
     /// Two-player mode hung forever on "Waiting for player 3": the roster

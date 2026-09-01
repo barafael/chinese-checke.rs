@@ -188,7 +188,10 @@ mod tests {
         pos.set(victim, None);
         assert!(matches!(
             audit_position(&pos, &[Player::ALL[0], Player::ALL[1]]),
-            Err(PositionFault::PieceCount { player: 0, found: 9 })
+            Err(PositionFault::PieceCount {
+                player: 0,
+                found: 9
+            })
         ));
     }
 

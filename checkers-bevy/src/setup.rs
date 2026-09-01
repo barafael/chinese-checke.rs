@@ -256,9 +256,17 @@ mod tests {
     #[test]
     fn a_composed_game_cycles_only_its_seated_players() {
         let mut game = Seating::Two.game();
-        assert_eq!(game.players().len(), 2, "the game must know its real players");
+        assert_eq!(
+            game.players().len(),
+            2,
+            "the game must know its real players"
+        );
 
-        let mv = game.legal_moves().first().cloned().expect("a fresh camp has moves");
+        let mv = game
+            .legal_moves()
+            .first()
+            .cloned()
+            .expect("a fresh camp has moves");
         game.play(&mv);
         assert_eq!(
             game.turn(),

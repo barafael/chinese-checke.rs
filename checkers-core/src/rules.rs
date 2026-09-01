@@ -439,8 +439,18 @@ mod variant_tests {
     #[test]
     fn unseated_camps_start_empty() {
         let game = Game::for_players(&[Player::ALL[0], Player::ALL[1]]);
-        for p in [Player::ALL[2], Player::ALL[3], Player::ALL[4], Player::ALL[5]] {
-            assert_eq!(game.position().count_of(p), 0, "player {} sits out", p.index());
+        for p in [
+            Player::ALL[2],
+            Player::ALL[3],
+            Player::ALL[4],
+            Player::ALL[5],
+        ] {
+            assert_eq!(
+                game.position().count_of(p),
+                0,
+                "player {} sits out",
+                p.index()
+            );
         }
         assert_eq!(game.position().count_of(Player::ALL[0]), PIECES_PER_PLAYER);
         assert_eq!(game.position().count_of(Player::ALL[1]), PIECES_PER_PLAYER);
@@ -451,10 +461,11 @@ mod variant_tests {
     /// after two passes, not six.
     #[test]
     fn all_active_players_passing_is_a_draw() {
-        let mut game = Game::compose(frozen_position(), Player::ALL[0], &[
+        let mut game = Game::compose(
+            frozen_position(),
             Player::ALL[0],
-            Player::ALL[1],
-        ]);
+            &[Player::ALL[0], Player::ALL[1]],
+        );
         game.pass();
         assert_eq!(game.outcome(), None, "one pass of two is not a draw yet");
         game.pass();
@@ -466,7 +477,10 @@ mod variant_tests {
     #[test]
     fn players_are_normalised_to_turn_order() {
         let game = Game::for_players(&[Player::ALL[4], Player::ALL[1], Player::ALL[2]]);
-        assert_eq!(game.players(), &[Player::ALL[1], Player::ALL[2], Player::ALL[4]]);
+        assert_eq!(
+            game.players(),
+            &[Player::ALL[1], Player::ALL[2], Player::ALL[4]]
+        );
         assert_eq!(game.turn(), Player::ALL[1]);
     }
 
