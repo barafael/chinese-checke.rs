@@ -5,7 +5,8 @@
 //! round-trip can be tested without a window.
 
 use bevy::prelude::*;
-use checkers_core::geometry::Coord;
+use checkers_core::geometry::{Coord, Dir, all_holes, on_board};
+use checkers_core::position::Player;
 
 /// Distance between adjacent hole centres, in pixels.
 pub const HOLE_SPACING: f32 = 34.0;
@@ -56,10 +57,79 @@ pub fn world_to_coord(p: Vec2) -> Coord {
     Coord::new(q as i32, r as i32)
 }
 
+// --- Shared board geometry --------------------------------------------------
+//
+// Every Chinese checkers board has the same 121 holes, the same adjacency
+// lines, and the same six camp triangles; visualizations differ only in how
+// they project and draw them. So this geometry is computed once here, in
+// plane coordinates, and every style consumes it. Nothing in this section
+// knows anything about any particular look.
+
+/// Every hole centre, in plane coordinates.
+pub fn hole_points() -> Vec<Vec2> {
+    all_holes().iter().map(|c| coord_to_world(*c)).collect()
+}
+
+/// One segment per adjacency, deduplicated: the connection lines.
+pub fn hole_edges() -> Vec<(Vec2, Vec2)> {
+    let holes = all_holes();
+    let mut out = Vec::new();
+    for c in &holes {
+        for d in Dir::ALL {
+            let n = c.neighbour(d);
+            if on_board(n) && (c.q, c.r) < (n.q, n.r) {
+                out.push((coord_to_world(*c), coord_to_world(n)));
+            }
+        }
+    }
+    out
+}
+
+/// The six camp triangles, one per player, in plane coordinates.
+///
+/// A camp is an exact triangle of lattice holes, so its three corners are
+/// the triple of its holes spanning the largest parallelogram. That is found
+/// with an exact integer cross product in axial coordinates — the plane
+/// mapping only scales areas, so the ranking there would be identical, minus
+/// the rounding. C(10,3) = 120 combinations per camp, once per style spawn.
+pub fn camp_triangles() -> [[Vec2; 3]; 6] {
+    let mut out = [[Vec2::ZERO; 3]; 6];
+    for (i, player) in Player::ALL.iter().enumerate() {
+        let camp = player.start_camp();
+        let n = camp.len();
+        let mut corners = [camp[0], camp[1], camp[2]];
+        let mut best = 0_i32;
+        for a in 0..n {
+            for b in a + 1..n {
+                for c in b + 1..n {
+                    let (p, q, r) = (camp[a], camp[b], camp[c]);
+                    let area = ((q.q - p.q) * (r.r - p.r) - (q.r - p.r) * (r.q - p.q)).abs();
+                    if area > best {
+                        best = area;
+                        corners = [p, q, r];
+                    }
+                }
+            }
+        }
+        out[i] = [
+            coord_to_world(corners[0]),
+            coord_to_world(corners[1]),
+            coord_to_world(corners[2]),
+        ];
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use checkers_core::geometry::all_holes;
+
+    /// Cross product z-component of (b−a) × (c−a). Test-only: winding and
+    /// enclosure checks below are the sole users.
+    fn cross(a: Vec2, b: Vec2, c: Vec2) -> f32 {
+        (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)
+    }
 
     /// [`BOARD_HALF_EXTENT`] must actually contain the board, or the camera-fit
     /// system will crop it. A hand-written constant is exactly the kind of thing
@@ -157,5 +227,56 @@ mod tests {
     #[test]
     fn the_centre_hole_is_at_the_origin() {
         assert_eq!(coord_to_world(Coord::ORIGIN), Vec2::ZERO);
+    }
+
+    /// The shared geometry every visualization consumes must be complete, and
+    /// its adjacency lines must be real hole-to-hole steps.
+    #[test]
+    fn the_board_geometry_is_complete() {
+        assert_eq!(hole_points().len(), 121);
+        let edges = hole_edges();
+        assert!(!edges.is_empty());
+        for (a, b) in edges {
+            assert!((a.distance(b) - HOLE_SPACING).abs() < 1e-3);
+        }
+    }
+
+    /// Each camp triangle must be a real triangle whose three corners are
+    /// camp holes, and it must cover every hole the player starts on —
+    /// otherwise a style that paints the triangle would leave starting
+    /// pieces sitting on bare board.
+    #[test]
+    fn camp_triangles_enclose_their_camp() {
+        const EPS: f32 = 1e-2;
+        for (i, player) in Player::ALL.iter().enumerate() {
+            let camp = player.start_camp();
+            let tri = camp_triangles()[i];
+
+            // Corner order follows the cube directions, so either winding is
+            // fine — but the sign test must know which one it got.
+            let orient = cross(tri[0], tri[1], tri[2]);
+            assert!(orient.abs() > 1.0, "camp {} collapsed", i);
+
+            for corner in tri {
+                assert!(
+                    camp.iter().any(|c| coord_to_world(*c) == corner),
+                    "camp {} corner {corner:?} is not a camp hole",
+                    i
+                );
+            }
+
+            for hole in &camp {
+                let p = coord_to_world(*hole);
+                let mut inside = true;
+                for (a, b) in [(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])] {
+                    let s = cross(a, b, p);
+                    // On an edge the cross is zero up to rounding noise,
+                    // which this epsilon absorbs; the coordinates run into
+                    // the hundreds, so real straddling is far larger.
+                    inside &= if orient > 0.0 { s >= -EPS } else { s <= EPS };
+                }
+                assert!(inside, "camp {} hole {hole:?} outside its triangle", i);
+            }
+        }
     }
 }

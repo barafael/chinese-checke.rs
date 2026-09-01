@@ -187,6 +187,6 @@ fn the_default_is_the_specified_six_player_game() {
         "the untouched default must be the standard opening position"
     );
     // And it must satisfy the specification's own audit, unrestricted.
-    checkers_core::audit::audit_position(session.game.position())
+    checkers_core::audit::audit_position(session.game.position(), session.game.players())
         .expect("the six-player default must pass the specification's audit");
 }

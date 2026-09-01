@@ -22,7 +22,19 @@
 //! Confirming before any hop is refused: chapter 9 requires a jump turn to move
 //! the piece, and a turn ending where it began is indistinguishable from not
 //! moving. That case is reachable, since a piece can hop back over its blocker.
+//!
+//! # Visualizations
+//!
+//! The session is board state and nothing else; how it is drawn is a pure
+//! function of the session plus [`BoardStyle`](board_style::BoardStyle).
+//! Every visual is rebuilt wholesale when either changes, which is what makes
+//! styles switchable mid-game (`V`) with no effect on play: the position, the
+//! staged turn, and the network state survive the switch untouched. Two styles
+//! ship — `Classic` (the original flat 2D view) and `Amlah` ([`board_amlah`],
+//! the cream-plate 3D look).
 
+pub mod board_amlah;
+pub mod board_style;
 pub mod board_view;
 pub mod lobby;
 pub mod net;
@@ -326,7 +338,7 @@ fn hint(remaining: usize) -> String {
 /// not weakened instead.
 pub fn audit(position: &Position, seating: Seating) {
     if seating == Seating::Six {
-        if let Err(fault) = audit_position(position) {
+        if let Err(fault) = audit_position(position, &Player::ALL) {
             panic!("specification violated while playing: {fault}");
         }
         return;

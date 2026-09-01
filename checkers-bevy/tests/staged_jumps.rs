@@ -116,7 +116,7 @@ fn a_committed_chain_is_accepted_by_the_rules() {
 
     game.play(&mv);
     assert_eq!(game.position().occupant(dest), Some(player));
-    audit_position(game.position()).expect("the position must stay valid");
+    audit_position(game.position(), game.players()).expect("the position must stay valid");
 }
 
 /// The recorded route is presentational, but must still be coherent: it spans

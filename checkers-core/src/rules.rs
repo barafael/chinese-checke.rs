@@ -158,30 +158,78 @@ pub enum Outcome {
 /// The active player is explicit state rather than a turn counter modulo six,
 /// because passing advances the player without consuming a turn in that sense
 /// (chapter 12).
+///
+/// The game also records **which players are in it**. Chapter 15 deliberately
+/// leaves the player count open, and a front-end that seats fewer than six
+/// peers composes a smaller game from these rules. Turn order still advances
+/// cyclically through all six seats (chapter 12), skipping the empty ones;
+/// with every player active the skip is a no-op and the game is exactly the
+/// specification's. This matters for correctness, not convenience: unseated
+/// players' camps start empty, so a two-player game has a reachable target
+/// camp for each side, and the turn can never land on a player nobody controls.
 #[derive(Debug, Clone)]
 pub struct Game {
     position: Position,
     turn: Player,
     outcome: Option<Outcome>,
     consecutive_passes: u32,
+    /// The players in this game, in turn order. Never empty.
+    players: Vec<Player>,
 }
 
 impl Game {
     pub fn new() -> Self {
-        Self {
-            position: Position::initial(),
-            turn: Player::ALL[0],
-            outcome: None,
-            consecutive_passes: 0,
-        }
+        Self::from_position(Position::initial(), Player::ALL[0])
     }
 
+    /// The specification's game: all six players, whatever position is given.
     pub fn from_position(position: Position, turn: Player) -> Self {
+        Self::compose(position, turn, &Player::ALL)
+    }
+
+    /// A variant game over `players` only (chapter 15 leaves the count open).
+    ///
+    /// Each listed player starts with their own camp filled and every other
+    /// hole is empty — including the other camps, which is what keeps each
+    /// player's target reachable. `players` is normalised to index order, so
+    /// turn order follows the seats around the board regardless of how the
+    /// caller lists them.
+    pub fn for_players(players: &[Player]) -> Self {
+        let mut players = players.to_vec();
+        players.sort_by_key(|p| p.index());
+        players.dedup();
+        assert!(!players.is_empty(), "a game needs at least one player");
+
+        let mut position = Position::empty();
+        for &p in &players {
+            for c in p.start_camp() {
+                position.set(c, Some(p));
+            }
+        }
+        Self::compose(position, players[0], &players)
+    }
+
+    /// A game over an explicit position, active player, and player set.
+    ///
+    /// `turn` must be one of `players`; a position whose pieces belong to
+    /// nobody in the game is not rejected here — [`crate::audit::audit_position`]
+    /// is what catches that, on the live board.
+    pub fn compose(position: Position, turn: Player, players: &[Player]) -> Self {
+        let mut players = players.to_vec();
+        players.sort_by_key(|p| p.index());
+        players.dedup();
+        assert!(!players.is_empty(), "a game needs at least one player");
+        assert!(
+            players.contains(&turn),
+            "the active player must be in the game"
+        );
+
         Self {
             position,
             turn,
             outcome: None,
             consecutive_passes: 0,
+            players,
         }
     }
 
@@ -191,6 +239,11 @@ impl Game {
 
     pub fn turn(&self) -> Player {
         self.turn
+    }
+
+    /// The players in this game, in turn order.
+    pub fn players(&self) -> &[Player] {
+        &self.players
     }
 
     pub fn outcome(&self) -> Option<Outcome> {
@@ -203,6 +256,18 @@ impl Game {
 
     pub fn legal_moves(&self) -> Vec<Move> {
         legal_moves(&self.position, self.turn)
+    }
+
+    /// The next player in turn order who is actually in this game.
+    ///
+    /// Chapter 12's cycle is over all six seats; a composed game skips the
+    /// vacant ones. With every seat filled this is exactly one advance.
+    fn next_active(&self) -> Player {
+        let mut next = self.turn.next();
+        while !self.players.contains(&next) {
+            next = next.next();
+        }
+        next
     }
 
     /// Play one move for the active player (chapter 12).
@@ -221,7 +286,7 @@ impl Game {
             self.outcome = Some(Outcome::Winner(self.turn));
             return;
         }
-        self.turn = self.turn.next();
+        self.turn = self.next_active();
     }
 
     /// The active player has no legal move and forfeits the turn (chapter 12).
@@ -237,11 +302,11 @@ impl Game {
         );
 
         self.consecutive_passes += 1;
-        if self.consecutive_passes as usize == PLAYERS {
+        if self.consecutive_passes as usize == self.players.len() {
             self.outcome = Some(Outcome::Draw);
             return;
         }
-        self.turn = self.turn.next();
+        self.turn = self.next_active();
     }
 
     /// Advance until the game ends or `max_plies` is exhausted.
@@ -333,4 +398,84 @@ pub fn two_hop_position() -> (Position, Coord) {
     pos.set(Coord::new(1, 0), Some(Player::ALL[1]));
     pos.set(Coord::new(3, 0), Some(Player::ALL[1]));
     (pos, origin)
+}
+
+#[cfg(test)]
+mod variant_tests {
+    use super::*;
+    use crate::position::PIECES_PER_PLAYER;
+
+    /// A front-end seats fewer than six peers and composes a smaller game.
+    /// Turn order must skip the vacant seats — walking into one strands the
+    /// game on a player nobody controls, which is how networked two-player
+    /// play first deadlocked after one move each.
+    #[test]
+    fn turn_order_skips_vacant_seats() {
+        let mut game = Game::for_players(&[Player::ALL[0], Player::ALL[3]]);
+        assert_eq!(game.turn(), Player::ALL[0]);
+
+        let mv = game.legal_moves().first().cloned().unwrap();
+        game.play(&mv);
+        assert_eq!(game.turn(), Player::ALL[3], "the vacant seats are skipped");
+
+        let mv = game.legal_moves().first().cloned().unwrap();
+        game.play(&mv);
+        assert_eq!(game.turn(), Player::ALL[0], "two players alternate");
+    }
+
+    /// Every seat filled is exactly the specification's game: one advance per
+    /// turn, unchanged.
+    #[test]
+    fn a_full_game_turns_as_before() {
+        let mut game = Game::new();
+        assert_eq!(game.players().len(), PLAYERS);
+        let mv = game.legal_moves().first().cloned().unwrap();
+        game.play(&mv);
+        assert_eq!(game.turn(), Player::ALL[1]);
+    }
+
+    /// Unseated camps start empty, so each player's target camp is reachable
+    /// and chapter 13's win can actually fire in a small game.
+    #[test]
+    fn unseated_camps_start_empty() {
+        let game = Game::for_players(&[Player::ALL[0], Player::ALL[1]]);
+        for p in [Player::ALL[2], Player::ALL[3], Player::ALL[4], Player::ALL[5]] {
+            assert_eq!(game.position().count_of(p), 0, "player {} sits out", p.index());
+        }
+        assert_eq!(game.position().count_of(Player::ALL[0]), PIECES_PER_PLAYER);
+        assert_eq!(game.position().count_of(Player::ALL[1]), PIECES_PER_PLAYER);
+    }
+
+    /// Chapter 12's draw is "all players pass in succession" — over the
+    /// players actually in the game. On a full board, a two-player game ends
+    /// after two passes, not six.
+    #[test]
+    fn all_active_players_passing_is_a_draw() {
+        let mut game = Game::compose(frozen_position(), Player::ALL[0], &[
+            Player::ALL[0],
+            Player::ALL[1],
+        ]);
+        game.pass();
+        assert_eq!(game.outcome(), None, "one pass of two is not a draw yet");
+        game.pass();
+        assert_eq!(game.outcome(), Some(Outcome::Draw));
+    }
+
+    /// `for_players` normalises to index order, so turn order follows the
+    /// board rather than the caller's listing.
+    #[test]
+    fn players_are_normalised_to_turn_order() {
+        let game = Game::for_players(&[Player::ALL[4], Player::ALL[1], Player::ALL[2]]);
+        assert_eq!(game.players(), &[Player::ALL[1], Player::ALL[2], Player::ALL[4]]);
+        assert_eq!(game.turn(), Player::ALL[1]);
+    }
+
+    /// The composed game's position must survive the live audit the front-end
+    /// runs after every move.
+    #[test]
+    fn composed_positions_pass_the_audit() {
+        let game = Game::for_players(&[Player::ALL[0], Player::ALL[1], Player::ALL[2]]);
+        crate::audit::audit_position(game.position(), game.players())
+            .expect("a freshly composed game satisfies its own invariants");
+    }
 }

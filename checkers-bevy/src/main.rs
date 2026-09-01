@@ -23,15 +23,19 @@
 //! regenerates its own sample games, and it never inspects the caller's
 //! position. That distinction is what [`checkers_core::audit`] exists for.
 
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 // Not in the prelude, unlike the rest of the window API.
 use bevy::window::{Monitor, PrimaryMonitor};
+use checkers_bevy::board_amlah;
+use checkers_bevy::board_style::{self, AmlahCamera, BoardStyle, BoardVisual, ClassicCamera};
 use checkers_bevy::board_view::{
-    BOARD_HALF_EXTENT, HOLE_RADIUS, HOLE_SPACING, PIECE_RADIUS, coord_to_world, world_to_coord,
+    BOARD_HALF_EXTENT, HOLE_RADIUS, HOLE_SPACING, PIECE_RADIUS, camp_triangles, coord_to_world,
+    hole_edges, hole_points, world_to_coord,
 };
 use checkers_bevy::setup::Seating;
 use checkers_bevy::{AppState, Selection, Session, audit, lobby, net};
-use checkers_core::geometry::{all_holes, camp_of, on_board};
+use checkers_core::geometry::{Coord, all_holes, camp_of, on_board};
 use checkers_core::law::{LAWS, verify_all};
 use checkers_core::position::{Player, Position};
 use checkers_core::rules::Outcome;
@@ -77,6 +81,7 @@ fn main() {
         .insert_resource(ClearColor(Color::srgb(0.09, 0.09, 0.11)))
         .init_resource::<Session>()
         .init_resource::<StatusVisible>()
+        .init_resource::<BoardStyle>()
         .init_state::<AppState>()
         .add_plugins(lobby::plugin)
         .add_systems(Startup, setup)
@@ -85,7 +90,10 @@ fn main() {
         .add_systems(Update, size_to_monitor)
         .add_systems(
             OnEnter(AppState::InGame),
-            (lobby::apply_seats, spawn_board).chain(),
+            // Only the UI is spawned here. The board visuals are spawned by
+            // `apply_style`, so entering the game and switching styles go
+            // through one code path.
+            (lobby::apply_seats, spawn_ui).chain(),
         )
         .add_systems(
             Update,
@@ -93,6 +101,12 @@ fn main() {
                 handle_buttons,
                 handle_clicks,
                 handle_keys,
+                board_style::handle_style_key,
+                // Spawns the board for the current style on entry, and tears
+                // the old one down and builds the new one on `V`. Must run
+                // before the sync systems, which read the style to decide
+                // what kind of meshes pieces and highlights are.
+                apply_style,
                 toggle_status,
                 fit_camera_to_window,
                 // Drains the outbox and applies only host-sequenced moves, so
@@ -111,6 +125,21 @@ fn main() {
 }
 
 // --- marker components -----------------------------------------------------
+
+/// Everything a view-rebuilding system needs in order to draw.
+///
+/// The sync systems all take the same cluster of render resources, and
+/// `sync_pieces` had grown past clippy's argument limit carrying them one by
+/// one. One [`SystemParam`] bundle names the idea — "what it takes to draw" —
+/// and keeps every signature short. Destructure at the top of the system body:
+/// `let DrawContext { mut commands, mut meshes, .. } = draw;`
+#[derive(SystemParam)]
+struct DrawContext<'w, 's> {
+    commands: Commands<'w, 's>,
+    meshes: ResMut<'w, Assets<Mesh>>,
+    materials: ResMut<'w, Assets<ColorMaterial>>,
+    std_materials: ResMut<'w, Assets<StandardMaterial>>,
+}
 
 #[derive(Component)]
 struct HoleMarker;
@@ -237,7 +266,13 @@ fn setup(mut commands: Commands) {
     // `WindowSize` maps one world unit to one pixel, which is what
     // `HOLE_SPACING = 34` was chosen against. `fit_camera_to_window` handles the
     // only case this leaves open: a window too small for the board.
-    commands.spawn(Camera2d);
+    //
+    // Marked as the classic style's camera: `apply_style` despawns and
+    // respawns it if the player ever switches visualizations. It must carry
+    // `BoardVisual` for that, and the lobby needs a camera before the game
+    // state exists, which is why `setup` spawns it rather than leaving it to
+    // the style system.
+    commands.spawn((Camera2d, ClassicCamera, BoardVisual));
 
     // The full law registry is worth its cost once, at startup.
     if let Err(violation) = verify_all() {
@@ -246,31 +281,12 @@ fn setup(mut commands: Commands) {
     audit(&Position::initial(), Seating::Six);
 }
 
-/// Spawn the board, status panel, and turn controls on entering the game.
-fn spawn_board(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<ColorMaterial>>,
-) {
-    let hole_mesh = meshes.add(Circle::new(HOLE_RADIUS));
-    let hole_mat = materials.add(Color::srgb(0.22, 0.22, 0.26));
-    let camp_mat = materials.add(Color::srgb(0.30, 0.30, 0.36));
-
-    for c in all_holes() {
-        let material = if camp_of(c).is_some() {
-            camp_mat.clone()
-        } else {
-            hole_mat.clone()
-        };
-        let p = coord_to_world(c);
-        commands.spawn((
-            Mesh2d(hole_mesh.clone()),
-            MeshMaterial2d(material),
-            Transform::from_xyz(p.x, p.y, 0.0),
-            HoleMarker,
-        ));
-    }
-
+/// Spawn the in-game UI: status panel and turn controls.
+///
+/// Deliberately separate from the board visuals and *not* marked
+/// [`BoardVisual`]: the UI is the same in every visualization, so switching
+/// styles must not flicker it away.
+fn spawn_ui(mut commands: Commands) {
     commands.spawn((
         Text::new(""),
         TextFont {
@@ -325,6 +341,134 @@ fn spawn_board(
         });
 }
 
+/// Tear down whatever visualization is on screen and build the current one.
+///
+/// This is the whole switch mechanism. Board state is never touched: the
+/// session, the selection, and the network keep whatever they had, and the
+/// sync systems rebuild pieces and highlights from the unchanged session in
+/// the new style the same frame. The `Local` tracker rather than
+/// `is_changed()` makes first entry deterministic — the board must be spawned
+/// on the first InGame frame regardless of change-detection semantics for a
+/// resource that was initialized long before this system ever ran.
+#[allow(clippy::too_many_arguments)]
+fn apply_style(
+    style: Res<BoardStyle>,
+    mut applied: Local<Option<BoardStyle>>,
+    visuals: Query<Entity, With<BoardVisual>>,
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
+    mut std_materials: ResMut<Assets<StandardMaterial>>,
+) {
+    if *applied == Some(*style) {
+        return;
+    }
+    *applied = Some(*style);
+
+    for e in &visuals {
+        commands.entity(e).despawn();
+    }
+    // Dropped on every switch so the cone mesh dies with the style; respawned
+    // below when the amlah board comes back.
+    commands.remove_resource::<board_amlah::AmlahAssets>();
+
+    match *style {
+        BoardStyle::Classic => {
+            commands.spawn((Camera2d, ClassicCamera, BoardVisual));
+            spawn_classic_board(&mut commands, &mut meshes, &mut materials);
+        }
+        BoardStyle::Amlah => {
+            commands.spawn((
+                Camera3d::default(),
+                Transform::from_translation(board_amlah::CAMERA_POS)
+                    .looking_at(Vec3::ZERO, Vec3::Y),
+                AmlahCamera,
+                BoardVisual,
+            ));
+            spawn_amalah_board(&mut commands, &mut meshes, &mut std_materials);
+        }
+    }
+}
+
+/// The classic board: one entity per hole, exactly as it has always been.
+fn spawn_classic_board(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<ColorMaterial>,
+) {
+    let hole_mesh = meshes.add(Circle::new(HOLE_RADIUS));
+    let hole_mat = materials.add(Color::srgb(0.22, 0.22, 0.26));
+    let camp_mat = materials.add(Color::srgb(0.30, 0.30, 0.36));
+
+    for c in all_holes() {
+        let material = if camp_of(c).is_some() {
+            camp_mat.clone()
+        } else {
+            hole_mat.clone()
+        };
+        let p = coord_to_world(c);
+        commands.spawn((
+            Mesh2d(hole_mesh.clone()),
+            MeshMaterial2d(material),
+            Transform::from_xyz(p.x, p.y, 0.0),
+            HoleMarker,
+            BoardVisual,
+        ));
+    }
+}
+
+/// The amlah board: three baked meshes — plate with accent triangles, holes,
+/// connection lines — and the shared cone mesh for pieces.
+fn spawn_amalah_board(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+) {
+    // The surface mesh carries its colours per-vertex (cream plate, six
+    // accent camps), so the material stays white and multiplies through.
+    // Culling is off: the camp corner order is whichever the cube-direction
+    // picks produce, and one flat unlit material is cheaper than fussing
+    // over winding.
+    let surface_mat = materials.add(StandardMaterial {
+        base_color: Color::WHITE,
+        unlit: true,
+        cull_mode: None,
+        ..default()
+    });
+    let ink_mat = materials.add(StandardMaterial {
+        base_color: board_amlah::INK,
+        unlit: true,
+        ..default()
+    });
+
+    let triangles = camp_triangles();
+    commands.spawn((
+        Mesh3d(meshes.add(board_amlah::build_surface_mesh(&triangles))),
+        MeshMaterial3d(surface_mat),
+        BoardVisual,
+    ));
+
+    let holes = hole_points();
+    commands.spawn((
+        Mesh3d(meshes.add(board_amlah::build_holes_mesh(&holes))),
+        MeshMaterial3d(ink_mat.clone()),
+        BoardVisual,
+    ));
+
+    let edges = hole_edges();
+    commands.spawn((
+        Mesh3d(meshes.add(board_amlah::build_lines_mesh(&edges))),
+        MeshMaterial3d(ink_mat),
+        BoardVisual,
+    ));
+
+    let cone = meshes.add(Cone {
+        radius: board_amlah::PEG_RADIUS,
+        height: board_amlah::PEG_HEIGHT,
+    });
+    commands.insert_resource(board_amlah::AmlahAssets { cone });
+}
+
 fn handle_buttons(
     interactions: Query<(&Interaction, &ControlButton), Changed<Interaction>>,
     mut session: ResMut<Session>,
@@ -343,7 +487,7 @@ fn handle_buttons(
 fn handle_clicks(
     buttons: Res<ButtonInput<MouseButton>>,
     windows: Query<&Window>,
-    cameras: Query<(&Camera, &GlobalTransform)>,
+    cameras: Query<(&Camera, &GlobalTransform, Option<&AmlahCamera>)>,
     controls: Query<&Interaction, With<ControlButton>>,
     mut session: ResMut<Session>,
 ) {
@@ -361,15 +505,36 @@ fn handle_clicks(
     let Some(cursor) = window.cursor_position() else {
         return;
     };
-    let Ok((camera, cam_tf)) = cameras.single() else {
-        return;
-    };
-    let Ok(world) = camera.viewport_to_world_2d(cam_tf, cursor) else {
+    let Ok((camera, cam_tf, amlah_cam)) = cameras.single() else {
         return;
     };
 
-    let hole = world_to_coord(world);
-    if !on_board(hole) || coord_to_world(hole).distance(world) > HOLE_SPACING * 0.5 {
+    // Each style projects the cursor onto the classic *plane* — the shared
+    // coordinate space of `board_view` — so the hole resolution and the
+    // distance check below are identical for both. The classic camera gets
+    // there in one step; the amlah camera intersects the cursor ray with the
+    // board plane (Y = 0) and converts back.
+    let plane = if amlah_cam.is_some() {
+        let Ok(ray) = camera.viewport_to_world(cam_tf, cursor) else {
+            return;
+        };
+        if ray.direction.y.abs() < 1e-6 {
+            return;
+        }
+        let t = -ray.origin.y / ray.direction.y;
+        if t < 0.0 {
+            return;
+        }
+        board_amlah::world3_to_plane(ray.origin + *ray.direction * t)
+    } else {
+        let Ok(world) = camera.viewport_to_world_2d(cam_tf, cursor) else {
+            return;
+        };
+        world
+    };
+
+    let hole = world_to_coord(plane);
+    if !on_board(hole) || coord_to_world(hole).distance(plane) > HOLE_SPACING * 0.5 {
         return;
     }
 
@@ -426,6 +591,9 @@ fn toggle_status(keys: Res<ButtonInput<KeyCode>>, mut visible: ResMut<StatusVisi
 /// a big window is not wanted. Scaling the projection rather than the entities
 /// keeps `coord_to_world` in one place, and clicks stay correct because
 /// `viewport_to_world_2d` applies the same projection.
+///
+/// Classic style only: the query is over `Camera2d`, so under the amlah style,
+/// whose fixed 3D camera always frames the whole board, this silently no-ops.
 fn fit_camera_to_window(
     windows: Query<&Window, Changed<Window>>,
     mut projections: Query<&mut Projection, With<Camera2d>>,
@@ -467,15 +635,23 @@ fn sync_status_visibility(
 /// Redraw pieces from the position being displayed.
 ///
 /// Despawn-and-respawn rather than diffing: at 60 pieces it is not worth the
-/// complexity, and it guarantees the view cannot drift from the model.
+/// complexity, and it guarantees the view cannot drift from the model. Runs
+/// on a style change as well as a session change, which is what makes `V`
+/// rebuild every piece in the new style without a move being played.
 fn sync_pieces(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<ColorMaterial>>,
+    draw: DrawContext,
+    amlah: Option<Res<board_amlah::AmlahAssets>>,
     existing: Query<Entity, With<PieceMarker>>,
     session: Res<Session>,
+    style: Res<BoardStyle>,
 ) {
-    if !session.is_changed() {
+    let DrawContext {
+        mut commands,
+        mut meshes,
+        mut materials,
+        mut std_materials,
+    } = draw;
+    if !session.is_changed() && !style.is_changed() {
         return;
     }
     let position = session.display_position();
@@ -487,78 +663,197 @@ fn sync_pieces(
         commands.entity(e).despawn();
     }
 
-    let mesh = meshes.add(Circle::new(PIECE_RADIUS));
-    for &c in position.holes() {
-        let Some(player) = position.occupant(c) else {
-            continue;
-        };
-        let p = coord_to_world(c);
-        commands.spawn((
-            Mesh2d(mesh.clone()),
-            MeshMaterial2d(materials.add(player_colour(player))),
-            Transform::from_xyz(p.x, p.y, 1.0),
-            PieceMarker,
-        ));
+    match *style {
+        BoardStyle::Classic => {
+            let mesh = meshes.add(Circle::new(PIECE_RADIUS));
+            // One material per player rather than per piece: the rebuild runs
+            // on every committed turn, and 60 fresh handles are waste for six
+            // colours.
+            let mats: Vec<_> = Player::ALL
+                .iter()
+                .map(|&p| materials.add(player_colour(p)))
+                .collect();
+            for &c in position.holes() {
+                let Some(player) = position.occupant(c) else {
+                    continue;
+                };
+                let p = coord_to_world(c);
+                commands.spawn((
+                    Mesh2d(mesh.clone()),
+                    MeshMaterial2d(mats[player.index() as usize].clone()),
+                    Transform::from_xyz(p.x, p.y, 1.0),
+                    PieceMarker,
+                ));
+            }
+        }
+        BoardStyle::Amlah => {
+            // `apply_style` runs earlier in the chain and inserted this when
+            // it built the amlah board; if it is somehow missing, skip rather
+            // than panic — the next change rebuilds again.
+            let Some(assets) = amlah else {
+                return;
+            };
+            let mats: Vec<_> = Player::ALL
+                .iter()
+                .map(|&p| {
+                    std_materials.add(StandardMaterial {
+                        base_color: board_amlah::ACCENTS[p.index() as usize],
+                        unlit: true,
+                        ..default()
+                    })
+                })
+                .collect();
+            for &c in position.holes() {
+                let Some(player) = position.occupant(c) else {
+                    continue;
+                };
+                let w = board_amlah::plane_to_world3(coord_to_world(c));
+                commands.spawn((
+                    Mesh3d(assets.cone.clone()),
+                    MeshMaterial3d(mats[player.index() as usize].clone()),
+                    // Cone geometry is centred; the base sits on the holes.
+                    Transform::from_xyz(
+                        w.x,
+                        board_amlah::HOLE_FILL_Y + board_amlah::PEG_HEIGHT * 0.5,
+                        w.z,
+                    ),
+                    PieceMarker,
+                ));
+            }
+        }
     }
 }
 
 fn sync_highlights(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<ColorMaterial>>,
+    draw: DrawContext,
     stale: Query<Entity, With<Overlay>>,
     session: Res<Session>,
+    style: Res<BoardStyle>,
 ) {
-    if !session.is_changed() {
+    let DrawContext {
+        mut commands,
+        mut meshes,
+        mut materials,
+        mut std_materials,
+    } = draw;
+    if !session.is_changed() && !style.is_changed() {
         return;
     }
     for e in stale.iter() {
         commands.entity(e).despawn();
     }
 
-    // Trail of the staged jump so far.
-    if let Selection::Jumping { turn } = &session.selection {
-        let dot = meshes.add(Circle::new(HOLE_RADIUS * 0.55));
-        let mat = materials.add(Color::srgba(1.0, 0.85, 0.4, 0.55));
-        for hole in turn.path() {
-            let p = coord_to_world(*hole);
-            commands.spawn((
-                Mesh2d(dot.clone()),
-                MeshMaterial2d(mat.clone()),
-                Transform::from_xyz(p.x, p.y, 1.5),
-                Overlay,
-            ));
+    match *style {
+        BoardStyle::Classic => {
+            // Trail of the staged jump so far.
+            if let Selection::Jumping { turn } = &session.selection {
+                let dot = meshes.add(Circle::new(HOLE_RADIUS * 0.55));
+                let mat = materials.add(Color::srgba(1.0, 0.85, 0.4, 0.55));
+                for hole in turn.path() {
+                    let p = coord_to_world(*hole);
+                    commands.spawn((
+                        Mesh2d(dot.clone()),
+                        MeshMaterial2d(mat.clone()),
+                        Transform::from_xyz(p.x, p.y, 1.5),
+                        Overlay,
+                    ));
+                }
+            }
+
+            // Ring around the selected piece; gold while a jump is staged.
+            if let Some(sel) = session.selected_hole() {
+                let ring = meshes.add(Annulus::new(PIECE_RADIUS + 2.0, PIECE_RADIUS + 5.0));
+                let colour = if session.is_jumping() {
+                    Color::srgb(1.0, 0.82, 0.30)
+                } else {
+                    Color::WHITE
+                };
+                let p = coord_to_world(sel);
+                commands.spawn((
+                    Mesh2d(ring),
+                    MeshMaterial2d(materials.add(colour)),
+                    Transform::from_xyz(p.x, p.y, 2.0),
+                    Overlay,
+                ));
+            }
+
+            // One hop ahead only.
+            let dot = meshes.add(Circle::new(HOLE_RADIUS * 0.85));
+            let mat = materials.add(Color::srgba(1.0, 1.0, 1.0, 0.8));
+            for t in session.highlights() {
+                let p = coord_to_world(t);
+                commands.spawn((
+                    Mesh2d(dot.clone()),
+                    MeshMaterial2d(mat.clone()),
+                    Transform::from_xyz(p.x, p.y, 2.0),
+                    Overlay,
+                ));
+            }
         }
-    }
+        BoardStyle::Amlah => {
+            // Everything is a flat shape just above the connection lines,
+            // which sit at EDGE_Y = 0.005.
+            let flat = Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2);
+            let at = |c: Coord, y: f32| {
+                let w = board_amlah::plane_to_world3(coord_to_world(c));
+                Transform::from_rotation(flat).with_translation(Vec3::new(w.x, y, w.z))
+            };
 
-    // Ring around the selected piece; gold while a jump is staged.
-    if let Some(sel) = session.selected_hole() {
-        let ring = meshes.add(Annulus::new(PIECE_RADIUS + 2.0, PIECE_RADIUS + 5.0));
-        let colour = if session.is_jumping() {
-            Color::srgb(1.0, 0.82, 0.30)
-        } else {
-            Color::WHITE
-        };
-        let p = coord_to_world(sel);
-        commands.spawn((
-            Mesh2d(ring),
-            MeshMaterial2d(materials.add(colour)),
-            Transform::from_xyz(p.x, p.y, 2.0),
-            Overlay,
-        ));
-    }
+            // Trail of the staged jump so far.
+            if let Selection::Jumping { turn } = &session.selection {
+                let dot = meshes.add(Circle::new(0.04));
+                let mat = std_materials.add(StandardMaterial {
+                    base_color: Color::srgb(1.0, 0.85, 0.4),
+                    unlit: true,
+                    ..default()
+                });
+                for hole in turn.path() {
+                    commands.spawn((
+                        Mesh3d(dot.clone()),
+                        MeshMaterial3d(mat.clone()),
+                        at(*hole, 0.008),
+                        Overlay,
+                    ));
+                }
+            }
 
-    // One hop ahead only.
-    let dot = meshes.add(Circle::new(HOLE_RADIUS * 0.85));
-    let mat = materials.add(Color::srgba(1.0, 1.0, 1.0, 0.8));
-    for t in session.highlights() {
-        let p = coord_to_world(t);
-        commands.spawn((
-            Mesh2d(dot.clone()),
-            MeshMaterial2d(mat.clone()),
-            Transform::from_xyz(p.x, p.y, 2.0),
-            Overlay,
-        ));
+            // Ring around the selected piece. White vanishes on the cream
+            // plate, so the idle ring is ink; gold while a jump is staged.
+            if let Some(sel) = session.selected_hole() {
+                let ring = meshes.add(Annulus::new(0.09, 0.115));
+                let colour = if session.is_jumping() {
+                    Color::srgb(1.0, 0.82, 0.30)
+                } else {
+                    board_amlah::INK
+                };
+                commands.spawn((
+                    Mesh3d(ring),
+                    MeshMaterial3d(std_materials.add(StandardMaterial {
+                        base_color: colour,
+                        unlit: true,
+                        ..default()
+                    })),
+                    at(sel, 0.007),
+                    Overlay,
+                ));
+            }
+
+            // One hop ahead only.
+            let dot = meshes.add(Circle::new(0.05));
+            let mat = std_materials.add(StandardMaterial {
+                base_color: board_amlah::MOVE_DOT,
+                unlit: true,
+                ..default()
+            });
+            for t in session.highlights() {
+                commands.spawn((
+                    Mesh3d(dot.clone()),
+                    MeshMaterial3d(mat.clone()),
+                    at(t, 0.006),
+                    Overlay,
+                ));
+            }
+        }
     }
 }
 
@@ -583,8 +878,12 @@ fn sync_buttons(session: Res<Session>, mut buttons: Query<(&ControlButton, &mut 
     }
 }
 
-fn sync_status(session: Res<Session>, mut text: Query<&mut Text, With<StatusText>>) {
-    if !session.is_changed() {
+fn sync_status(
+    session: Res<Session>,
+    style: Res<BoardStyle>,
+    mut text: Query<&mut Text, With<StatusText>>,
+) {
+    if !session.is_changed() && !style.is_changed() {
         return;
     }
     let Ok(mut text) = text.single_mut() else {
@@ -611,10 +910,11 @@ fn sync_status(session: Res<Session>, mut text: Query<&mut Text, With<StatusText
     };
 
     **text = format!(
-        "{header}{staged}\n{}\n{} laws checked at startup  |  invariants checked each turn\n\
+        "{header}{staged}\n{}\n{} laws checked at startup  |  invariants checked each turn  |  style: {}\n\
          Click a piece, then a highlighted hole. Jumps chain one hop at a time.\n\
-         Enter confirms, Backspace cancels, U undoes a hop, R restarts, T hides this.",
+         Enter confirms, Backspace cancels, U undoes a hop, R restarts, V switches the board style, T hides this.",
         session.message,
-        LAWS.len()
+        LAWS.len(),
+        style.label(),
     );
 }

@@ -23,6 +23,9 @@ use crate::position::{HOLES, PIECES_PER_PLAYER, Player, Position};
 pub enum PositionFault {
     /// A player owns the wrong number of pieces.
     PieceCount { player: u8, found: usize },
+    /// A player not in the game holds pieces — they would sit forever on
+    /// holes another player needs to win through.
+    GhostPiece { player: u8, found: usize },
     /// The position is not backed by the 121-hole board.
     HoleTable { found: usize },
 }
@@ -35,6 +38,11 @@ impl core::fmt::Display for PositionFault {
                 "player {player} owns {found} pieces, expected {PIECES_PER_PLAYER} \
                  (law CC-POS-PIECES)"
             ),
+            PositionFault::GhostPiece { player, found } => write!(
+                f,
+                "player {player} is not in the game yet owns {found} pieces \
+                 (chapter 15: unseated players sit out entirely)"
+            ),
             PositionFault::HoleTable { found } => write!(
                 f,
                 "the hole table has {found} entries, expected {HOLES} \
@@ -46,15 +54,28 @@ impl core::fmt::Display for PositionFault {
 
 impl core::error::Error for PositionFault {}
 
-/// Check one position against the invariants of chapters 6 and 14.
+/// Check one position against the invariants of chapters 6, 14, and 15.
+///
+/// Every player in `players` must own exactly [`PIECES_PER_PLAYER`] pieces and
+/// every other player none. Passing [`Player::ALL`] checks the specification's
+/// six-player invariant exactly; a composed smaller game checks its own
+/// players and requires the vacant seats to be empty — a ghost camp would
+/// block the target camp of whoever must cross it.
 ///
 /// Linear in the number of holes, so callers may run it on every state change.
 /// Use this in a front-end; use [`crate::law::verify_all`] in tests.
-pub fn audit_position(pos: &Position) -> Result<(), PositionFault> {
+pub fn audit_position(pos: &Position, players: &[Player]) -> Result<(), PositionFault> {
     for player in Player::ALL {
         let n = pos.count_of(player);
-        if n != PIECES_PER_PLAYER {
-            return Err(PositionFault::PieceCount {
+        if players.contains(&player) {
+            if n != PIECES_PER_PLAYER {
+                return Err(PositionFault::PieceCount {
+                    player: player.index(),
+                    found: n,
+                });
+            }
+        } else if n != 0 {
+            return Err(PositionFault::GhostPiece {
                 player: player.index(),
                 found: n,
             });
@@ -78,7 +99,7 @@ mod tests {
 
     #[test]
     fn the_initial_position_passes() {
-        assert_eq!(audit_position(&Position::initial()), Ok(()));
+        assert_eq!(audit_position(&Position::initial(), &Player::ALL), Ok(()));
     }
 
     #[test]
@@ -91,7 +112,11 @@ mod tests {
                 continue;
             }
             pos = apply(&pos, &moves[0]);
-            assert_eq!(audit_position(&pos), Ok(()), "failed at ply {ply}");
+            assert_eq!(
+                audit_position(&pos, &Player::ALL),
+                Ok(()),
+                "failed at ply {ply}"
+            );
         }
     }
 
@@ -102,7 +127,7 @@ mod tests {
         pos.set(victim, None);
 
         assert_eq!(
-            audit_position(&pos),
+            audit_position(&pos, &Player::ALL),
             Err(PositionFault::PieceCount {
                 player: 2,
                 found: 9
@@ -117,13 +142,54 @@ mod tests {
         let target = Player::ALL[1].start_camp()[0];
         pos.set(target, Some(Player::ALL[0]));
 
-        let fault = audit_position(&pos).expect_err("should be caught");
+        let fault = audit_position(&pos, &Player::ALL).expect_err("should be caught");
         assert!(matches!(fault, PositionFault::PieceCount { .. }), "{fault}");
     }
 
     #[test]
     fn an_empty_board_is_caught() {
-        assert!(audit_position(&Position::empty()).is_err());
+        assert!(audit_position(&Position::empty(), &Player::ALL).is_err());
+    }
+
+    /// A composed two-player position satisfies chapter 14 for its own players
+    /// — and must, or every networked two-player game would panic the
+    /// front-end's per-move audit.
+    #[test]
+    fn a_two_player_position_passes_for_its_players() {
+        let two = [Player::ALL[0], Player::ALL[1]];
+        let pos = crate::rules::Game::for_players(&two);
+        assert_eq!(audit_position(pos.position(), &two), Ok(()));
+    }
+
+    /// A ghost camp is caught: pieces of a player not in the game would sit
+    /// forever on holes a seated player must cross to win.
+    #[test]
+    fn a_ghost_player_is_caught() {
+        let two = [Player::ALL[0], Player::ALL[1]];
+        let game = crate::rules::Game::for_players(&two);
+        assert_eq!(
+            audit_position(game.position(), &two),
+            Ok(()),
+            "the composed position is clean"
+        );
+        assert!(matches!(
+            audit_position(&Position::initial(), &two),
+            Err(PositionFault::GhostPiece { player: 2, .. })
+        ));
+    }
+
+    /// Symmetrically, a seated player missing pieces is still caught when
+    /// other seats are vacant — the count fault outranks the vacancy.
+    #[test]
+    fn a_short_handed_active_player_is_caught() {
+        let game = crate::rules::Game::for_players(&[Player::ALL[0], Player::ALL[1]]);
+        let mut pos = game.position().clone();
+        let victim = Player::ALL[0].start_camp()[0];
+        pos.set(victim, None);
+        assert!(matches!(
+            audit_position(&pos, &[Player::ALL[0], Player::ALL[1]]),
+            Err(PositionFault::PieceCount { player: 0, found: 9 })
+        ));
     }
 
     #[test]
@@ -144,7 +210,7 @@ mod tests {
         let pos = Position::initial();
         let start = std::time::Instant::now();
         for _ in 0..1000 {
-            audit_position(&pos).unwrap();
+            audit_position(&pos, &Player::ALL).unwrap();
         }
         let elapsed = start.elapsed();
         assert!(

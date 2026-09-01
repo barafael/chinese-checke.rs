@@ -57,7 +57,7 @@ fn simulated_play_never_violates_a_law() {
         plies += 1;
 
         // Per-ply: the linear position audit, exactly what the app runs.
-        if let Err(fault) = audit_position(game.position()) {
+        if let Err(fault) = audit_position(game.position(), game.players()) {
             panic!("position invariant violated after ply {plies}: {fault}");
         }
     }

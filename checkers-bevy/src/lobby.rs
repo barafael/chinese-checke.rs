@@ -364,7 +364,7 @@ pub enum StartDecision {
     Refuse(String),
 }
 
-pub fn start_decision(net: &NetState) -> StartDecision {
+pub fn start_decision(net: &NetState, chosen: Seating) -> StartDecision {
     if net.peers.is_empty() {
         return StartDecision::Solo;
     }
@@ -389,7 +389,20 @@ pub fn start_decision(net: &NetState) -> StartDecision {
         .map(|s| s.name.as_str())
         .collect();
     if waiting.is_empty() {
-        StartDecision::Multiplayer
+        // A start with fewer seats than the seating's camps would strand the
+        // uncontrolled ones: the turn would reach a player nobody commands and
+        // wait forever. Choosing Six with two peers joined must be a refusal,
+        // not a crippled game.
+        if net.seats.len() == chosen.count() {
+            StartDecision::Multiplayer
+        } else {
+            StartDecision::Refuse(format!(
+                "{} joined but this seating needs {}. Press Tab or 2/3/6 to change it, \
+                 or S to play solo.",
+                net.seats.len(),
+                chosen.count()
+            ))
+        }
     } else {
         StartDecision::Refuse(format!(
             "Waiting for: {}. Press S to play solo instead.",
@@ -559,6 +572,25 @@ pub fn start_message(net: &NetState, seating: Seating) -> NetMsg {
     NetMsg::Start {
         seats: net.seats.clone(),
         players: seating.indices(),
+    }
+}
+
+/// Bind the roster's join-order slots to the chosen seating's camp indices.
+///
+/// [`seat_for`] hands out roster slots in join order (0, 1, 2, …), but a
+/// seating plays with *specific* camps — Two is {0, 3}, Three is {0, 2, 4} —
+/// so the k-th peer to join commands `players()[k]`, and any further peers sit
+/// out as spectators. Without this rebinding the two lists disagree: in
+/// two-player mode the seat list said player 1 while the board's second camp
+/// belonged to player 3, so when the turn reached camp 3 nobody controlled it
+/// and every screen sat on "Waiting for player 3" forever.
+///
+/// Runs on the host at start, before [`start_message`] clones the seats, so
+/// the host's own [`NetState`] and every guest's arrive at the same binding.
+fn assign_seating(net: &mut NetState, seating: Seating) {
+    let camps = seating.indices();
+    for (i, seat) in net.seats.iter_mut().enumerate() {
+        seat.player = camps.get(i).copied();
     }
 }
 
@@ -759,7 +791,13 @@ fn handle_buttons(
 
     // Checked before the socket is even looked at, so nothing about the network
     // can prevent it. `start` also plays solo when nobody else is present.
-    if solo || (start && matches!(start_decision(&net), StartDecision::Solo)) {
+    if solo || (start && matches!(start_decision(&net, chosen.0), StartDecision::Solo)) {
+        // Solo means this peer drives every seated camp, so no seat may keep a
+        // player binding — a self-seat left over from lobby greetings would
+        // otherwise pin the solo player to camp 0 and strand the rest.
+        for seat in &mut net.seats {
+            seat.player = None;
+        }
         info!("starting a solo game");
         next_state.set(AppState::InGame);
         return;
@@ -796,9 +834,10 @@ fn handle_buttons(
     // indistinguishable from a broken build, which is how the blank-screen bug
     // presented.
     if start {
-        match start_decision(&net) {
+        match start_decision(&net, Seating::Two) {
             StartDecision::Solo => next_state.set(AppState::InGame),
             StartDecision::Multiplayer => {
+                assign_seating(&mut net, chosen.0);
                 broadcast(&mut socket, &peers, &start_message(&net, chosen.0));
                 next_state.set(AppState::InGame);
             }
@@ -922,7 +961,7 @@ mod tests {
         let net = NetState::default();
         assert!(net.peers.is_empty(), "the fixture has no peers");
         assert!(net.seats.is_empty(), "and no seat has been created yet");
-        assert_eq!(start_decision(&net), StartDecision::Solo);
+        assert_eq!(start_decision(&net, Seating::Two), StartDecision::Solo);
     }
 
     /// Specifically the socket-never-connected case: no id, no seat, no peers.
@@ -934,7 +973,7 @@ mod tests {
         let net = NetState::default();
         assert_eq!(net.my_id, None, "no id without a connection");
         assert!(net.seats.is_empty(), "and no seat");
-        assert_eq!(start_decision(&net), StartDecision::Solo);
+        assert_eq!(start_decision(&net, Seating::Two), StartDecision::Solo);
     }
 
     #[test]
@@ -943,7 +982,7 @@ mod tests {
         // A peer is present and we are not the host.
         net.peers.push(fake_peer());
         net.is_host = false;
-        match start_decision(&net) {
+        match start_decision(&net, Seating::Two) {
             StartDecision::Refuse(why) => assert!(why.contains("host"), "{why}"),
             other => panic!("expected a refusal, got {other:?}"),
         }
@@ -956,7 +995,7 @@ mod tests {
         net.is_host = true;
         net.seats = vec![seat("ada", true), seat("grace", false)];
 
-        match start_decision(&net) {
+        match start_decision(&net, Seating::Two) {
             StartDecision::Refuse(why) => {
                 assert!(why.contains("grace"), "should name who is not ready: {why}");
                 assert!(
@@ -983,7 +1022,7 @@ mod tests {
         waiting.seats = vec![seat("ada", false)];
 
         for net in [&guest, &waiting] {
-            match start_decision(net) {
+            match start_decision(net, Seating::Two) {
                 StartDecision::Refuse(why) => assert!(
                     why.contains("S to play solo"),
                     "a refusal must offer the solo key: {why:?}"
@@ -999,7 +1038,52 @@ mod tests {
         net.peers.push(fake_peer());
         net.is_host = true;
         net.seats = vec![seat("ada", true), seat("grace", true)];
-        assert_eq!(start_decision(&net), StartDecision::Multiplayer);
+        assert_eq!(start_decision(&net, Seating::Two), StartDecision::Multiplayer);
+    }
+
+    /// Two-player mode hung forever on "Waiting for player 3": the roster
+    /// hands out join-order slots (0, 1), but the Two seating plays camps
+    /// {0, 3}, so when the turn reached camp 3 nobody controlled it. The
+    /// binding from join order to camps happens at start.
+    #[test]
+    fn join_order_binds_to_the_seatings_camps() {
+        let mut net = NetState {
+            seats: vec![seat("ada", true), seat("grace", true), seat("lee", true)],
+            ..Default::default()
+        };
+
+        assign_seating(&mut net, Seating::Two);
+
+        assert_eq!(net.seats[0].player, Some(0), "the host keeps camp 0");
+        assert_eq!(
+            net.seats[1].player,
+            Some(3),
+            "the second joiner commands camp 3, the facing camp"
+        );
+        assert_eq!(
+            net.seats[2].player, None,
+            "a peer beyond the seating's camps sits out as a spectator"
+        );
+    }
+
+    /// Starting a seating with fewer peers than camps would strand the
+    /// uncontrolled ones — the turn would wait on a player with no owner.
+    #[test]
+    fn a_shared_start_needs_a_seat_per_camp() {
+        let mut net = NetState::default();
+        net.peers.push(fake_peer());
+        net.is_host = true;
+        net.seats = vec![seat("ada", true), seat("grace", true)];
+
+        assert!(
+            matches!(start_decision(&net, Seating::Six), StartDecision::Refuse(_)),
+            "two seats cannot play a six-camp game"
+        );
+        assert_eq!(
+            start_decision(&net, Seating::Two),
+            StartDecision::Multiplayer,
+            "and the same two seats are exactly right for two camps"
+        );
     }
 
     /// A stand-in peer. `PeerId` is a `Uuid` newtype with no `FromStr`, so this
