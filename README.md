@@ -87,7 +87,7 @@ Code cites **law IDs**, never section numbers.
 ```sh
 cargo test                                          # all laws + tests
 cargo run -p checkers-bevy                          # play
-cargo doc --open                                    # rustdoc with rendered math
+cargo doc --no-deps --open                           # rustdoc with rendered math
 cargo run -p checkers-spec-gen -- specs/specification.md          # regenerate
 cargo run -p checkers-spec-gen -- --check specs/specification.md  # CI staleness gate
 ```
@@ -106,6 +106,11 @@ rustdocflags = ["--html-in-header", "assets/katex-header.html"]
 This must be a *flag*: `#![doc(html_in_header = ...)]` as a crate attribute is
 rejected by cargo as an unknown attribute. For docs.rs, declare it under
 `[package.metadata.docs.rs]` as well, since docs.rs ignores `.cargo/config.toml`.
+
+The path is relative, and the flag applies to **every crate rustdoc
+documents** — so documenting a dependency, whose sources have no `assets/`,
+fails with `error reading assets/katex-header.html`. Always pass
+`--no-deps` (CI does).
 
 ### Running the proofs
 
