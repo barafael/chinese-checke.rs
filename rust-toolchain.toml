@@ -1,0 +1,12 @@
+# Pin the workspace to stable, matching CI (dtolnay/rust-toolchain@stable).
+#
+# Without this file rustup uses the machine default, and on current nightlies
+# bevy_render 0.19 fails to compile — an inherent-method ambiguity in its
+# surface handling (`ObserverSystemExt::run_if`), inside the dependency rather
+# than in this code — which presents as "checkers-bevy is broken" while the
+# workspace is fine.
+#
+# `cargo kani` is unaffected: it exports its own pinned nightly via
+# RUSTUP_TOOLCHAIN, which takes precedence over this file.
+[toolchain]
+channel = "stable"
