@@ -77,6 +77,11 @@ fn jump_scenarios() -> Vec<(Position, Coord)> {
 // ---------------------------------------------------------------------------
 
 /// Piece conservation.
+///
+/// Stated over the specification's six players, and its subjects are
+/// six-player positions. In a composed game (chapter 15) the same idea is
+/// per seated player — ten each, none for the vacant camps — which is what
+/// [`crate::audit::audit_position`] checks and `tests/composed.rs` runs.
 pub struct PieceConservation;
 
 impl Law for PieceConservation {
@@ -106,6 +111,10 @@ impl Law for PieceConservation {
 register_law!(PieceConservation, PIECE_CONSERVATION);
 
 /// Occupancy accounting: 60 occupied, 61 empty, 121 total.
+///
+/// Six-player by definition, like [`PieceConservation`]; a composed game
+/// occupies ten holes per seated player instead, and
+/// [`crate::audit::audit_position`] checks that.
 pub struct OccupancyAccounting;
 
 impl Law for OccupancyAccounting {
@@ -961,54 +970,80 @@ impl Law for BlockedPlayerIsReachable {
 }
 register_law!(BlockedPlayerIsReachable, BLOCKED_PLAYER_IS_REACHABLE);
 
-/// A blocked player passes, and six passes in a row is a draw.
+/// A blocked player passes, and a draw needs every player to pass in a row —
+/// in every game size.
 pub struct PassingAndDraw;
 
 impl Law for PassingAndDraw {
     const ID: &'static str = "CC-TURN-PASS";
-    const STATEMENT: &'static str =
-        r"T_i(s) = \varnothing \implies \text{pass};\qquad \text{six passes} \implies \text{draw}";
+    const STATEMENT: &'static str = r"T_i(s) = \varnothing \implies \text{pass};\qquad |\text{successive passes}| = |P| \implies \text{draw}";
     const CHAPTER: Chapter = Chapter::Turns;
     const SUMMARY: &'static str =
-        "A player with no move passes; six consecutive passes end the game in a draw.";
-    /// In plain terms: A stuck player passes, and six passes in a row end the game as a draw.
+        "A player with no move passes; when every player has passed in a row, the game is a draw.";
+    /// In plain terms: A stuck player passes, and a draw needs every player to pass in a row.
     const NOTE: &'static str =
-        "A stuck player passes, and six passes in a row end the game as a draw.";
+        "A stuck player passes, and a draw needs every player to pass in a row.";
     const EVIDENCE: Evidence = Evidence::Exhaustive;
     type Subject = ();
 
     fn holds((): &()) -> Result<(), String> {
         use crate::rules::Game;
 
-        // A blocked player passes and play continues.
-        let mut game = Game::from_position(blocked_position(), Player::ALL[0]);
-        if !game.legal_moves().is_empty() {
-            return Err("the blocked player unexpectedly has moves".into());
-        }
-        game.pass();
-        if game.turn() != Player::ALL[1] {
-            return Err("passing did not advance the turn".into());
-        }
-        if game.is_over() {
-            return Err("a single pass ended the game".into());
-        }
+        // Chapter 15 leaves the player count open, and the front-end deals
+        // games for two, three, and six — the pass and draw rules are checked
+        // over all three compositions.
+        let configurations: [&[Player]; 3] = [
+            Player::ALL.as_slice(),
+            &[Player::ALL[0], Player::ALL[3]],
+            &[Player::ALL[0], Player::ALL[2], Player::ALL[4]],
+        ];
 
-        // Six passes in a row is a draw.
-        let mut frozen = Game::from_position(frozen_position(), Player::ALL[0]);
-        for i in 0..PLAYERS {
-            if frozen.is_over() {
-                return Err(format!("the game ended after {i} passes, expected 6"));
+        for players in configurations {
+            let names: Vec<u8> = players.iter().map(|p| p.index()).collect();
+
+            // A blocked player passes and play continues with the next
+            // seated player, skipping any vacant camps.
+            let mut game = Game::compose(blocked_position(), players[0], players);
+            if !game.legal_moves().is_empty() {
+                return Err(format!(
+                    "players {names:?}: the blocked player unexpectedly has moves"
+                ));
             }
-            if !frozen.legal_moves().is_empty() {
-                return Err("the frozen position is not actually frozen".into());
+            game.pass();
+            if game.turn() != players[1] {
+                return Err(format!(
+                    "players {names:?}: passing did not advance to the next seated player"
+                ));
             }
-            frozen.pass();
-        }
-        if frozen.outcome() != Some(Outcome::Draw) {
-            return Err(format!(
-                "six passes gave {:?}, expected a draw",
-                frozen.outcome()
-            ));
+            if game.is_over() {
+                return Err(format!("players {names:?}: a single pass ended the game"));
+            }
+
+            // On a frozen board every seated player must pass, and the draw
+            // fires exactly when the passes in a row reach the number of
+            // seated players — not one pass sooner.
+            let mut frozen = Game::compose(frozen_position(), players[0], players);
+            for i in 0..players.len() {
+                if frozen.is_over() {
+                    return Err(format!(
+                        "players {names:?}: the game ended after {i} passes, expected {}",
+                        players.len()
+                    ));
+                }
+                if !frozen.legal_moves().is_empty() {
+                    return Err(format!(
+                        "players {names:?}: the frozen position is not actually frozen"
+                    ));
+                }
+                frozen.pass();
+            }
+            if frozen.outcome() != Some(Outcome::Draw) {
+                return Err(format!(
+                    "players {names:?}: {} passes gave {:?}, expected a draw",
+                    players.len(),
+                    frozen.outcome()
+                ));
+            }
         }
         Ok(())
     }

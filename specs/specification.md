@@ -696,12 +696,12 @@ $$
 
 ##### `CC-TURN-PASS`
 
-**In plain terms:** A stuck player passes, and six passes in a row end the game as a draw.
+**In plain terms:** A stuck player passes, and a draw needs every player to pass in a row.
 
-A player with no move passes; six consecutive passes end the game in a draw.
+A player with no move passes; when every player has passed in a row, the game is a draw.
 
 $$
-T_i(s) = \varnothing \implies \text{pass};\qquad \text{six passes} \implies \text{draw}
+T_i(s) = \varnothing \implies \text{pass};\qquad |\text{successive passes}| = |P| \implies \text{draw}
 $$
 
 *Evidence: exhaustive*
