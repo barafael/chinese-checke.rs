@@ -14,17 +14,22 @@ So every normative claim is a **Rust type** instead:
 pub struct PieceConservation;
 
 impl Law for PieceConservation {
-    const ID: &'static str = "CC-INV-PIECES";   // stable anchor
-    const STATEMENT: &'static str = r"...";     // the mathematics
-    const SECTION: &'static str = "Impl §28";   // provenance
-    const EVIDENCE: Evidence = Evidence::Proof; // how it is established
+    const ID: &'static str = "CC-POS-PIECES";   // stable anchor
+    const STATEMENT: &'static str = r"\forall i \in P: \ldots"; // the mathematics
+    const CHAPTER: Chapter = Chapter::Players;  // provenance, as a type
+    const SUMMARY: &'static str = "Every player owns exactly ten pieces in every position.";
+    const NOTE: &'static str = "Every player always owns exactly ten pieces.";
+    const EVIDENCE: Evidence = Evidence::Property; // how it is established
     type Subject = Position;                    // what the ∀ ranges over
     fn holds(p: &Position) -> Result<(), String> { /* the check */ }
 }
 register_law!(PieceConservation, PIECE_CONSERVATION);
 ```
 
-Statement, provenance, domain, and check live in one block and cannot drift.
+Identity, mathematics, provenance, gloss, plain-language note, domain, and
+check live in one block and cannot drift. The note is the claim restated for
+a reader who skips the mathematics; the guard tests require it to be a
+sentence without a single backslash.
 Registration happens at **link time** (`linkme` distributed slice), so:
 
 - `cargo test` runs every law without naming any — you cannot declare a law and
