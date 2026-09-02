@@ -1,19 +1,10 @@
 //! Renders the specification from [`checkers_core`].
 //!
-//! The output is **build output**, not a source file: edit the chapter prose in
-//! `checkers-core/src/spec.rs` and the `Law` impls in `checkers-core/src/laws/`.
-//! Because the document and the test suite read the same registry, a law cannot
-//! be documented without being checked, or checked without being documented.
-//!
-//! Why generate a document at all when rustdoc exists: rustdoc sorts items
-//! alphabetically and offers no stable way to override that, so it cannot present
-//! chapters in reading order. rustdoc is the right view for reading a claim
-//! beside its code; this is the right view for reading the specification as a
-//! specification.
-//!
-//! It also generates the wasm law registry, for the same reason: the registry
-//! and the document are both views of one link-time-collected truth. See
-//! [`registry`].
+//! The output is **build output**: edit `checkers-core/src/spec.rs` and the
+//! `Law` impls, then regenerate. It exists because rustdoc sorts items
+//! alphabetically and cannot present chapters in reading order. It also
+//! generates the wasm law registry — both are views of one link-time-collected
+//! truth. See [`registry`].
 //!
 //! ```text
 //! cargo run -p checkers-spec-gen -- specs/specification.md

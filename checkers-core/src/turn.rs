@@ -1,24 +1,15 @@
 //! A jump turn in progress (chapter 9).
 //!
-//! [`crate::rules::Game::play`] is atomic: it takes a whole move and commits it.
-//! A user interface that lets a player hop one step at a time needs something
-//! finer — the ability to advance a single hop, see what is available next, and
-//! abandon the whole turn without touching the game.
+//! [`crate::rules::Game::play`] commits a whole move atomically; a staged UI
+//! needs to advance one hop at a time and be able to abandon the turn.
+//! [`JumpTurn`] is that intermediate state: it holds only the moving piece's
+//! path, and the [`Position`] it was built from is untouched until commit, so
+//! cancelling is free.
 //!
-//! [`JumpTurn`] is that intermediate state. It holds the moving piece's path and
-//! nothing else; the [`Position`] it was built from is unchanged until the turn
-//! is committed, so cancelling is free.
-//!
-//! # Why single hops need their own enumerator
-//!
-//! [`crate::rules::jump_destinations`] returns the *transitive closure* — every
-//! hole reachable by any number of hops. Offering that as the next click would
-//! let a player skip intermediate holes, so a staged interface needs
-//! [`single_hop_destinations`], which returns only the immediate neighbours-over-
-//! a-blocker.
-//!
-//! The two agree in the way chapter 9 requires: the closure is exactly what you
-//! reach by iterating single hops. `CC-TURN-HOP-CLOSURE` checks that.
+//! [`single_hop_destinations`] offers one hop at a time — the transitive
+//! closure from [`crate::rules::jump_destinations`] would let a player skip
+//! intermediate holes. The two agree as chapter 9 requires;
+//! `CC-TURN-HOP-CLOSURE` checks it.
 
 use crate::geometry::{Coord, Dir, on_board};
 use crate::position::{Move, Player, Position, is_legal_jump, is_legal_step};

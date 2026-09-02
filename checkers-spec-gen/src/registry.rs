@@ -1,39 +1,19 @@
 //! Generates `checkers-core/src/laws_generated.rs`, the law registry used on
 //! `wasm32`.
 //!
-//! # Why this exists
+//! `checkers_core::law::LAWS` is a `linkme` distributed slice on native
+//! targets, but `linkme` has no `wasm32` support, so the web build needs the
+//! array spelled out. This generator writes it from a native run, where the
+//! linker has done the collecting.
 //!
-//! `checkers_core::law::LAWS` is normally a `linkme` distributed slice: each
-//! `register_law!` puts its record in a named linker section and the linker
-//! concatenates them, so a declared law is collected *because it exists*.
+//! The file is a derivative and can go stale, so two checks guard it:
+//! `--check-registry` (CI) and a law-identity comparison on every native
+//! `cargo test`.
 //!
-//! `linkme` has no `wasm32` implementation — WebAssembly has no
-//! linker-defined section-boundary symbols whose address Rust can take — so the
-//! web build needs the array spelled out. This generator writes it, running on a
-//! native host where the linker has already done the collecting.
-//!
-//! # What keeps it honest
-//!
-//! The generated file is a derivative and can go stale, which link-time
-//! collection made impossible. Two checks stand in for that guarantee:
-//!
-//! - `--check-registry` compares the file on disk with what the linker reports,
-//!   and fails if they differ. CI runs it.
-//! - `law::tests::the_generated_registry_matches_the_linker` compares the two
-//!   ID sets on every native `cargo test`.
-//!
-//! # How law types are discovered
-//!
-//! [`checkers_core::law::LawInfo`] carries a law's ID but not its Rust type
-//! path, and the generated
-//! array needs the path. So the `register_law!` invocations are read from the
-//! source — the one place that names both the type and (through it) the ID.
-//!
-//! Parsing source text is ordinarily a poor way to learn about a program, but
-//! here it is *cross-checked against the linker*: if the scan finds a law the
-//! linker did not, or misses one it did, generation fails rather than emitting a
-//! registry that disagrees with the build. Text parsing cannot silently drop a
-//! law; it can only fail loudly.
+//! Law *types* are discovered by reading `register_law!` invocations from the
+//! source — the one place that names both type and ID. Parsing text is
+//! ordinarily weak, but it is cross-checked against the linker: any
+//! disagreement fails generation rather than emitting a wrong registry.
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
@@ -118,10 +98,8 @@ impl std::error::Error for RegistryError {
 
 /// Extract the law type named by each `register_law!(Type, SLOT);` invocation.
 ///
-/// Scans the whole text rather than line by line: rustfmt wraps invocations
-/// whose arguments are long, and a line-oriented scan silently missed four of
-/// the forty-two laws. The linker cross-check in [`collect`] is what turned that
-/// into a build failure instead of a quietly short registry.
+/// Scans the whole text, not lines: rustfmt wraps long invocations, and a
+/// line-oriented scan silently missed four of the forty-two laws.
 fn scan(source: &str, module: &str) -> Vec<Registration> {
     const NEEDLE: &str = "register_law!(";
     let mut out = Vec::new();

@@ -1,14 +1,11 @@
 //! Board geometry: coordinates, directions, rotation, and the star.
 //!
-//! Everything here is written so that the Kani harnesses at the bottom of this
-//! file can prove the geometry laws over the whole domain. What bounded model
-//! checking cannot tolerate is a **symbolic** loop bound: an early version of
-//! [`rotate_n`] written as `(0..n).fold(..)` sent Kani unwinding past 6900
-//! iterations before it was killed, so it is a loop-free `match` over `n % 6`.
-//! Loops over a *fixed* bound are fine — Kani unrolls them, and the proofs
-//! below use some — so [`camp_of`] may loop over the six camps.
-//!
-//! Laws proven about this module: see [`crate::laws::geometry`].
+//! Written for the Kani harnesses at the bottom of this file, which prove the
+//! geometry laws over the whole domain. Kani cannot tolerate symbolic loop
+//! bounds, so [`rotate_n`] is a loop-free `match` over `n % 6`; loops with
+//! fixed bounds are fine. Laws: [`crate::laws::geometry`].
+
+#![doc = include_str!("../../docs/proof-fault-audit.md")]
 
 /// Axial hex coordinate (Impl §1).
 ///

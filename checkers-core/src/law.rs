@@ -1,33 +1,9 @@
-//! The [`Law`] trait: a normative claim from the specification, expressed as a
-//! Rust type that carries its own statement *and* its own check.
-//!
-//! # Why a trait rather than a doc comment
-//!
-//! A `// §16` comment is a string. Nothing detects it when a section is
-//! renumbered, when a rule changes, or when a claim is silently dropped. A
-//! `Law` impl puts four things in one block that cannot drift apart:
-//!
-//! | Face | Field |
-//! |---|---|
-//! | Stable identity | [`Law::ID`] |
-//! | The mathematics | [`Law::STATEMENT`] |
-//! | Where it came from | [`Law::CHAPTER`] |
-//! | What it means operationally | [`Law::holds`] |
-//!
-//! The domain the claim is quantified over is [`Law::Subject`] — that is what
-//! turns a $\forall$ into something a property test can generate.
-//!
-//! # What this does and does not give you
-//!
-//! Registration is by *link time collection*, so a declared law is always
-//! executed and always documented; you cannot forget one. This is real
-//! traceability.
-//!
-//! It is **not** proof. [`Law::holds`] is a runtime predicate: the type system
-//! does not check that [`Law::STATEMENT`] means what [`Law::holds`] computes.
-//! Laws whose domain is small and arithmetic are additionally *proven* with the
-//! Kani harnesses in [`crate::geometry`]; the rest are checked over generated
-//! inputs by the property tests. See the crate docs for the split.
+//! The [`Law`] trait: a specification claim as a Rust type carrying its own
+//! statement and its own check. One impl block holds ID, math, chapter,
+//! evidence level, domain, and check, so they cannot drift apart. Laws are
+//! collected at link time into [`LAWS`], so a declared law is always run and
+//! always documented. This is traceability, not proof — nothing checks that
+//! [`Law::STATEMENT`] means what [`Law::holds`] computes.
 
 use core::fmt::Debug;
 
@@ -38,19 +14,16 @@ use linkme::distributed_slice;
 use crate::spec::Chapter;
 
 /// A link-time record of one law, used by the test harness and the spec
-/// generator so neither needs a hand-maintained list.
+/// generator.
 #[derive(Debug)]
 pub struct LawInfo {
     /// Stable identifier, e.g. `"CC-INV-PIECES"`.
     pub id: &'static str,
-    /// The formal statement, in LaTeX (rendered by rustdoc + KaTeX).
+    /// The formal statement, in LaTeX.
     pub statement: &'static str,
-    /// Which chapter of the specification this claim belongs to.
-    ///
-    /// A [`Chapter`] rather than a string: a law cannot cite a section that does
-    /// not exist, and there are no numbers to renumber.
+    /// The chapter this claim belongs to.
     pub chapter: Chapter,
-    /// One-line prose gloss of the claim.
+    /// One-line prose gloss.
     pub summary: &'static str,
     /// How the claim is established.
     pub evidence: Evidence,
@@ -61,14 +34,13 @@ pub struct LawInfo {
 /// How strongly a law is established.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Evidence {
-    /// Proven for the entire domain by the Kani harnesses in
-    /// [`crate::geometry`]. The strongest level available here.
+    /// Proven for the whole domain by the Kani harnesses in [`crate::geometry`].
     Proof,
-    /// Checked over inputs produced by a `proptest` strategy.
+    /// Checked over `proptest`-generated inputs.
     Property,
-    /// Checked exhaustively over a finite domain in ordinary Rust.
+    /// Checked exhaustively over a finite domain.
     Exhaustive,
-    /// Checked against fixed examples only — the weakest level.
+    /// Checked against fixed examples only.
     Example,
 }
 
@@ -110,35 +82,11 @@ impl core::error::Error for Violation {}
 
 /// Every law, however this target manages to collect them.
 ///
-/// Iterate it to check every law ([`verify_all`]) or to generate the
-/// specification document.
-///
-/// # Two mechanisms, one authority
-///
-/// On native targets this is a `linkme` distributed slice: each
-/// [`crate::register_law!`] places its record in a named linker section and the
-/// linker concatenates them. Registration is therefore *unforgettable* — the
-/// law is collected because it exists, and there is no list to update.
-///
-/// `linkme` has no `wasm32` implementation (WebAssembly has no
-/// linker-defined section-boundary symbols to take the address of), so web
-/// builds use the generated `laws_generated.rs` array instead — emitted by
-/// `checkers-spec-gen` from the native build, where the linker *did* do the
-/// collecting.
-///
-/// That makes native the authority and the generated file a derivative. The
-/// derivative can go stale, so two things guard it:
-///
-/// - `cargo run -p checkers-spec-gen -- --check-registry` fails if the file
-///   disagrees with the linker. CI runs it, and so does the deploy workflow
-///   before it builds.
-/// - `tests::the_generated_registry_matches_the_linker` compares law
-///   *identities*, not just counts, on every native `cargo test`.
-///
-/// This is weaker than link-time collection — a forgotten regeneration is
-/// possible where a forgotten registration was not — but it is *mechanically
-/// checked* rather than trusted, which is the most that can be had while
-/// wasm lacks the primitive.
+/// Native: a `linkme` distributed slice — registration is automatic and
+/// unforgettable. wasm: `linkme` has no wasm32 support, so the generated
+/// `laws_generated.rs` array is used instead (emitted by
+/// `checkers-spec-gen` from the native build). The derivative is guarded by
+/// `--check-registry` and by the identity comparison in the crate tests.
 #[cfg(not(target_family = "wasm"))]
 #[distributed_slice]
 pub static LAWS: [LawInfo];
@@ -153,11 +101,10 @@ mod generated {
 
 /// A normative claim from the specification.
 ///
-/// Implementors are zero-sized marker types; see [`crate::laws`] for the full
-/// set. Register each one with [`crate::register_law!`].
+/// Implementors are zero-sized marker types; register each with
+/// [`crate::register_law!`].
 pub trait Law {
-    /// Stable identifier. Never reuse or renumber these — they are the anchor
-    /// that survives section renumbering.
+    /// Stable identifier. Never reuse or renumber.
     const ID: &'static str;
     /// The formal statement in LaTeX, without delimiters.
     const STATEMENT: &'static str;
@@ -174,8 +121,7 @@ pub trait Law {
     /// Does the law hold for `subject`? `Err` describes the violation.
     fn holds(subject: &Self::Subject) -> Result<(), String>;
 
-    /// The inputs to check. Property-tested laws return a representative
-    /// sample here; the exhaustive ones return their whole domain.
+    /// The inputs to check: a representative sample, or the whole domain.
     fn subjects() -> Vec<Self::Subject>;
 
     /// Check the law over every subject, reporting the first violation.
@@ -194,10 +140,8 @@ pub trait Law {
     }
 }
 
-/// Build a [`LawInfo`] from a [`Law`] type.
-///
-/// Used by [`crate::register_law!`] and by the generated wasm registry, so the
-/// two cannot describe a law differently.
+/// Build a [`LawInfo`] from a [`Law`] type. Used by [`crate::register_law!`]
+/// and the generated wasm registry.
 #[macro_export]
 macro_rules! law_info {
     ($law:ty) => {
@@ -212,15 +156,11 @@ macro_rules! law_info {
     };
 }
 
-/// Register a [`Law`] in the [`LAWS`] slice.
+/// Register a [`Law`] in the [`LAWS`] slice. `$slot` is the static's name,
+/// unique within its module.
 ///
-/// The second argument names the generated static; it only needs to be unique
-/// within its module.
-///
-/// On `wasm32` this expands to nothing: `linkme` cannot collect anything there,
-/// so the entries come from the generated array instead (see [`LAWS`]). The
-/// invocation is still what the generator reads to *find* the law, so it stays
-/// in the source on every target.
+/// Expands to nothing on wasm (no `linkme` there); the invocation still stays
+/// in the source because the generator reads it to find the law.
 #[cfg(not(target_family = "wasm"))]
 #[macro_export]
 macro_rules! register_law {
@@ -260,13 +200,7 @@ pub fn all_sorted() -> Vec<&'static LawInfo> {
     laws
 }
 
-/// All registered laws in **specification reading order**: by chapter, then by
-/// ID within a chapter.
-///
-/// This is the ordering the generated document uses. rustdoc cannot reproduce
-/// it — it sorts items alphabetically and offers no stable way to override that
-/// — which is why the specification view is generated rather than read from
-/// rustdoc output.
+/// All registered laws in specification reading order: by chapter, then ID.
 pub fn all_in_reading_order() -> Vec<&'static LawInfo> {
     let mut laws: Vec<&'static LawInfo> = LAWS.iter().collect();
     laws.sort_by(|a, b| {

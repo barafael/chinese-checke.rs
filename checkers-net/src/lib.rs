@@ -1,34 +1,19 @@
 //! Wire protocol and host-relay sequencing for networked play.
 //!
-//! Peer-to-peer over WebRTC via `bevy_matchbox`, with a signaling server used
-//! only for introductions. There is no game server: one peer acts as **host**
-//! and is the single sequencing authority.
-//!
-//! # Why a host relay
-//!
-//! Six players clicking simultaneously would otherwise apply moves in different
-//! orders on different machines, and the rules are order-dependent — whether a
-//! jump is available depends on where the blockers are. So:
+//! Peer-to-peer over WebRTC via `bevy_matchbox`; the signaling server is used
+//! only for introductions. One peer acts as **host**, the single sequencing
+//! authority:
 //!
 //! 1. A guest submits its move as [`NetMsg::Move`], to the host only.
 //! 2. The host assigns the next sequence number and rebroadcasts
 //!    [`NetMsg::Sequenced`] to everyone, *including itself*.
-//! 3. Every peer — the originator included — applies a move only on
-//!    `Sequenced`.
+//! 3. Every peer applies a move only on `Sequenced` — the host included, or
+//!    it would run a move ahead of its guests.
 //!
-//! Step 3 is the part that is easy to get wrong: if the host applied its own
-//! moves directly it would run one move ahead of its guests, and the divergence
-//! would only surface later as an illegal-move rejection. Routing the host's own
-//! moves through the same sequencing arm makes one code path serialize
-//! everything.
-//!
-//! # Trust
-//!
-//! [`WireMove`] carries only origin, destination, and kind — never a resulting
+//! [`WireMove`] carries only `(kind, origin, destination)`, never a resulting
 //! position. Receivers re-derive the move against their own
-//! [`checkers_core::rules::legal_moves`], so a peer cannot induce a state the
-//! rules disallow even if it sends nonsense. Host authority orders moves; the
-//! rules, not the sender, decide whether one is legal.
+//! [`checkers_core::rules::legal_moves`]: the host orders moves; the rules,
+//! not the sender, decide legality.
 
 use bevy::prelude::*;
 use bevy_matchbox::prelude::*;
@@ -39,19 +24,10 @@ use serde::{Deserialize, Serialize};
 /// Signaling server used to introduce peers, set at compile time with
 /// `MATCHBOX_SERVER`.
 ///
-/// The default is **omdurman's** deployment, borrowed because it is already
-/// running a compatible matchbox build. Two consequences worth knowing before
-/// shipping this:
-///
-/// - Launching the app opens an outbound WebSocket to a host this project does
-///   not control. Only peer-introduction traffic crosses it — game moves travel
-///   peer-to-peer once WebRTC connects — but the connection itself is real.
-/// - Room names share that server's namespace, so the default room
-///   ([`RoomId::DEFAULT`]) could collide with anyone else using it. The lobby
-///   lets the player pick a different one.
-///
-/// Point `MATCHBOX_SERVER` at your own `matchbox_server` for anything beyond
-/// local testing.
+/// The default is omdurman's shared deployment — its room namespace is not
+/// ours, so pick a room ([`RoomId::DEFAULT`]) and point `MATCHBOX_SERVER` at
+/// your own `matchbox_server` for anything beyond local testing. Only
+/// peer-introduction traffic crosses it; game moves are peer-to-peer.
 pub const SIGNALING_SERVER: &str = match option_env!("MATCHBOX_SERVER") {
     Some(s) => s,
     None => "wss://omdurman-matchbox.fly.dev",
@@ -140,14 +116,8 @@ pub enum NetMsg {
     /// Host -> all: assignments are final, start playing.
     ///
     /// `players` carries which of the six players are seated, so every peer
-    /// deals the same board. Sent as indices rather than as the front-end's
-    /// `Seating` enum for the same reason [`Seat::player`] is a `u32`: the wire
-    /// format does not depend on the variant order of a type in a crate above
-    /// it, and a peer running a build that offers different seatings still
-    /// understands the set it is given.
-    ///
-    /// Without this a guest built its board from its own local default, so a
-    /// host starting a three-player game left the guest playing six.
+    /// deals the same board. Indices, not a front-end type: the wire format
+    /// must not depend on a crate above it.
     Start { seats: Vec<Seat>, players: Vec<u32> },
 }
 
@@ -199,14 +169,8 @@ pub struct NetState {
 impl NetState {
     /// Forget everything tied to the old room, keeping only this peer's name.
     ///
-    /// Every other field is per-room and wrong the moment the room changes: the
-    /// peer list and `my_id` come from that socket, `is_host` was computed from
-    /// those peers, the seats were assigned by that host, and the sequence
-    /// counters number that room's moves. Carrying any of them over means
-    /// arriving in a new room already believing you are the host of it, or
-    /// dropping its first moves as duplicates.
-    ///
-    /// The name survives because it identifies the player, not the session.
+    /// Every other field is per-room and wrong the moment the room changes.
+    /// The name survives: it identifies the player, not the session.
     pub fn leave_room(&mut self) {
         let name = std::mem::take(&mut self.name);
         *self = Self {

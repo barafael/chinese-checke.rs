@@ -975,21 +975,10 @@ register_law!(PassingAndDraw, PASSING_AND_DRAW);
 
 /// A played move resets the consecutive-pass counter.
 ///
-/// The draw fires on six passes *in succession*, and the subtle half of that
-/// rule is the reset: a pass counted before a move must not survive it. The
-/// reset is observable only through scripted play. After any legal move the
-/// mover can always retrace it — stepping or jumping back is legal by chapter
-/// 8 — so a position that once had a move can never reach the all-stuck state
-/// in which six passes could accumulate during natural play. That is also why
-/// [`frozen_position`] is unreachable by legal play, and why
-/// `CC-TURN-PASS` exercises the pure-pass draw on it directly.
-///
-/// What nothing else pins is the reset, so this law scripts the mixed
-/// sequence over [`blocked_position`]: player 0 passes, player 1 (the only
-/// other player with pieces) moves, and play continues. A counter that
-/// survives the move keeps climbing across the interleaved passes and reaches
-/// six partway through the loop, wrongly ending the game — the loop's
-/// `is_over` assertion is what fails.
+/// The reset is observable only through scripted play: over
+/// [`blocked_position`], player 0 passes, player 1 (the only other player
+/// with pieces) moves, and play continues. A counter that survives the move
+/// keeps climbing and wrongly draws the game partway through the loop.
 pub struct PassCounterResetsOnMove;
 
 impl Law for PassCounterResetsOnMove {
@@ -1401,11 +1390,9 @@ register_law!(StagedTurnYieldsLegalMove, STAGED_TURN_YIELDS_LEGAL_MOVE);
 
 /// A staged turn that ends where it began cannot be committed.
 ///
-/// The closure-level form of this rule already has its own law
-/// (`CC-JUMP-REVISIT`, which excludes the origin from `jump_destinations`). The
-/// staged form needs its own too, rather than being checked as a side condition
-/// inside `CC-TURN-STAGED-LEGAL`: a claim buried in another law's body is exactly
-/// the drift this registry exists to prevent.
+/// Its own law rather than a side condition of `CC-TURN-STAGED-LEGAL`, so it
+/// cannot drift into being unchecked. The closure-level analogue is
+/// `CC-JUMP-REVISIT`.
 pub struct StagedTurnCannotBeANullMove;
 
 impl Law for StagedTurnCannotBeANullMove {

@@ -1,27 +1,13 @@
 //! Bevy front-end for the machine-checked Chinese Checkers rules.
 //!
-//! The rules live entirely in `checkers-core`; this crate renders a [`Game`] and
-//! turns clicks into moves. Destinations are taken from the rules rather than
-//! constructed, so the UI has no path to a position the rules disallow.
+//! The rules live in `checkers-core`; this binary renders the [`Game`] and
+//! turns clicks into moves, always taking destinations from the rules rather
+//! than constructing them. Shared logic lives in [`checkers_bevy`] so the
+//! tests can drive it headlessly.
 //!
-//! The session state, staged-turn interaction, and networking glue live in the
-//! library half of this crate ([`checkers_bevy`]) so the integration tests can
-//! drive them without a window; this binary owns the schedule, the rendering,
-//! and the input systems.
-//!
-//! # Self-validation
-//!
-//! Two levels, because they cost very different amounts:
-//!
-//! - **At startup**, [`verify_all`] runs the entire law registry. Worth its
-//!   roughly one-second cost once, and the app refuses to draw a board that
-//!   fails its own specification.
-//! - **After every committed turn**, [`audit`] applies the position invariants
-//!   to the live position. Linear in the number of holes, so it is safe per move.
-//!
-//! Running the full registry per move would be far too slow: every law
-//! regenerates its own sample games, and it never inspects the caller's
-//! position. That distinction is what [`checkers_core::audit`] exists for.
+//! Self-validation runs at two costs: the full law registry once at startup
+//! ([`verify_all`]), and the linear position audit after every move
+//! ([`audit`]).
 
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
@@ -126,13 +112,8 @@ fn main() {
 
 // --- marker components -----------------------------------------------------
 
-/// Everything a view-rebuilding system needs in order to draw.
-///
-/// The sync systems all take the same cluster of render resources, and
-/// `sync_pieces` had grown past clippy's argument limit carrying them one by
-/// one. One [`SystemParam`] bundle names the idea — "what it takes to draw" —
-/// and keeps every signature short. Destructure at the top of the system body:
-/// `let DrawContext { mut commands, mut meshes, .. } = draw;`
+/// Everything a view-rebuilding system needs in order to draw, bundled so
+/// system signatures stay short.
 #[derive(SystemParam)]
 struct DrawContext<'w, 's> {
     commands: Commands<'w, 's>,
@@ -159,11 +140,8 @@ struct Overlay;
 #[derive(Component)]
 struct StatusText;
 
-/// Whether the status panel is shown. Toggled with `T`.
-///
-/// Kept out of [`Session`] because it is a view preference, not game state:
-/// folding it in would make every toggle look like a position change to the
-/// `is_changed()` gates the sync systems rely on.
+/// Whether the status panel is shown, toggled with `T`. A view preference,
+/// not game state, so it lives outside [`Session`].
 #[derive(Resource)]
 struct StatusVisible(bool);
 
@@ -194,20 +172,10 @@ fn player_colour(player: Player) -> Color {
 
 /// Size the window to two thirds of the monitor and centre it.
 ///
-/// Runs after startup rather than in the `Window` descriptor because the monitor
-/// is not known until winit has created the window; `Monitor` entities do not
-/// exist before then. Runs once, so the player can freely resize afterwards.
-///
-/// Two thirds of the *full* monitor rather than of the work area, because
-/// [`Monitor`] does not expose the work area — it has no notion of the taskbar.
-/// That is still the fix for the occlusion bug: at 2/3 the window is well inside
-/// the usable region, whereas the old fixed 980px height exceeded this display's
-/// 912px work area and pushed the lobby's bottom-anchored buttons underneath the
-/// taskbar.
-///
-/// The monitor reports physical pixels, so the logical size the window wants is
-/// divided by the scale factor — 2.5 on this display. Skipping that would ask
-/// for a window 2.5x too large.
+/// Runs after startup (winit does not know the monitor before then), once, in
+/// logical pixels (the monitor reports physical ones). Two thirds of the
+/// full monitor — [`Monitor`] has no notion of the work area — which keeps
+/// the window clear of the taskbar.
 fn size_to_monitor(
     mut windows: Query<&mut Window>,
     monitors: Query<&Monitor, With<PrimaryMonitor>>,
@@ -246,8 +214,8 @@ fn size_to_monitor(
     );
 }
 
-/// Verify the specification and spawn the camera. Runs once, before the lobby:
-/// the app refuses to show anything at all if its own laws do not hold.
+/// Verify the specification and spawn the camera. Runs once, before the
+/// lobby: the app refuses to show anything if its own laws do not hold.
 fn setup(mut commands: Commands) {
     // Camera first. Verification takes roughly a second, and on wasm that runs
     // on the browser's only thread — spawning the camera afterwards meant the
@@ -281,11 +249,8 @@ fn setup(mut commands: Commands) {
     audit(&Position::initial(), Seating::Six);
 }
 
-/// Spawn the in-game UI: status panel and turn controls.
-///
-/// Deliberately separate from the board visuals and *not* marked
-/// [`BoardVisual`]: the UI is the same in every visualization, so switching
-/// styles must not flicker it away.
+/// Spawn the in-game UI: status panel and turn controls. Not marked
+/// [`BoardVisual`]: the UI is the same in every visualization.
 fn spawn_ui(mut commands: Commands) {
     commands.spawn((
         Text::new(""),
@@ -343,14 +308,10 @@ fn spawn_ui(mut commands: Commands) {
 
 /// Tear down whatever visualization is on screen and build the current one.
 ///
-/// This is the whole switch mechanism. Board state is never touched: the
-/// session, the selection, and the network keep whatever they had, and the
+/// This is the whole switch mechanism: board state is never touched, and the
 /// sync systems rebuild pieces and highlights from the unchanged session in
-/// the new style the same frame. The `Local` tracker rather than
-/// `is_changed()` makes first entry deterministic — the board must be spawned
-/// on the first InGame frame regardless of change-detection semantics for a
-/// resource that was initialized long before this system ever ran.
-#[allow(clippy::too_many_arguments)]
+/// the new style the same frame. A `Local` tracker rather than
+/// `is_changed()` makes first entry deterministic.
 fn apply_style(
     style: Res<BoardStyle>,
     mut applied: Local<Option<BoardStyle>>,
@@ -574,26 +535,14 @@ fn handle_keys(keys: Res<ButtonInput<KeyCode>>, mut session: ResMut<Session>) {
 }
 
 /// `T` toggles the status panel.
-///
-/// Separate from [`sync_status`], which early-outs unless the session changed:
-/// folding the toggle in there would leave a keypress with no visible effect
-/// until the player's next move.
 fn toggle_status(keys: Res<ButtonInput<KeyCode>>, mut visible: ResMut<StatusVisible>) {
     if keys.just_pressed(KeyCode::KeyT) {
         visible.0 = !visible.0;
     }
 }
 
-/// Zoom out when the window is too small to show the whole board.
-///
-/// Only ever zooms *out*: at the default projection one world unit is one pixel,
-/// which is the scale `HOLE_SPACING` was designed for, so enlarging the board in
-/// a big window is not wanted. Scaling the projection rather than the entities
-/// keeps `coord_to_world` in one place, and clicks stay correct because
-/// `viewport_to_world_2d` applies the same projection.
-///
-/// Classic style only: the query is over `Camera2d`, so under the amlah style,
-/// whose fixed 3D camera always frames the whole board, this silently no-ops.
+/// Zoom out when the window is too small to show the whole board. Never zooms
+/// in. Classic style only: the amlah camera always frames the whole board.
 fn fit_camera_to_window(
     windows: Query<&Window, Changed<Window>>,
     mut projections: Query<&mut Projection, With<Camera2d>>,
@@ -632,12 +581,9 @@ fn sync_status_visibility(
     };
 }
 
-/// Redraw pieces from the position being displayed.
-///
-/// Despawn-and-respawn rather than diffing: at 60 pieces it is not worth the
-/// complexity, and it guarantees the view cannot drift from the model. Runs
-/// on a style change as well as a session change, which is what makes `V`
-/// rebuild every piece in the new style without a move being played.
+/// Redraw pieces from the position being displayed, despawn-and-respawn so
+/// the view cannot drift from the model. Runs on a style change as well as a
+/// session change, which is what makes `V` rebuild pieces without a move.
 fn sync_pieces(
     draw: DrawContext,
     amlah: Option<Res<board_amlah::AmlahAssets>>,

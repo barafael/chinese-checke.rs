@@ -1,14 +1,10 @@
 //! In-game networking: submit local moves, apply sequenced ones.
 //!
-//! The single rule this module exists to enforce: **a move is applied only when
-//! it arrives sequenced**. Local moves go into the session's outbox and come
-//! back through the same path as remote ones, so there is one ordering of moves
-//! and every peer sees it.
-//!
-//! Solo play takes the same path — the lone peer is its own sequencer, so its
-//! move is sequenced and applied in the same frame. That is deliberate: if solo
-//! play bypassed sequencing, the networked path would only ever be exercised by
-//! actually running two peers.
+//! The one rule: **a move is applied only when it arrives sequenced**. Local
+//! moves go into the outbox and come back through the same path as remote
+//! ones, so every peer sees one ordering. Solo play takes the same path — the
+//! lone peer is its own sequencer — so the networked code is always
+//! exercised.
 
 use bevy::prelude::*;
 use bevy_matchbox::prelude::*;

@@ -1,16 +1,9 @@
-//! Which visualization is showing the board, and the seam that keeps it
-//! separate from the game.
+//! Which visualization is showing the board.
 //!
-//! [`Session`](crate::Session) is the only board state: game, selection,
-//! messages. It knows nothing about how it is drawn. Everything visual —
-//! camera, board geometry, pieces, highlights — is a pure function of
-//! `Session` + [`BoardStyle`], rebuilt wholesale whenever either changes, so
-//! switching style mid-play (`V`) never touches the position, the staged
-//! turn, or the network state.
-//!
-//! Adding a visualization means: a variant here, a spawn function for its
-//! board geometry, and a branch in the piece/highlight/click systems in
-//! `main.rs`. Nothing else.
+//! [`Session`](crate::Session) is board state; visuals are a pure function
+//! of session + [`BoardStyle`], rebuilt wholesale on change, so switching
+//! (`V`) never touches play. Adding a style: a variant here, a spawn
+//! function, branches in the piece/highlight/click systems.
 
 use bevy::prelude::*;
 
@@ -45,9 +38,7 @@ impl BoardStyle {
 }
 
 /// Structure owned by the active visualization: its camera and board
-/// geometry. Despawned wholesale when the style changes — pieces and
-/// highlights are *not* marked with this, because the sync systems rebuild
-/// them from the session on their own.
+/// geometry. Pieces and highlights are rebuilt by the sync systems instead.
 #[derive(Component)]
 pub struct BoardVisual;
 

@@ -1,37 +1,21 @@
-//! Library half of the front-end: everything that can run without a window.
-//!
-//! The binary in `main.rs` wires these types into the Bevy schedule and owns
-//! the rendering systems; the integration tests under `tests/` drive this
-//! library headlessly. The split is what lets those tests use the *real*
-//! coordinate mapping and session logic instead of a stale copy.
+//! Library half of the front-end: everything that can run without a window,
+//! so the integration tests drive the real session logic headlessly. The
+//! binary in `main.rs` owns the Bevy schedule and rendering.
 //!
 //! # Interaction
 //!
-//! Steps commit immediately — there is nothing to chain. Jumps are **staged**:
-//! selecting a piece shows only the destinations reachable in **one** hop, and
-//! clicking one moves the piece there, keeps it selected, and reveals the next
-//! single hop. The turn is not committed until the player confirms, so the whole
-//! chain can be abandoned.
-//!
-//! Moves are never applied where they are made. They are queued in the
-//! session's outbox and applied only when they come back **host-sequenced**
-//! ([`net`]), which gives every peer one identical order. Solo play takes the
-//! same path — the lone peer sequences for itself — so the networked code is
-//! exercised even with one player.
-//!
-//! Confirming before any hop is refused: chapter 9 requires a jump turn to move
-//! the piece, and a turn ending where it began is indistinguishable from not
-//! moving. That case is reachable, since a piece can hop back over its blocker.
+//! Steps commit at once; jumps are **staged** one hop at a time and only
+//! commit on confirm. Moves are queued in the session's outbox and applied
+//! only when they come back **host-sequenced** ([`net`]) — solo play takes
+//! the same path, so the networked code is always exercised. Confirming a
+//! turn that never moved is refused (chapter 9).
 //!
 //! # Visualizations
 //!
-//! The session is board state and nothing else; how it is drawn is a pure
-//! function of the session plus [`BoardStyle`](board_style::BoardStyle).
-//! Every visual is rebuilt wholesale when either changes, which is what makes
-//! styles switchable mid-game (`V`) with no effect on play: the position, the
-//! staged turn, and the network state survive the switch untouched. Two styles
-//! ship — `Classic` (the original flat 2D view) and `Amlah` ([`board_amlah`],
-//! the cream-plate 3D look).
+//! The session is board state; the visuals are a pure function of session +
+//! [`BoardStyle`](board_style::BoardStyle), rebuilt wholesale on change, so
+//! styles switch mid-game (`V`) without touching play. Two styles: `Classic`
+//! (flat 2D) and `Amlah` ([`board_amlah`], 3D).
 
 pub mod board_amlah;
 pub mod board_style;
@@ -49,14 +33,9 @@ use checkers_core::turn::{JumpTurn, single_hop_destinations, step_destinations};
 
 use crate::setup::Seating;
 
-/// Lobby first, then the board. Networked play needs seats assigned before the
-/// game is playable, and the lobby is also where the seating is chosen; a solo
-/// player passes straight through with `S`.
-///
-/// Note that the board only exists in [`AppState::InGame`] — `spawn_board` runs
-/// on entering it. A lobby that cannot be left therefore shows an empty screen,
-/// which is why [`lobby::start_decision`] never makes starting conditional on
-/// the network.
+/// Lobby first, then the board. The board only exists in
+/// [`AppState::InGame`], so every way the lobby can refuse to start must say
+/// so — a silent refusal would look like a blank screen.
 #[derive(States, Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum AppState {
     #[default]
@@ -86,17 +65,10 @@ pub struct Session {
     /// Which player this peer may move. `None` in solo play, where every player
     /// is controlled locally, or when spectating a full game.
     local_player: Option<Player>,
-    /// Moves this peer has committed but that are not yet applied.
-    ///
-    /// Moves are never applied where they are made. They go here, and
-    /// [`net::pump`] submits them for sequencing; the game advances only when
-    /// the move comes back sequenced. In solo play the pump sequences locally in
-    /// the same frame, so the delay is invisible — but the code path is the same
-    /// one, which is why solo play exercises it.
+    /// Moves this peer has committed but that are not yet applied. Submitted
+    /// by [`net::pump`] for sequencing; solo play takes the same path.
     outbox: Vec<GameMove>,
-    /// Who is seated. Chosen in the lobby, and needed afterwards because a
-    /// partial board is audited against its own seating rather than against the
-    /// six-player invariant.
+    /// Who is seated. A partial board is audited against its own seating.
     pub seating: Seating,
 }
 
@@ -171,12 +143,8 @@ impl Session {
         }
     }
 
-    /// May this peer act right now?
-    ///
-    /// `None` means solo play, where every player is driven locally. Otherwise
-    /// the peer may only move on its own turn — enforced here so an out-of-turn
-    /// click never reaches the outbox, and again by the rules on the receiving
-    /// side, which reject any move that is not currently legal.
+    /// May this peer act right now? Solo play (`None`) always; otherwise only
+    /// on its own turn. The rules re-check on the receiving side.
     fn may_act(&self) -> bool {
         match self.local_player {
             None => true,
@@ -330,12 +298,9 @@ fn hint(remaining: usize) -> String {
     }
 }
 
-/// Hold the live position to the specification's invariants.
-///
-/// At six players this is the specification's own audit. With fewer, the
-/// six-player piece count cannot hold by construction, so the seating's
-/// restricted conservation check stands in — see [`setup`] for why the law is
-/// not weakened instead.
+/// Panic if the live position violates its invariants. Six players: the
+/// specification's own audit; fewer: the seating's restricted conservation
+/// check (see [`setup`] for why the law is not weakened instead).
 pub fn audit(position: &Position, seating: Seating) {
     if seating == Seating::Six {
         if let Err(fault) = audit_position(position, &Player::ALL) {
