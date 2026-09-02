@@ -52,6 +52,9 @@ Linux or WSL, since Kani does not build on Windows.
 
 fn render_law(out: &mut String, law: &LawInfo) {
     writeln!(out, "##### `{}`\n", law.id).unwrap();
+    // The plain-language statement leads: it is what a first-time reader
+    // needs, and what the mathematics below is held accountable to.
+    writeln!(out, "**In plain terms:** {}\n", law.note).unwrap();
     writeln!(out, "{}\n", law.summary).unwrap();
     writeln!(out, "$$\n{}\n$$\n", law.statement).unwrap();
     writeln!(out, "*Evidence: {}*\n", law.evidence.label()).unwrap();

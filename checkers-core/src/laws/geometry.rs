@@ -35,6 +35,9 @@ impl Law for RotationOrderSix {
     const STATEMENT: &'static str = r"\forall x \in \mathbb{Z}^2:\ R^6(x) = x";
     const CHAPTER: Chapter = Chapter::Rotation;
     const SUMMARY: &'static str = "The 60-degree rotation has order six.";
+    /// In plain terms: Turn the whole board six times and every hole is back where it started.
+    const NOTE: &'static str =
+        "Turn the whole board six times and every hole is back where it started.";
     const EVIDENCE: Evidence = Evidence::Proof;
     type Subject = Coord;
 
@@ -61,6 +64,9 @@ impl Law for RotationCubedIsNegation {
     const CHAPTER: Chapter = Chapter::Rotation;
     const SUMMARY: &'static str =
         "Three rotations equal point reflection, which is why camp i+3 is opposite camp i.";
+    /// In plain terms: Turn three times and every hole lands on the hole directly opposite the centre.
+    const NOTE: &'static str =
+        "Turn three times and every hole lands on the hole directly opposite the centre.";
     const EVIDENCE: Evidence = Evidence::Proof;
     type Subject = Coord;
 
@@ -92,6 +98,8 @@ impl Law for RegionsAreDisjoint {
     const CHAPTER: Chapter = Chapter::Board;
     const SUMMARY: &'static str =
         "The hexagon and the six camps are pairwise disjoint, so every hole is covered once.";
+    /// In plain terms: Every hole belongs to exactly one region: the middle, or one camp.
+    const NOTE: &'static str = "Every hole belongs to exactly one region: the middle, or one camp.";
     const EVIDENCE: Evidence = Evidence::Proof;
     type Subject = Coord;
 
@@ -122,6 +130,9 @@ impl Law for BoardIsCentrallySymmetric {
     const STATEMENT: &'static str = r"\forall x:\ x \in V \iff -x \in V";
     const CHAPTER: Chapter = Chapter::Board;
     const SUMMARY: &'static str = "The board is symmetric under point reflection through centre.";
+    /// In plain terms: For every hole there is a matching hole straight across the centre.
+    const NOTE: &'static str =
+        "For every hole there is a matching hole straight across the centre.";
     const EVIDENCE: Evidence = Evidence::Proof;
     type Subject = Coord;
 
@@ -151,6 +162,8 @@ impl Law for OppositeCampIsReflection {
     const STATEMENT: &'static str = r"C_{(i+3) \bmod 6} = -C_i = \{-x : x \in C_i\}";
     const CHAPTER: Chapter = Chapter::Rotation;
     const SUMMARY: &'static str = "A player's target camp is the point reflection of their start.";
+    /// In plain terms: The camp across the centre is the mirror image of your own camp.
+    const NOTE: &'static str = "The camp across the centre is the mirror image of your own camp.";
     const EVIDENCE: Evidence = Evidence::Proof;
     type Subject = (Coord, u32);
 
@@ -181,6 +194,9 @@ impl Law for DirectionsCloseUnderNegation {
     const STATEMENT: &'static str = r"\forall d \in D:\ -d \in D \ \land\ -(-d) = d";
     const CHAPTER: Chapter = Chapter::Coordinates;
     const SUMMARY: &'static str = "Directions come in opposite pairs, so adjacency is symmetric.";
+    /// In plain terms: Every direction has an opposite: you can always step back the way you came.
+    const NOTE: &'static str =
+        "Every direction has an opposite: you can always step back the way you came.";
     const EVIDENCE: Evidence = Evidence::Proof;
     type Subject = Dir;
 
@@ -214,6 +230,9 @@ impl Law for JumpDisplacement {
     const CHAPTER: Chapter = Chapter::Jumps;
     const SUMMARY: &'static str =
         "A hop moves by twice a direction; the jumped hole is exactly the midpoint.";
+    /// In plain terms: A jump lands exactly two holes away, with the jumped hole in the middle.
+    const NOTE: &'static str =
+        "A jump lands exactly two holes away, with the jumped hole in the middle.";
     const EVIDENCE: Evidence = Evidence::Proof;
     type Subject = (Coord, Dir);
 
@@ -247,6 +266,9 @@ impl Law for BoardCardinality {
         r"|V| = 61 + 6 \cdot 10 = 121,\quad |H_4| = 61,\quad |C_i| = 10";
     const CHAPTER: Chapter = Chapter::Board;
     const SUMMARY: &'static str = "Hexagon of 61 holes plus six camps of 10 gives 121 holes.";
+    /// In plain terms: The board has 121 holes: 61 in the middle and 10 in each of the six camps.
+    const NOTE: &'static str =
+        "The board has 121 holes: 61 in the middle and 10 in each of the six camps.";
     const EVIDENCE: Evidence = Evidence::Exhaustive;
     type Subject = ();
 
@@ -287,6 +309,9 @@ impl Law for CampContactCount {
     const CHAPTER: Chapter = Chapter::Camps;
     const SUMMARY: &'static str =
         "Each camp's four-hole base sits flush against a hexagon edge, giving eight contact pairs.";
+    /// In plain terms: Each camp hugs the middle along exactly eight neighbouring pairs of holes.
+    const NOTE: &'static str =
+        "Each camp hugs the middle along exactly eight neighbouring pairs of holes.";
     const EVIDENCE: Evidence = Evidence::Exhaustive;
     type Subject = u32;
 
@@ -325,6 +350,9 @@ impl Law for InwardCampIsDegenerate {
     const CHAPTER: Chapter = Chapter::Camps;
     const SUMMARY: &'static str =
         "The inward-pointing camp variant touches the hexagon at one hole, so it is not a star.";
+    /// In plain terms: The wrong camp shape touches the middle at just one hole, and that is how you catch it.
+    const NOTE: &'static str =
+        "The wrong camp shape touches the middle at just one hole, and that is how you catch it.";
     const EVIDENCE: Evidence = Evidence::Proof;
     type Subject = Coord;
 
@@ -353,6 +381,9 @@ impl Law for CampOfIsConsistent {
     const STATEMENT: &'static str = r"\forall x \in V:\ \mathrm{camp}(x) = i \iff x \in C_i,\quad \mathrm{camp}(x) = \bot \iff x \in H_4";
     const CHAPTER: Chapter = Chapter::Board;
     const SUMMARY: &'static str = "Camp lookup agrees with camp membership on every hole.";
+    /// In plain terms: Asking which camp a hole is in always agrees with the camp definitions.
+    const NOTE: &'static str =
+        "Asking which camp a hole is in always agrees with the camp definitions.";
     const EVIDENCE: Evidence = Evidence::Exhaustive;
     type Subject = Coord;
 
@@ -391,6 +422,9 @@ impl Law for BaseCampHoles {
     const CHAPTER: Chapter = Chapter::Camps;
     const SUMMARY: &'static str =
         "Camp 0 occupies columns q=5..8 with 4,3,2,1 holes, apex outward at (8,-4).";
+    /// In plain terms: The home camp fills four columns of 4, 3, 2 and 1 holes, pointing outward.
+    const NOTE: &'static str =
+        "The home camp fills four columns of 4, 3, 2 and 1 holes, pointing outward.";
     const EVIDENCE: Evidence = Evidence::Exhaustive;
     type Subject = ();
 
@@ -427,6 +461,9 @@ impl Law for InwardCampContactCount {
     const CHAPTER: Chapter = Chapter::Camps;
     const SUMMARY: &'static str =
         "The inward camp has one hexagon contact pair, against eight for a correct camp.";
+    /// In plain terms: A proper camp meets the middle at four holes; the wrong shape meets it at one.
+    const NOTE: &'static str =
+        "A proper camp meets the middle at four holes; the wrong shape meets it at one.";
     const EVIDENCE: Evidence = Evidence::Exhaustive;
     type Subject = ();
 
@@ -486,6 +523,8 @@ impl Law for RotationOrderIsExact {
     const CHAPTER: Chapter = Chapter::Rotation;
     const SUMMARY: &'static str =
         "The rotation has order exactly six: no smaller power is the identity.";
+    /// In plain terms: Six turns bring every hole home, and no smaller number ever does.
+    const NOTE: &'static str = "Six turns bring every hole home, and no smaller number ever does.";
     const EVIDENCE: Evidence = Evidence::Proof;
     type Subject = u32;
 
@@ -516,6 +555,9 @@ impl Law for RotationPermutesDirections {
     const STATEMENT: &'static str = r"\forall k:\ R(d_k) = d_{k-1 \bmod 6}";
     const CHAPTER: Chapter = Chapter::Rotation;
     const SUMMARY: &'static str = "Rotation maps each direction to its neighbour in the cycle.";
+    /// In plain terms: One turn rotates each direction onto its neighbour around the cycle.
+    const NOTE: &'static str =
+        "One turn rotates each direction onto its neighbour around the cycle.";
     const EVIDENCE: Evidence = Evidence::Proof;
     type Subject = usize;
 
@@ -549,6 +591,9 @@ impl Law for RegionsAreNonVacuous {
     const CHAPTER: Chapter = Chapter::Hexagon;
     const SUMMARY: &'static str =
         "The hexagon, each camp, and the board are inhabited with their stated sizes.";
+    /// In plain terms: The regions are real: 61 middle holes, 10 per camp, 121 altogether.
+    const NOTE: &'static str =
+        "The regions are real: 61 middle holes, 10 per camp, 121 altogether.";
     const EVIDENCE: Evidence = Evidence::Proof;
     type Subject = ();
 

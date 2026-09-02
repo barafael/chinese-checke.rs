@@ -25,6 +25,8 @@ pub struct LawInfo {
     pub chapter: Chapter,
     /// One-line prose gloss.
     pub summary: &'static str,
+    /// The claim in radically plain language, for readers who skip the LaTeX.
+    pub note: &'static str,
     /// How the claim is established.
     pub evidence: Evidence,
     /// Type-erased driver that checks the law over its own subjects.
@@ -112,6 +114,10 @@ pub trait Law {
     const CHAPTER: Chapter;
     /// One-line prose gloss.
     const SUMMARY: &'static str;
+    /// The claim in radically plain language: one short sentence, no symbols,
+    /// readable by someone who has never seen the mathematics. [`Law::STATEMENT`]
+    /// is precise; this is what it means. Both must be kept true together.
+    const NOTE: &'static str;
     /// How this law is established.
     const EVIDENCE: Evidence;
 
@@ -150,6 +156,7 @@ macro_rules! law_info {
             statement: <$law as $crate::law::Law>::STATEMENT,
             chapter: <$law as $crate::law::Law>::CHAPTER,
             summary: <$law as $crate::law::Law>::SUMMARY,
+            note: <$law as $crate::law::Law>::NOTE,
             evidence: <$law as $crate::law::Law>::EVIDENCE,
             verify: || <$law as $crate::law::Law>::verify(),
         }

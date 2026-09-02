@@ -84,6 +84,8 @@ impl Law for PieceConservation {
     const STATEMENT: &'static str = r"\forall i \in P:\ \left|\{v \in V : s(v) = i\}\right| = 10";
     const CHAPTER: Chapter = Chapter::Players;
     const SUMMARY: &'static str = "Every player owns exactly ten pieces in every position.";
+    /// In plain terms: Every player always owns exactly ten pieces.
+    const NOTE: &'static str = "Every player always owns exactly ten pieces.";
     const EVIDENCE: Evidence = Evidence::Property;
     type Subject = Position;
 
@@ -111,6 +113,9 @@ impl Law for OccupancyAccounting {
     const STATEMENT: &'static str = r"\left|\{v : s(v) \neq \varnothing\}\right| = 60 \ \land\ \left|\{v : s(v) = \varnothing\}\right| = 61";
     const CHAPTER: Chapter = Chapter::Players;
     const SUMMARY: &'static str = "Sixty holes are occupied and sixty-one empty, totalling 121.";
+    /// In plain terms: Sixty holes are occupied, sixty-one are empty, and together they are the whole board.
+    const NOTE: &'static str =
+        "Sixty holes are occupied, sixty-one are empty, and together they are the whole board.";
     const EVIDENCE: Evidence = Evidence::Property;
     type Subject = Position;
 
@@ -150,6 +155,9 @@ impl Law for InitialPosition {
     const CHAPTER: Chapter = Chapter::Players;
     const SUMMARY: &'static str =
         "Initially each player fills their own camp and the hexagon is empty.";
+    /// In plain terms: At the start every camp is full of its own pieces and the middle is empty.
+    const NOTE: &'static str =
+        "At the start every camp is full of its own pieces and the middle is empty.";
     const EVIDENCE: Evidence = Evidence::Exhaustive;
     type Subject = ();
 
@@ -185,6 +193,9 @@ impl Law for TargetCampIsOpposite {
         r"O_i = C_{(i+3) \bmod 6},\qquad O_{O_i} = C_i,\qquad O_i \cap C_i = \varnothing";
     const CHAPTER: Chapter = Chapter::Players;
     const SUMMARY: &'static str = "A player's target is the opposite camp, distinct from their start, and the pairing is mutual.";
+    /// In plain terms: Your goal is the camp directly across the centre from where you start.
+    const NOTE: &'static str =
+        "Your goal is the camp directly across the centre from where you start.";
     const EVIDENCE: Evidence = Evidence::Exhaustive;
     type Subject = Player;
 
@@ -233,6 +244,8 @@ impl Law for StepLegality {
     const CHAPTER: Chapter = Chapter::Steps;
     const SUMMARY: &'static str =
         "Generated steps are exactly the adjacent, on-board, empty destinations.";
+    /// In plain terms: You may step to any adjacent empty hole.
+    const NOTE: &'static str = "You may step to any adjacent empty hole.";
     const EVIDENCE: Evidence = Evidence::Property;
     type Subject = Position;
 
@@ -310,6 +323,8 @@ impl Law for StepDisplacement {
     const CHAPTER: Chapter = Chapter::Steps;
     const SUMMARY: &'static str =
         "A step moves to an adjacent hole, never further and never onto a piece.";
+    /// In plain terms: A step moves exactly one hole and lands on an empty one.
+    const NOTE: &'static str = "A step moves exactly one hole and lands on an empty one.";
     const EVIDENCE: Evidence = Evidence::Property;
     type Subject = Position;
 
@@ -357,6 +372,9 @@ impl Law for JumpLegality {
     const CHAPTER: Chapter = Chapter::Jumps;
     const SUMMARY: &'static str =
         "A jump needs an occupied hole to cross and an empty hole to land on.";
+    /// In plain terms: You may jump only over an occupied hole and only land on an empty one.
+    const NOTE: &'static str =
+        "You may jump only over an occupied hole and only land on an empty one.";
     const EVIDENCE: Evidence = Evidence::Property;
     type Subject = (Position, Coord);
 
@@ -400,6 +418,8 @@ impl Law for JumpDoesNotCapture {
     const STATEMENT: &'static str = r"s'(x+d) = s(x+d),\qquad \left|\{v : s'(v) \neq \varnothing\}\right| = \left|\{v : s(v) \neq \varnothing\}\right|";
     const CHAPTER: Chapter = Chapter::Jumps;
     const SUMMARY: &'static str = "Jumping leaves the crossed piece in place and removes nothing.";
+    /// In plain terms: Jumping never removes the piece you jumped over.
+    const NOTE: &'static str = "Jumping never removes the piece you jumped over.";
     const EVIDENCE: Evidence = Evidence::Property;
     type Subject = (Position, Coord);
 
@@ -449,6 +469,8 @@ impl Law for JumpIgnoresOwnership {
         r"\mathrm{jump}(x,d) \text{ depends on } s(x+d) \neq \varnothing, \text{ not on } s(x+d)";
     const CHAPTER: Chapter = Chapter::Jumps;
     const SUMMARY: &'static str = "A piece may be jumped regardless of which player owns it.";
+    /// In plain terms: You may jump over anyone's piece, yours or theirs.
+    const NOTE: &'static str = "You may jump over anyone's piece, yours or theirs.";
     const EVIDENCE: Evidence = Evidence::Exhaustive;
     type Subject = Player;
 
@@ -502,6 +524,9 @@ impl Law for JumpClosureIsExact {
     const CHAPTER: Chapter = Chapter::JumpSequences;
     const SUMMARY: &'static str =
         "Breadth-first search over positions yields exactly the routes' destinations.";
+    /// In plain terms: Everything reachable by any chain of jumps is found by exploring one jump at a time.
+    const NOTE: &'static str =
+        "Everything reachable by any chain of jumps is found by exploring one jump at a time.";
     const EVIDENCE: Evidence = Evidence::Property;
     type Subject = (Position, Coord);
 
@@ -548,6 +573,8 @@ impl Law for OccupancyIsPositionDetermined {
     const CHAPTER: Chapter = Chapter::JumpSequences;
     const SUMMARY: &'static str =
         "The other pieces never move during a turn, so available jumps depend only on position.";
+    /// In plain terms: During your turn the other pieces stand still, so what you can reach depends only on where you are.
+    const NOTE: &'static str = "During your turn the other pieces stand still, so what you can reach depends only on where you are.";
     const EVIDENCE: Evidence = Evidence::Property;
     type Subject = (Position, Coord);
 
@@ -596,6 +623,9 @@ impl Law for JumpRoutesCanRevisit {
     const CHAPTER: Chapter = Chapter::JumpSequences;
     const SUMMARY: &'static str =
         "A piece can jump out and back, so unguarded route enumeration does not terminate.";
+    /// In plain terms: You can jump out and straight back, so one turn may visit the same hole twice.
+    const NOTE: &'static str =
+        "You can jump out and straight back, so one turn may visit the same hole twice.";
     const EVIDENCE: Evidence = Evidence::Exhaustive;
     type Subject = ();
 
@@ -646,6 +676,8 @@ impl Law for MoveIdentityIgnoresRoute {
     const CHAPTER: Chapter = Chapter::MoveGeneration;
     const SUMMARY: &'static str =
         "Two routes to the same hole are the same move, so routes are not part of identity.";
+    /// In plain terms: A move is its start and its end; the path taken does not matter.
+    const NOTE: &'static str = "A move is its start and its end; the path taken does not matter.";
     const EVIDENCE: Evidence = Evidence::Exhaustive;
     type Subject = ();
 
@@ -688,6 +720,8 @@ impl Law for MoveGenerationIsDeduplicated {
     const CHAPTER: Chapter = Chapter::MoveGeneration;
     const SUMMARY: &'static str =
         "Move generation yields one move per reachable destination, with no duplicates.";
+    /// In plain terms: There is exactly one move per destination you can reach.
+    const NOTE: &'static str = "There is exactly one move per destination you can reach.";
     const EVIDENCE: Evidence = Evidence::Property;
     type Subject = Position;
 
@@ -741,6 +775,9 @@ impl Law for MovesStayOnBoard {
     const CHAPTER: Chapter = Chapter::MoveGeneration;
     const SUMMARY: &'static str =
         "Every generated move starts on one of the player's pieces and ends on the board.";
+    /// In plain terms: Every move starts on your own piece and ends on an empty board hole.
+    const NOTE: &'static str =
+        "Every move starts on your own piece and ends on an empty board hole.";
     const EVIDENCE: Evidence = Evidence::Property;
     type Subject = Position;
 
@@ -790,6 +827,8 @@ impl Law for RouteEqualsNetEffect {
     const CHAPTER: Chapter = Chapter::Applying;
     const SUMMARY: &'static str =
         "Replaying a route hole-by-hole gives the same position as applying the net effect.";
+    /// In plain terms: Replaying a route hole by hole ends exactly where the move says.
+    const NOTE: &'static str = "Replaying a route hole by hole ends exactly where the move says.";
     const EVIDENCE: Evidence = Evidence::Property;
     type Subject = (Position, Coord);
 
@@ -844,6 +883,8 @@ impl Law for TurnOrderCycles {
         r"\mathrm{next}(i) = (i+1) \bmod 6,\qquad \mathrm{next}^6 = \mathrm{id}";
     const CHAPTER: Chapter = Chapter::Turns;
     const SUMMARY: &'static str = "Turn order cycles through all six players and returns.";
+    /// In plain terms: Turns go around the table in order and return to the start.
+    const NOTE: &'static str = "Turns go around the table in order and return to the start.";
     const EVIDENCE: Evidence = Evidence::Exhaustive;
     type Subject = Player;
 
@@ -886,6 +927,8 @@ impl Law for BlockedPlayerIsReachable {
     const CHAPTER: Chapter = Chapter::Turns;
     const SUMMARY: &'static str =
         "A player can have no legal move yet all ten pieces, which is neither a win nor a loss.";
+    /// In plain terms: A player can hold all ten pieces and still have no move, which is neither a win nor a loss.
+    const NOTE: &'static str = "A player can hold all ten pieces and still have no move, which is neither a win nor a loss.";
     const EVIDENCE: Evidence = Evidence::Exhaustive;
     type Subject = ();
 
@@ -928,6 +971,9 @@ impl Law for PassingAndDraw {
     const CHAPTER: Chapter = Chapter::Turns;
     const SUMMARY: &'static str =
         "A player with no move passes; six consecutive passes end the game in a draw.";
+    /// In plain terms: A stuck player passes, and six passes in a row end the game as a draw.
+    const NOTE: &'static str =
+        "A stuck player passes, and six passes in a row end the game as a draw.";
     const EVIDENCE: Evidence = Evidence::Exhaustive;
     type Subject = ();
 
@@ -987,6 +1033,9 @@ impl Law for PassCounterResetsOnMove {
     const CHAPTER: Chapter = Chapter::Turns;
     const SUMMARY: &'static str =
         "A played move resets the pass counter, so a draw needs six passes after it.";
+    /// In plain terms: A played move resets the pass count, so a draw needs six passes in a row.
+    const NOTE: &'static str =
+        "A played move resets the pass count, so a draw needs six passes in a row.";
     const EVIDENCE: Evidence = Evidence::Exhaustive;
     type Subject = ();
 
@@ -1048,6 +1097,8 @@ impl Law for WinCondition {
     const CHAPTER: Chapter = Chapter::Winning;
     const SUMMARY: &'static str =
         "A player wins exactly when every hole of the opposite camp holds one of their pieces.";
+    /// In plain terms: You win by filling the opposite camp with all ten of your pieces.
+    const NOTE: &'static str = "You win by filling the opposite camp with all ten of your pieces.";
     const EVIDENCE: Evidence = Evidence::Exhaustive;
     type Subject = Player;
 
@@ -1107,6 +1158,8 @@ impl Law for PlayPreservesInvariants {
     const CHAPTER: Chapter = Chapter::Invariants;
     const SUMMARY: &'static str =
         "Every legal move preserves each player's piece count and total occupancy.";
+    /// In plain terms: No move ever creates, destroys, or hands over a piece.
+    const NOTE: &'static str = "No move ever creates, destroys, or hands over a piece.";
     const EVIDENCE: Evidence = Evidence::Property;
     type Subject = Position;
 
@@ -1164,6 +1217,9 @@ impl Law for CampsAreUnrestricted {
     const CHAPTER: Chapter = Chapter::Variants;
     const SUMMARY: &'static str =
         "Under the unrestricted convention a piece may enter, leave, or cross any camp.";
+    /// In plain terms: Camps add no extra rules: any piece may enter, leave, or cross any camp.
+    const NOTE: &'static str =
+        "Camps add no extra rules: any piece may enter, leave, or cross any camp.";
     const EVIDENCE: Evidence = Evidence::Exhaustive;
     type Subject = Player;
 
@@ -1218,6 +1274,9 @@ impl Law for SingleHopsReachTheClosure {
     const CHAPTER: Chapter = Chapter::JumpSequences;
     const SUMMARY: &'static str =
         "Chaining single hops reaches exactly the destinations the closure allows.";
+    /// In plain terms: Taking one jump at a time reaches exactly the places a whole chain would.
+    const NOTE: &'static str =
+        "Taking one jump at a time reaches exactly the places a whole chain would.";
     const EVIDENCE: Evidence = Evidence::Property;
     type Subject = (Position, Coord);
 
@@ -1281,6 +1340,8 @@ impl Law for SingleHopIsOneJump {
     const CHAPTER: Chapter = Chapter::JumpSequences;
     const SUMMARY: &'static str =
         "Every single-hop destination lies exactly two holes away in one direction.";
+    /// In plain terms: Every offered hop is a single jump, never two chained together.
+    const NOTE: &'static str = "Every offered hop is a single jump, never two chained together.";
     const EVIDENCE: Evidence = Evidence::Property;
     type Subject = (Position, Coord);
 
@@ -1328,6 +1389,9 @@ impl Law for StagedTurnYieldsLegalMove {
     const CHAPTER: Chapter = Chapter::MoveGeneration;
     const SUMMARY: &'static str =
         "Any sequence of legal single hops commits to a move the rules already allow.";
+    /// In plain terms: Any staged turn you can click together is a move the rules already allow.
+    const NOTE: &'static str =
+        "Any staged turn you can click together is a move the rules already allow.";
     const EVIDENCE: Evidence = Evidence::Property;
     type Subject = (Position, Coord);
 
@@ -1401,6 +1465,8 @@ impl Law for StagedTurnCannotBeANullMove {
     const CHAPTER: Chapter = Chapter::JumpSequences;
     const SUMMARY: &'static str =
         "A staged turn whose piece is back at its origin cannot be committed.";
+    /// In plain terms: A turn that ends where it began cannot be confirmed.
+    const NOTE: &'static str = "A turn that ends where it began cannot be confirmed.";
     const EVIDENCE: Evidence = Evidence::Exhaustive;
     type Subject = ();
 

@@ -50,6 +50,23 @@ fn law_metadata_is_populated() {
             "law {} summary should be a sentence",
             law.id
         );
+        assert!(
+            !law.note.is_empty(),
+            "law {} has no plain-language note",
+            law.id
+        );
+        assert!(
+            law.note.ends_with('.'),
+            "law {} note should be a sentence",
+            law.id
+        );
+        // The note exists to be simpler than everything around it: a note
+        // carrying LaTeX defeats its purpose.
+        assert!(
+            !law.note.contains('\\'),
+            "law {} note should be plain language, not LaTeX",
+            law.id
+        );
     }
 }
 

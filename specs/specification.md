@@ -64,6 +64,8 @@ In the implementation, directions are an enumeration rather than a collection of
 
 ##### `CC-DIR-INVOLUTION`
 
+**In plain terms:** Every direction has an opposite: you can always step back the way you came.
+
 Directions come in opposite pairs, so adjacency is symmetric.
 
 $$
@@ -85,6 +87,8 @@ All three constraints are required. Dropping the bounds on $q$ and $r$ leaves $|
 #### Laws
 
 ##### `CC-GEO-NONVACUOUS`
+
+**In plain terms:** The regions are real: 61 middle holes, 10 per camp, 121 altogether.
 
 The hexagon, each camp, and the board are inhabited with their stated sizes.
 
@@ -114,6 +118,8 @@ Cardinality alone cannot detect this. The distinguishing property is contact wit
 
 ##### `CC-GEO-BASE-CAMP`
 
+**In plain terms:** The home camp fills four columns of 4, 3, 2 and 1 holes, pointing outward.
+
 Camp 0 occupies columns q=5..8 with 4,3,2,1 holes, apex outward at (8,-4).
 
 $$
@@ -123,6 +129,8 @@ $$
 *Evidence: exhaustive*
 
 ##### `CC-GEO-CONTACT`
+
+**In plain terms:** Each camp hugs the middle along exactly eight neighbouring pairs of holes.
 
 Each camp's four-hole base sits flush against a hexagon edge, giving eight contact pairs.
 
@@ -134,6 +142,8 @@ $$
 
 ##### `CC-GEO-INWARD-BAD`
 
+**In plain terms:** The wrong camp shape touches the middle at just one hole, and that is how you catch it.
+
 The inward-pointing camp variant touches the hexagon at one hole, so it is not a star.
 
 $$
@@ -143,6 +153,8 @@ $$
 *Evidence: proof (Kani)*
 
 ##### `CC-GEO-INWARD-CONTACT`
+
+**In plain terms:** A proper camp meets the middle at four holes; the wrong shape meets it at one.
 
 The inward camp has one hexagon contact pair, against eight for a correct camp.
 
@@ -174,6 +186,8 @@ Note that $R$ sends $(1,0) \mapsto (0,1)$, stepping *backwards* through the dire
 
 ##### `CC-GEO-OPPOSITE`
 
+**In plain terms:** The camp across the centre is the mirror image of your own camp.
+
 A player's target camp is the point reflection of their start.
 
 $$
@@ -183,6 +197,8 @@ $$
 *Evidence: proof (Kani)*
 
 ##### `CC-GEO-ROT-EXACT`
+
+**In plain terms:** Six turns bring every hole home, and no smaller number ever does.
 
 The rotation has order exactly six: no smaller power is the identity.
 
@@ -194,6 +210,8 @@ $$
 
 ##### `CC-GEO-ROT-NEG`
 
+**In plain terms:** Turn three times and every hole lands on the hole directly opposite the centre.
+
 Three rotations equal point reflection, which is why camp i+3 is opposite camp i.
 
 $$
@@ -204,6 +222,8 @@ $$
 
 ##### `CC-GEO-ROT-ORDER`
 
+**In plain terms:** Turn the whole board six times and every hole is back where it started.
+
 The 60-degree rotation has order six.
 
 $$
@@ -213,6 +233,8 @@ $$
 *Evidence: proof (Kani)*
 
 ##### `CC-GEO-ROT-STEP`
+
+**In plain terms:** One turn rotates each direction onto its neighbour around the cycle.
 
 Rotation maps each direction to its neighbour in the cycle.
 
@@ -260,6 +282,8 @@ Each row $r$ is drawn at horizontal offset $2q + r$. Opposite camps sit diametri
 
 ##### `CC-GEO-CAMP-OF`
 
+**In plain terms:** Asking which camp a hole is in always agrees with the camp definitions.
+
 Camp lookup agrees with camp membership on every hole.
 
 $$
@@ -269,6 +293,8 @@ $$
 *Evidence: exhaustive*
 
 ##### `CC-GEO-CARDINALITY`
+
+**In plain terms:** The board has 121 holes: 61 in the middle and 10 in each of the six camps.
 
 Hexagon of 61 holes plus six camps of 10 gives 121 holes.
 
@@ -280,6 +306,8 @@ $$
 
 ##### `CC-GEO-DISJOINT`
 
+**In plain terms:** Every hole belongs to exactly one region: the middle, or one camp.
+
 The hexagon and the six camps are pairwise disjoint, so every hole is covered once.
 
 $$
@@ -289,6 +317,8 @@ $$
 *Evidence: proof (Kani)*
 
 ##### `CC-GEO-SYMMETRY`
+
+**In plain terms:** For every hole there is a matching hole straight across the centre.
 
 The board is symmetric under point reflection through centre.
 
@@ -312,6 +342,8 @@ Player $i$'s target is the opposite camp, $O_i = C_{(i+3) \bmod 6}$.
 
 ##### `CC-POS-INITIAL`
 
+**In plain terms:** At the start every camp is full of its own pieces and the middle is empty.
+
 Initially each player fills their own camp and the hexagon is empty.
 
 $$
@@ -321,6 +353,8 @@ $$
 *Evidence: exhaustive*
 
 ##### `CC-POS-OCCUPANCY`
+
+**In plain terms:** Sixty holes are occupied, sixty-one are empty, and together they are the whole board.
 
 Sixty holes are occupied and sixty-one empty, totalling 121.
 
@@ -332,6 +366,8 @@ $$
 
 ##### `CC-POS-PIECES`
 
+**In plain terms:** Every player always owns exactly ten pieces.
+
 Every player owns exactly ten pieces in every position.
 
 $$
@@ -341,6 +377,8 @@ $$
 *Evidence: property test*
 
 ##### `CC-POS-TARGET`
+
+**In plain terms:** Your goal is the camp directly across the centre from where you start.
 
 A player's target is the opposite camp, distinct from their start, and the pairing is mutual.
 
@@ -364,6 +402,8 @@ that is, the destination is adjacent and empty. The piece vacates $x$ and occupi
 
 ##### `CC-STEP-DISPLACE`
 
+**In plain terms:** A step moves exactly one hole and lands on an empty one.
+
 A step moves to an adjacent hole, never further and never onto a piece.
 
 $$
@@ -373,6 +413,8 @@ $$
 *Evidence: property test*
 
 ##### `CC-STEP-LEGAL`
+
+**In plain terms:** You may step to any adjacent empty hole.
 
 Generated steps are exactly the adjacent, on-board, empty destinations.
 
@@ -396,6 +438,8 @@ Since $d \neq 0$, a jump displaces by $2d \neq 0$ and so can never land on its o
 
 ##### `CC-JUMP-ANY-OWNER`
 
+**In plain terms:** You may jump over anyone's piece, yours or theirs.
+
 A piece may be jumped regardless of which player owns it.
 
 $$
@@ -405,6 +449,8 @@ $$
 *Evidence: exhaustive*
 
 ##### `CC-JUMP-DISPLACEMENT`
+
+**In plain terms:** A jump lands exactly two holes away, with the jumped hole in the middle.
 
 A hop moves by twice a direction; the jumped hole is exactly the midpoint.
 
@@ -416,6 +462,8 @@ $$
 
 ##### `CC-JUMP-LEGAL`
 
+**In plain terms:** You may jump only over an occupied hole and only land on an empty one.
+
 A jump needs an occupied hole to cross and an empty hole to land on.
 
 $$
@@ -425,6 +473,8 @@ $$
 *Evidence: property test*
 
 ##### `CC-JUMP-NO-CAPTURE`
+
+**In plain terms:** Jumping never removes the piece you jumped over.
 
 Jumping leaves the crossed piece in place and removes nothing.
 
@@ -456,6 +506,8 @@ Jump sequences genuinely may revisit holes, including the starting hole: with a 
 
 ##### `CC-JUMP-CLOSURE`
 
+**In plain terms:** Everything reachable by any chain of jumps is found by exploring one jump at a time.
+
 Breadth-first search over positions yields exactly the routes' destinations.
 
 $$
@@ -465,6 +517,8 @@ $$
 *Evidence: property test*
 
 ##### `CC-JUMP-OMEGA`
+
+**In plain terms:** During your turn the other pieces stand still, so what you can reach depends only on where you are.
 
 The other pieces never move during a turn, so available jumps depend only on position.
 
@@ -476,6 +530,8 @@ $$
 
 ##### `CC-JUMP-REVISIT`
 
+**In plain terms:** You can jump out and straight back, so one turn may visit the same hole twice.
+
 A piece can jump out and back, so unguarded route enumeration does not terminate.
 
 $$
@@ -485,6 +541,8 @@ $$
 *Evidence: exhaustive*
 
 ##### `CC-TURN-HOP-CLOSURE`
+
+**In plain terms:** Taking one jump at a time reaches exactly the places a whole chain would.
 
 Chaining single hops reaches exactly the destinations the closure allows.
 
@@ -496,6 +554,8 @@ $$
 
 ##### `CC-TURN-HOP-ONE`
 
+**In plain terms:** Every offered hop is a single jump, never two chained together.
+
 Every single-hop destination lies exactly two holes away in one direction.
 
 $$
@@ -505,6 +565,8 @@ $$
 *Evidence: property test*
 
 ##### `CC-TURN-NO-NULL-MOVE`
+
+**In plain terms:** A turn that ends where it began cannot be confirmed.
 
 A staged turn whose piece is back at its origin cannot be committed.
 
@@ -526,6 +588,8 @@ The complete legal move set for player $i$ is the adjacent steps from each of th
 
 ##### `CC-MOVE-DEDUP`
 
+**In plain terms:** There is exactly one move per destination you can reach.
+
 Move generation yields one move per reachable destination, with no duplicates.
 
 $$
@@ -535,6 +599,8 @@ $$
 *Evidence: property test*
 
 ##### `CC-MOVE-IDENTITY`
+
+**In plain terms:** A move is its start and its end; the path taken does not matter.
 
 Two routes to the same hole are the same move, so routes are not part of identity.
 
@@ -546,6 +612,8 @@ $$
 
 ##### `CC-MOVE-ONBOARD`
 
+**In plain terms:** Every move starts on your own piece and ends on an empty board hole.
+
 Every generated move starts on one of the player's pieces and ends on the board.
 
 $$
@@ -555,6 +623,8 @@ $$
 *Evidence: property test*
 
 ##### `CC-TURN-STAGED-LEGAL`
+
+**In plain terms:** Any staged turn you can click together is a move the rules already allow.
 
 Any sequence of legal single hops commits to a move the rules already allow.
 
@@ -575,6 +645,8 @@ Replaying a route hole-by-hole and applying this net effect therefore agree, whi
 #### Laws
 
 ##### `CC-APPLY-NET`
+
+**In plain terms:** Replaying a route hole by hole ends exactly where the move says.
 
 Replaying a route hole-by-hole gives the same position as applying the net effect.
 
@@ -600,6 +672,8 @@ Rule sets differ here. Passing is the least intrusive convention; others forbid 
 
 ##### `CC-TURN-BLOCKED`
 
+**In plain terms:** A player can hold all ten pieces and still have no move, which is neither a win nor a loss.
+
 A player can have no legal move yet all ten pieces, which is neither a win nor a loss.
 
 $$
@@ -609,6 +683,8 @@ $$
 *Evidence: exhaustive*
 
 ##### `CC-TURN-CYCLE`
+
+**In plain terms:** Turns go around the table in order and return to the start.
 
 Turn order cycles through all six players and returns.
 
@@ -620,6 +696,8 @@ $$
 
 ##### `CC-TURN-PASS`
 
+**In plain terms:** A stuck player passes, and six passes in a row end the game as a draw.
+
 A player with no move passes; six consecutive passes end the game in a draw.
 
 $$
@@ -629,6 +707,8 @@ $$
 *Evidence: exhaustive*
 
 ##### `CC-TURN-PASS-RESET`
+
+**In plain terms:** A played move resets the pass count, so a draw needs six passes in a row.
 
 A played move resets the pass counter, so a draw needs six passes after it.
 
@@ -650,6 +730,8 @@ Since the target camp has ten holes and the player has exactly ten pieces, this 
 
 ##### `CC-WIN-CONDITION`
 
+**In plain terms:** You win by filling the opposite camp with all ten of your pieces.
+
 A player wins exactly when every hole of the opposite camp holds one of their pieces.
 
 $$
@@ -665,6 +747,8 @@ Every completed move preserves the following. Each player owns exactly ten piece
 #### Laws
 
 ##### `CC-INV-PRESERVED`
+
+**In plain terms:** No move ever creates, destroys, or hands over a piece.
 
 Every legal move preserves each player's piece count and total occupancy.
 
@@ -685,6 +769,8 @@ Two points are deliberately left open, and an implementation must choose explici
 #### Laws
 
 ##### `CC-VAR-CAMP-FREE`
+
+**In plain terms:** Camps add no extra rules: any piece may enter, leave, or cross any camp.
 
 Under the unrestricted convention a piece may enter, leave, or cross any camp.
 
