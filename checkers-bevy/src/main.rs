@@ -13,6 +13,7 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 // Not in the prelude, unlike the rest of the window API.
 use bevy::window::{Monitor, PrimaryMonitor};
+use checkers_ai::{Ai, AiConfig};
 use checkers_bevy::board_amlah;
 use checkers_bevy::board_style::{self, AmlahCamera, BoardStyle, BoardVisual, ClassicCamera};
 use checkers_bevy::board_view::{
@@ -25,6 +26,7 @@ use checkers_core::geometry::{Coord, all_holes, camp_of, on_board};
 use checkers_core::law::{LAWS, verify_all};
 use checkers_core::position::{Player, Position};
 use checkers_core::rules::Outcome;
+use checkers_net::NetState;
 
 fn main() {
     App::new()
@@ -69,6 +71,7 @@ fn main() {
         .init_resource::<StatusVisible>()
         .init_resource::<BoardStyle>()
         .init_state::<AppState>()
+        .init_resource::<AiEngine>()
         .add_plugins(lobby::plugin)
         .add_plugins(menu::plugin)
         .add_systems(Startup, setup)
@@ -80,7 +83,12 @@ fn main() {
             // Only the UI is spawned here. The board visuals are spawned by
             // `apply_style`, so entering the game and switching styles go
             // through one code path.
-            (lobby::apply_seats, spawn_ui).chain(),
+            (
+                |mut engine: ResMut<AiEngine>| engine.0.forget(),
+                lobby::apply_seats,
+                spawn_ui,
+            )
+                .chain(),
         )
         .add_systems(
             Update,
@@ -88,6 +96,7 @@ fn main() {
                 handle_buttons,
                 handle_clicks,
                 handle_keys,
+                ai_one_shot,
                 board_style::handle_style_key,
                 // Spawns the board for the current style on entry, and tears
                 // the old one down and builds the new one on `V`. Must run
@@ -98,6 +107,9 @@ fn main() {
                 fit_camera_to_window,
                 // Drains the outbox and applies only host-sequenced moves, so
                 // it must run after input and before the view syncs.
+                // The computer plays through the same outbox as a human: one
+                // sequencing path, no privileged moves.
+                ai_take_turn,
                 net::pump,
                 sync_pieces,
                 sync_highlights,
@@ -887,6 +899,7 @@ fn sync_buttons(
 /// move, and whether it is ours.
 fn sync_turn_indicator(
     session: Res<Session>,
+    net: Res<NetState>,
     mut swatch: Query<&mut BackgroundColor, With<TurnSwatch>>,
     mut text: Query<&mut Text, With<TurnText>>,
 ) {
@@ -905,10 +918,14 @@ fn sync_turn_indicator(
             let colour = player_colour(active);
             let label = if session.local_player() == Some(active) {
                 "Your home base - you to move".to_string()
-            } else if session.local_player().is_some() {
-                format!("Home base to move: player {} (waiting)", active.index())
             } else {
-                format!("Home base to move: player {}", active.index())
+                let who = player_label(&net, active);
+                let waiting = if session.local_player().is_some() {
+                    " (waiting)"
+                } else {
+                    ""
+                };
+                format!("Home base to move: {who}{waiting}")
             };
             (colour, label)
         }
@@ -916,6 +933,16 @@ fn sync_turn_indicator(
 
     swatch.0 = colour;
     **text = label;
+}
+
+/// The player's lobby name if known, else "Player N".
+fn player_label(net: &NetState, p: Player) -> String {
+    net.seats
+        .iter()
+        .find(|s| s.player == Some(u32::from(p.index())))
+        .map(|s| s.name.clone())
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| format!("Player {}", p.index()))
 }
 
 /// Rings around the active player's home camp, so the base whose turn it is
@@ -974,10 +1001,8 @@ fn sync_camp_indicator(
                 commands.spawn((
                     Mesh3d(ring.clone()),
                     MeshMaterial3d(mat.clone()),
-                    Transform::from_rotation(Quat::from_rotation_x(
-                        -std::f32::consts::FRAC_PI_2,
-                    ))
-                    .with_translation(Vec3::new(w.x, 0.0065, w.z)),
+                    Transform::from_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2))
+                        .with_translation(Vec3::new(w.x, 0.0065, w.z)),
                     CampMarker,
                 ));
             }
@@ -989,6 +1014,7 @@ fn sync_camp_indicator(
 /// despawned when a new game begins (`R`).
 fn sync_game_over(
     session: Res<Session>,
+    net: Res<NetState>,
     existing: Query<Entity, With<GameOverUi>>,
     mut commands: Commands,
 ) {
@@ -1009,7 +1035,7 @@ fn sync_game_over(
             let title = if session.local_player() == Some(p) {
                 "You win!".to_string()
             } else {
-                format!("Player {} wins!", p.index())
+                format!("{} wins!", player_label(&net, p))
             };
             (title, player_colour(p))
         }
@@ -1059,8 +1085,10 @@ fn sync_game_over(
                 for p in session.seating.players() {
                     let i = p.index() as usize;
                     let mut line = format!(
-                        "Player {}:  {} moves  ({} by jump)",
-                        i, session.stats.moves[i], session.stats.jumps[i]
+                        "{}:  {} moves  ({} by jump)",
+                        player_label(&net, p),
+                        session.stats.moves[i],
+                        session.stats.jumps[i]
                     );
                     if let Some(pct) =
                         (100 * session.stats.hops_over_others[i]).checked_div(session.stats.hops[i])
@@ -1092,10 +1120,13 @@ fn sync_game_over(
                     TextColor(Color::srgb(0.72, 0.72, 0.78)),
                 ));
                 if session.stats.longest_jump > 0 {
+                    let by = Player::new(session.stats.longest_jump_by)
+                        .expect("longest-jump player is below six");
                     panel.spawn((
                         Text::new(format!(
-                            "Longest jump: {} hops (player {})",
-                            session.stats.longest_jump, session.stats.longest_jump_by
+                            "Longest jump: {} hops ({})",
+                            session.stats.longest_jump,
+                            player_label(&net, by)
                         )),
                         TextFont {
                             font_size: FontSize::Px(14.0),
@@ -1175,4 +1206,65 @@ fn sync_status(
         LAWS.len(),
         style.label(),
     );
+}
+
+// --- the computer opponent --------------------------------------------------
+
+/// The persistent engine. It remembers the game's recent positions for the
+/// anti-shuffle rule, and forgets them when a new game is dealt.
+#[derive(Resource)]
+struct AiEngine(Ai);
+
+impl Default for AiEngine {
+    fn default() -> Self {
+        Self(Ai::new(AiConfig::default()))
+    }
+}
+
+/// Let the computer play the current seat, if it owns one.
+///
+/// Runs after input and before the network pump: the engine's move enters the
+/// outbox like any human's, so multiplayer sequencing applies to it verbatim.
+/// The call is synchronous and thinks for the configured budget, so the frame
+/// it moves in takes as long as the engine thinks.
+fn ai_take_turn(mut session: ResMut<Session>, mut engine: ResMut<AiEngine>) {
+    // Never interject while a human is mid-selection.
+    if session.game.is_over() || session.is_jumping() || session.selected_hole().is_some() {
+        return;
+    }
+    let seat = session.game.turn();
+    if !session.ai_players.contains(&seat) || !session.outbox.is_empty() {
+        return;
+    }
+    if let Some(mv) = engine.0.choose_move(&session.game) {
+        session.message = format!(
+            "Player {} (computer) plays ({},{}) -> ({},{})",
+            seat.index(),
+            mv.origin.q,
+            mv.origin.r,
+            mv.destination.q,
+            mv.destination.r
+        );
+        session.outbox.push(mv);
+    }
+}
+
+/// `A` hands the current seat to the computer for one move — a hint, a
+/// resignation to a difficult position, or a way to watch the engine race.
+fn ai_one_shot(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut session: ResMut<Session>,
+    mut engine: ResMut<AiEngine>,
+) {
+    // Spectators watch: the A key is not theirs to press.
+    if !keys.just_pressed(KeyCode::KeyA) || session.game.is_over() || session.spectating {
+        return;
+    }
+    if let Some(mv) = engine.0.choose_move(&session.game) {
+        session.message = format!(
+            "The computer suggests ({},{}) -> ({},{})",
+            mv.origin.q, mv.origin.r, mv.destination.q, mv.destination.r
+        );
+        session.outbox.push(mv);
+    }
 }

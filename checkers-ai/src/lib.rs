@@ -1,0 +1,157 @@
+//! A search engine for the machine-checked Chinese Checkers rules.
+//!
+//! Bevy-independent by design: the engine speaks [`checkers_core::rules::Game`]
+//! and [`checkers_core::position::Move`] and nothing else, so it can drive a
+//! Bevy system, a CLI, or a test the same way.
+//!
+//! # What the research says the game is
+//!
+//! Chinese checkers is a *race*: nothing is captured, material is constant,
+//! and the only thing that changes over a game is how far each piece has
+//! travelled toward the opposite camp. The strategy literature therefore
+//! values, in order: long jump chains and shared ladders, disciplined
+//! emptying of the home camp (one straggler piece loses races), and — with
+//! more than two players — denying ladders to whoever moves next. Games
+//! between strong players are decided by a couple of moves, which means an
+//! engine needs both a precise notion of progress and enough search to avoid
+//! throwing a piece backwards at the wrong moment.
+//!
+//! # How this engine plays
+//!
+//! - **Bitboards**: one `u128` per player over the 121 board holes; moves are
+//!   `(origin, destination)` pairs, since a jump route never changes the
+//!   resulting position (chapter 10).
+//! - **Evaluation**: per-player progress toward their target apex, a home-fill
+//!   bonus, and a straggler penalty on the furthest-behind piece.
+//! - **Search**: iterative deepening under a time budget. Two-player games
+//!   get negamax with alpha-beta pruning and a zobrist transposition table;
+//!   with three or more players the tree branches too hard for sound pruning,
+//!   so it plays maxⁿ over the seated players at a shallower depth.
+//! - **Anti-shuffling**: the engine remembers the game's recent positions and
+//!   refuses to revisit one while an alternative exists — a race engine that
+//!   shuffles is a race engine that loses.
+
+mod engine;
+mod search;
+mod tables;
+
+use checkers_core::geometry::Dir;
+use checkers_core::position::{Move, MoveKind, Player};
+use checkers_core::rules::Game;
+
+use engine::State;
+use std::time::Duration;
+
+/// How the engine may spend its time. Defaults are tuned for a human-facing
+/// app: strong enough to punish shuffling, quick enough not to feel laggy.
+#[derive(Debug, Clone)]
+pub struct AiConfig {
+    /// Wall-clock budget per move. The search finishes its current depth
+    /// before stopping, so this is a floor on thinking time, not a ceiling.
+    pub budget: Duration,
+    /// Hard ply cap. A safety net for endgames where depth is cheap.
+    pub max_depth: u8,
+}
+
+impl Default for AiConfig {
+    fn default() -> Self {
+        Self {
+            budget: Duration::from_millis(600),
+            max_depth: 24,
+        }
+    }
+}
+
+/// Diagnostics from the last search, for tests and curious UIs.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AiStats {
+    /// Depth the last completed iteration reached.
+    pub depth: u8,
+    /// Nodes explored across the whole last search.
+    pub nodes: u64,
+}
+
+/// A persistent engine instance.
+///
+/// Persistence carries the recent-position memory: the engine penalises moves
+/// that revisit a position this game has already seen, which is what stops it
+/// from shuffling a piece back and forth in a won position. One engine per
+/// game; [`Ai::forget`] on a restart.
+#[derive(Debug)]
+pub struct Ai {
+    config: AiConfig,
+    recent: Vec<u64>,
+    pub stats: AiStats,
+}
+
+impl Default for Ai {
+    fn default() -> Self {
+        Self::new(AiConfig::default())
+    }
+}
+
+impl Ai {
+    pub fn new(config: AiConfig) -> Self {
+        Self {
+            config,
+            recent: Vec::new(),
+            stats: AiStats::default(),
+        }
+    }
+
+    /// Forget the game's recent positions. Call when the game restarts.
+    pub fn forget(&mut self) {
+        self.recent.clear();
+    }
+
+    fn remember(&mut self, hash: u64) {
+        // Bounded: a game is a few hundred plies, and 512 is plenty of
+        // shuffle memory.
+        if self.recent.len() >= 512 {
+            self.recent.remove(0);
+        }
+        self.recent.push(hash);
+    }
+
+    /// The move the engine plays for [`Game`]'s active player, or `None` when
+    /// the game is over or the player must pass.
+    pub fn choose_move(&mut self, game: &Game) -> Option<Move> {
+        self.choose_move_for(game, game.turn())
+    }
+
+    /// Like [`Ai::choose_move`], but for a specific seat of the game — the
+    /// primitive a "let the computer take this seat" UI needs. The seat must
+    /// be the game's active player for the move to be playable.
+    pub fn choose_move_for(&mut self, game: &Game, player: Player) -> Option<Move> {
+        if game.is_over() || player != game.turn() {
+            return None;
+        }
+        let state = State::of_game(game);
+        // Remember the board both ways: with this seat to move (the direct
+        // shuffle) and with the other seat to move (the two-move shuffle).
+        self.remember(state.hash);
+        self.remember(state.piece_hash());
+        let (raw, stats) = search::search(&state, &self.config, &self.recent);
+        self.stats = stats;
+        raw.map(decode)
+    }
+}
+
+/// Decode an engine move back into the rules' representation. The kind is
+/// derived, not carried: one hex step is a step, anything else is a jump.
+fn decode(raw: u16) -> Move {
+    let (from, to) = engine::unpack(raw);
+    let from = tables::coord_of(from);
+    let to = tables::coord_of(to);
+    let kind = if Dir::ALL.iter().any(|d| from.neighbour(*d) == to) {
+        MoveKind::Step
+    } else {
+        MoveKind::Jump
+    };
+    Move {
+        kind,
+        origin: from,
+        destination: to,
+        route: None,
+    }
+}

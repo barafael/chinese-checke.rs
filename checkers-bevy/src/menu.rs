@@ -15,10 +15,18 @@ use crate::AppState;
 use crate::lobby::{CHOSEN, CHOSEN_DOWN, CHOSEN_HOVER, ChosenSeating, DOWN, HOVER, IDLE};
 use crate::setup::Seating;
 
+use checkers_core::position::Player;
 use checkers_net::NetState;
 
+/// The camps the computer plays, set from the hotseat panel and read when the
+/// game is dealt. Local-only by design: a networked seat an engine plays
+/// would need protocol support and an agreement about who runs it.
+#[derive(Resource, Default, Debug, Clone)]
+pub struct AiSeats(pub Vec<Player>);
+
 pub fn plugin(app: &mut App) {
-    app.add_systems(OnEnter(AppState::Menu), spawn_menu)
+    app.init_resource::<AiSeats>()
+        .add_systems(OnEnter(AppState::Menu), spawn_menu)
         .add_systems(OnExit(AppState::Menu), despawn)
         .add_systems(OnEnter(AppState::Hotseat), spawn_hotseat)
         .add_systems(OnExit(AppState::Hotseat), despawn)
@@ -46,6 +54,8 @@ pub enum MenuButton {
     Play,
     /// From the hotseat panel back to the menu.
     Back,
+    /// Toggle the computer opponent (two-player hotseat only).
+    Computer,
 }
 
 /// One button, styled exactly like the lobby's (the palette is imported, so
@@ -207,6 +217,7 @@ fn spawn_hotseat(mut commands: Commands, chosen: Res<ChosenSeating>) {
         })
         .with_children(|row| {
             button(row, "Play", MenuButton::Play);
+            button(row, "Computer opponent", MenuButton::Computer);
             button(row, "Back", MenuButton::Back);
         });
 
@@ -271,6 +282,8 @@ pub enum MenuAction {
     ToMenu,
     /// Deal the hotseat game with the chosen seating.
     Play,
+    /// Toggle the computer opponent.
+    Computer,
     Pick(Seating),
 }
 
@@ -280,6 +293,7 @@ pub fn action_for(button: MenuButton) -> MenuAction {
         MenuButton::Hotseat => MenuAction::ToHotseat,
         MenuButton::Back => MenuAction::ToMenu,
         MenuButton::Play => MenuAction::Play,
+        MenuButton::Computer => MenuAction::Computer,
         MenuButton::Seats(s) => MenuAction::Pick(s),
     }
 }
@@ -288,6 +302,7 @@ fn handle_buttons(
     buttons: Query<(&Interaction, &MenuButton), Changed<Interaction>>,
     mut chosen: ResMut<ChosenSeating>,
     mut net: ResMut<NetState>,
+    mut ai_seats: ResMut<AiSeats>,
     mut next_state: ResMut<NextState<AppState>>,
     mut deals: Query<&mut Text, With<DealsText>>,
 ) {
@@ -300,10 +315,23 @@ fn handle_buttons(
 
     match action {
         MenuAction::None => {}
-        MenuAction::ToLobby => next_state.set(AppState::Lobby),
+        // Multiplayer seats humans only; the computer is a hotseat feature.
+        MenuAction::ToLobby => {
+            ai_seats.0.clear();
+            next_state.set(AppState::Lobby);
+        }
         MenuAction::ToHotseat => next_state.set(AppState::Hotseat),
         MenuAction::ToMenu => next_state.set(AppState::Menu),
         MenuAction::Pick(s) => chosen.0 = s,
+        MenuAction::Computer => {
+            // The computer takes the second seat of the two-player deal. Any
+            // other seating is played by the humans present.
+            if chosen.0 == Seating::Two && ai_seats.0 == vec![Player::ALL[3]] {
+                ai_seats.0.clear();
+            } else if chosen.0 == Seating::Two {
+                ai_seats.0 = vec![Player::ALL[3]];
+            }
+        }
         MenuAction::Play => {
             // Hotseat is offline by definition: drop any seat binding the
             // lobby's greetings left behind, or the solo player would be

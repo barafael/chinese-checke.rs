@@ -2312,11 +2312,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "checkers-ai"
+version = "0.1.0"
+dependencies = [
+ "checkers-core",
+]
+
+[[package]]
 name = "checkers-bevy"
 version = "0.1.0"
 dependencies = [
  "bevy",
  "bevy_matchbox",
+ "checkers-ai",
  "checkers-core",
  "checkers-net",
  "uuid",

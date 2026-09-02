@@ -117,7 +117,9 @@ pub struct Session {
     pub spectating: bool,
     /// Moves this peer has committed but that are not yet applied. Submitted
     /// by [`net::pump`] for sequencing; solo play takes the same path.
-    outbox: Vec<GameMove>,
+    pub outbox: Vec<GameMove>,
+    /// The seats the computer plays. Empty means every seated camp is human.
+    pub ai_players: Vec<Player>,
     /// Who is seated. A partial board is audited against its own seating.
     pub seating: Seating,
     /// Running totals, shown on the game-over screen.
@@ -140,6 +142,7 @@ impl Session {
             local_player: None,
             spectating: false,
             outbox: Vec::new(),
+            ai_players: Vec::new(),
             seating,
             stats: GameStats::default(),
         }

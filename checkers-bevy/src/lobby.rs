@@ -79,27 +79,35 @@ pub enum LobbyButton {
     /// Pick a seating. One button per option rather than a cycling control, so
     /// the current choice and the alternatives are visible at once.
     Seats(Seating),
-    /// Open the room-name field.
-    Room,
-    /// Open the player-name field.
-    Name,
     /// Declare or renounce spectator status.
     Spectate,
     /// Back to the main menu.
     Back,
 }
 
+/// Which editor an on-screen text input drives.
+#[derive(Component, Clone, Copy, PartialEq, Eq)]
+enum FieldKind {
+    Room,
+    Name,
+}
+
+/// An always-visible text input box: click to focus (or its key), Enter
+/// commits, Esc leaves. The value shown is driven by [`draw_room`] and
+/// [`draw_name`].
+#[derive(Component)]
+struct TextInput(FieldKind);
+
+/// The value text inside an input box.
+#[derive(Component)]
+struct InputText(FieldKind);
+
+/// The error line under an input box.
+#[derive(Component)]
+struct InputError(FieldKind);
+
 #[derive(Component)]
 struct RosterText;
-
-/// The room line: current room, the edit buffer while typing, and any
-/// validation error.
-#[derive(Component)]
-struct RoomText;
-
-/// The player-name line: current name, or the edit buffer while typing.
-#[derive(Component)]
-struct NameText;
 
 /// The chosen seating, set in the lobby and read when the game starts.
 ///
@@ -132,9 +140,10 @@ pub fn plugin(app: &mut App) {
                 // keyboard: typing a room named "solo" must not start a game on
                 // the `s`.
                 (edit_room, edit_name),
-                (open_room_field, open_name_field).run_if(not_editing),
+                focus_input_fields.run_if(not_editing),
                 (choose_seating, handle_buttons).run_if(not_editing),
                 sync_button_styles,
+                sync_input_styles,
                 draw_roster,
                 draw_room,
                 draw_name,
@@ -163,16 +172,12 @@ pub fn not_editing(room: Res<RoomEdit>, name: Res<NameEdit>) -> bool {
 /// immediately without dirtying the UI otherwise.
 fn sync_button_styles(
     chosen: Res<ChosenSeating>,
-    room: Res<RoomEdit>,
-    name: Res<NameEdit>,
     net: Res<NetState>,
     mut buttons: Query<(&Interaction, &LobbyButton, &mut BackgroundColor)>,
 ) {
     for (interaction, button, mut bg) in buttons.iter_mut() {
         let selected = match button {
             LobbyButton::Seats(s) => *s == chosen.0,
-            LobbyButton::Room => room.active,
-            LobbyButton::Name => name.active,
             LobbyButton::Ready => net.my_seat().is_some_and(|s| s.ready && !s.spectate),
             LobbyButton::Spectate => net.my_seat().is_some_and(|s| s.spectate),
             LobbyButton::Start | LobbyButton::Solo | LobbyButton::Back => false,
@@ -187,6 +192,46 @@ fn sync_button_styles(
         };
         if bg.0 != colour {
             bg.0 = colour;
+        }
+    }
+}
+
+/// Paint the text inputs: a focused field gets a green border and a darker
+/// well so it is obvious the keyboard is captured; an unfocused one brightens
+/// its border on hover, so the box reads as clickable.
+fn sync_input_styles(
+    room: Res<RoomEdit>,
+    name: Res<NameEdit>,
+    mut inputs: Query<(
+        &Interaction,
+        &TextInput,
+        &mut BackgroundColor,
+        &mut BorderColor,
+    )>,
+) {
+    for (interaction, input, mut bg, mut border) in inputs.iter_mut() {
+        let focused = match input.0 {
+            FieldKind::Room => room.active,
+            FieldKind::Name => name.active,
+        };
+        let border_colour = if focused {
+            CHOSEN
+        } else {
+            match interaction {
+                Interaction::Hovered => HOVER,
+                _ => Color::srgb(0.35, 0.35, 0.40),
+            }
+        };
+        let well = if focused {
+            Color::srgb(0.15, 0.15, 0.19)
+        } else {
+            IDLE
+        };
+        if bg.0 != well {
+            bg.0 = well;
+        }
+        if border.top != border_colour {
+            *border = BorderColor::all(border_colour);
         }
     }
 }
@@ -332,29 +377,28 @@ fn spawn(mut commands: Commands, chosen: Res<ChosenSeating>) {
         .with_children(|col| {
             header(col, "Lobby");
 
-            // The room field. Its text is driven by `draw_room`, which is also
-            // where the editing caret and any validation error appear.
-            field_row(col, "Room", LobbyButton::Room, "R");
+            // The room field: a real text input, click or `R` to focus.
+            field_row(col, "Room", FieldKind::Room, "R");
             col.spawn((
                 Text::new(String::new()),
                 TextFont {
-                    font_size: FontSize::Px(15.0),
+                    font_size: FontSize::Px(14.0),
                     ..default()
                 },
-                TextColor(Color::srgb(0.72, 0.72, 0.78)),
-                RoomText,
+                TextColor(Color::srgb(0.85, 0.35, 0.35)),
+                InputError(FieldKind::Room),
             ));
 
-            // The player-name field, driven by `draw_name`.
-            field_row(col, "Name", LobbyButton::Name, "N");
+            // The player-name field, same pattern.
+            field_row(col, "Name", FieldKind::Name, "N");
             col.spawn((
                 Text::new(String::new()),
                 TextFont {
-                    font_size: FontSize::Px(15.0),
+                    font_size: FontSize::Px(14.0),
                     ..default()
                 },
-                TextColor(Color::srgb(0.72, 0.72, 0.78)),
-                NameText,
+                TextColor(Color::srgb(0.85, 0.35, 0.35)),
+                InputError(FieldKind::Name),
             ));
 
             // Seating, with the keys that also set it.
@@ -411,9 +455,10 @@ fn header(parent: &mut ChildSpawnerCommands, label: &str) {
     ));
 }
 
-/// One labelled field row: the label, then the button that opens the editor,
-/// then the key that does the same.
-fn field_row(parent: &mut ChildSpawnerCommands, label: &str, tag: LobbyButton, key: &str) {
+/// One labelled input row: the label, the text input box, and the key that
+/// focuses it. Enter commits, Esc leaves; visuals follow in
+/// [`sync_input_styles`].
+fn field_row(parent: &mut ChildSpawnerCommands, label: &str, kind: FieldKind, key: &str) {
     parent
         .spawn(Node {
             column_gap: Val::Px(10.0),
@@ -429,7 +474,43 @@ fn field_row(parent: &mut ChildSpawnerCommands, label: &str, tag: LobbyButton, k
                 },
                 TextColor(Color::srgb(0.62, 0.62, 0.68)),
             ));
-            button(row, key, tag);
+            row.spawn((
+                Button,
+                Node {
+                    width: Val::Px(260.0),
+                    padding: UiRect::axes(Val::Px(10.0), Val::Px(6.0)),
+                    border: UiRect::all(Val::Px(1.0)),
+                    border_radius: BorderRadius::all(Val::Px(5.0)),
+                    ..default()
+                },
+                BackgroundColor(IDLE),
+                BorderColor {
+                    top: Color::srgb(0.35, 0.35, 0.40),
+                    right: Color::srgb(0.35, 0.35, 0.40),
+                    bottom: Color::srgb(0.35, 0.35, 0.40),
+                    left: Color::srgb(0.35, 0.35, 0.40),
+                },
+                TextInput(kind),
+            ))
+            .with_children(|box_node| {
+                box_node.spawn((
+                    Text::new(String::new()),
+                    TextFont {
+                        font_size: FontSize::Px(15.0),
+                        ..default()
+                    },
+                    TextColor(Color::srgb(0.9, 0.9, 0.92)),
+                    InputText(kind),
+                ));
+            });
+            row.spawn((
+                Text::new(key),
+                TextFont {
+                    font_size: FontSize::Px(14.0),
+                    ..default()
+                },
+                TextColor(Color::srgb(0.62, 0.62, 0.68)),
+            ));
         });
 }
 
@@ -627,6 +708,23 @@ fn pump_socket(
             }
             // Guests take the host's roster verbatim; it is the only authority.
             NetMsg::Roster(seats) => net.seats = seats,
+            NetMsg::Seating(players) => {
+                // The host's live choice: adopt it, unless it is unrecognised
+                // (another build's seating), in which case keep ours and say
+                // so — the same rule as on `Start`.
+                if net.sequences() {
+                    continue;
+                }
+                match adopt_seating(&players, chosen.0) {
+                    Ok(seating) => {
+                        if chosen.0 != seating {
+                            chosen.0 = seating;
+                            net.status = format!("Host set the table: {}.", seating.label());
+                        }
+                    }
+                    Err(complaint) => net.status = complaint,
+                }
+            }
             NetMsg::Start { seats, players } => {
                 net.seats = seats;
                 match adopt_seating(&players, chosen.0) {
@@ -878,29 +976,52 @@ pub fn edit_name(
     }
 }
 
-/// Open the name field, from `N` or the button.
-fn open_name_field(
-    buttons: Query<(&Interaction, &LobbyButton), Changed<Interaction>>,
+/// Focus an input box: by clicking it, or with its key (`R` room, `N` name).
+/// Focusing one field unfocuses the other; each is seeded with its current
+/// value, so a small change does not mean retyping the whole thing.
+///
+/// Runs only while no field holds the keyboard — the modal rule. Leaving a
+/// field (Enter/Esc) is what frees the keys again.
+fn focus_input_fields(
+    buttons: Query<(&Interaction, &TextInput), Changed<Interaction>>,
     keys: Res<ButtonInput<KeyCode>>,
+    room: Res<RoomId>,
     mut net: ResMut<NetState>,
-    mut edit: ResMut<NameEdit>,
+    mut room_edit: ResMut<RoomEdit>,
+    mut name_edit: ResMut<NameEdit>,
 ) {
-    let clicked = buttons
-        .iter()
-        .any(|(i, b)| *i == Interaction::Pressed && matches!(b, LobbyButton::Name));
-    if !(clicked || keys.just_pressed(KeyCode::KeyN)) {
+    let mut clicked: Option<FieldKind> = None;
+    for (interaction, input) in buttons.iter() {
+        if *interaction == Interaction::Pressed {
+            clicked = Some(input.0);
+        }
+    }
+
+    let focus_room = clicked == Some(FieldKind::Room) || keys.just_pressed(KeyCode::KeyR);
+    let focus_name = clicked == Some(FieldKind::Name) || keys.just_pressed(KeyCode::KeyN);
+    if !focus_room && !focus_name {
         return;
     }
 
-    edit.active = true;
-    edit.buffer = if net.name.is_empty() {
-        String::new()
-    } else {
-        net.name.clone()
-    };
-    edit.error.clear();
-    edit.consumed_input = true;
-    net.status = "Editing player name. Enter accepts, Esc cancels.".into();
+    room_edit.active = focus_room;
+    name_edit.active = focus_name && !focus_room;
+    if focus_room {
+        room_edit.buffer = room.0.clone();
+        room_edit.error.clear();
+    }
+    if focus_name {
+        name_edit.buffer = if net.name.is_empty() {
+            String::new()
+        } else {
+            net.name.clone()
+        };
+        name_edit.error.clear();
+    }
+    // The key (or click) that opened a field belongs to it, not to the
+    // systems chained after this one.
+    room_edit.consumed_input = true;
+    name_edit.consumed_input = true;
+    net.status = "Editing. Enter accepts, Esc cancels.".into();
 }
 
 /// A system of its own rather than part of the button handling, because it needs
@@ -910,6 +1031,7 @@ fn open_name_field(
 pub fn choose_seating(
     buttons: Query<(&Interaction, &LobbyButton), Changed<Interaction>>,
     keys: Res<ButtonInput<KeyCode>>,
+    socket: Option<ResMut<MatchboxSocket>>,
     mut net: ResMut<NetState>,
     mut chosen: ResMut<ChosenSeating>,
 ) {
@@ -932,40 +1054,14 @@ pub fn choose_seating(
     if net.peers.is_empty() || net.sequences() {
         chosen.0 = seating;
         net.status = format!("Seating: {}", seating.label());
+        // Broadcast live, so every peer watches the table change as it is
+        // changed instead of discovering it at `Start`.
+        if let Some(mut socket) = socket {
+            broadcast(&mut socket, &net.peers, &NetMsg::Seating(seating.indices()));
+        }
     } else {
         net.status = "Only the host chooses the number of players.".into();
     }
-}
-
-/// Open the room field, from `R` or the button.
-///
-/// Its own system rather than a branch of [`handle_buttons`], which otherwise
-/// needs the room and the editor purely to service this one case — and had grown
-/// past what clippy will accept in parameters, which was a fair signal that two
-/// concerns had been put in one place.
-fn open_room_field(
-    buttons: Query<(&Interaction, &LobbyButton), Changed<Interaction>>,
-    keys: Res<ButtonInput<KeyCode>>,
-    room: Res<RoomId>,
-    mut edit: ResMut<RoomEdit>,
-    mut net: ResMut<NetState>,
-) {
-    let clicked = buttons
-        .iter()
-        .any(|(i, b)| *i == Interaction::Pressed && matches!(b, LobbyButton::Room));
-    if !(clicked || keys.just_pressed(KeyCode::KeyR)) {
-        return;
-    }
-
-    edit.active = true;
-    // Seeded with the current room, so a small change does not mean retyping the
-    // whole name.
-    edit.buffer = room.0.clone();
-    edit.error.clear();
-    // Marked as consuming input: `R` opened the field, and must not also be read
-    // by the systems chained after this one.
-    edit.consumed_input = true;
-    net.status = "Editing room name. Enter joins, Esc cancels.".into();
 }
 
 fn handle_buttons(
@@ -1000,7 +1096,7 @@ fn handle_buttons(
             LobbyButton::Spectate => spectate = true,
             LobbyButton::Back => back = true,
             // Handled by their own systems.
-            LobbyButton::Room | LobbyButton::Name | LobbyButton::Seats(_) => {}
+            LobbyButton::Seats(_) => {}
         }
     }
 
@@ -1159,47 +1255,74 @@ fn draw_roster(
     **text = out;
 }
 
-/// Draw the name line: the current name, or the field while editing. The same
-/// caret convention as [`draw_room`], so the two modal fields feel alike.
-fn draw_name(net: Res<NetState>, edit: Res<NameEdit>, mut text: Query<&mut Text, With<NameText>>) {
+/// Draw the name input: the buffer with a caret while focused, the current
+/// name otherwise. The caret matters — without it a focused field looks
+/// identical to a dead one, and the player cannot tell why `S` stopped
+/// working.
+fn draw_name(
+    net: Res<NetState>,
+    edit: Res<NameEdit>,
+    mut values: Query<(&mut Text, &InputText)>,
+    mut errors: Query<(&mut Text, &InputError)>,
+) {
     if !net.is_changed() && !edit.is_changed() {
         return;
     }
-    let Ok(mut text) = text.single_mut() else {
-        return;
-    };
-
-    **text = if edit.active {
-        format!("{}_\n  Enter accepts, Esc cancels.", edit.buffer)
-    } else if net.name.is_empty() {
-        "(no name yet - press N)".into()
-    } else {
-        net.name.clone()
-    };
+    for (mut text, kind) in &mut values {
+        if kind.0 != FieldKind::Name {
+            continue;
+        }
+        **text = if edit.active {
+            format!("{}_", edit.buffer)
+        } else if net.name.is_empty() {
+            "(unnamed)".into()
+        } else {
+            net.name.clone()
+        };
+    }
+    for (mut text, kind) in &mut errors {
+        if kind.0 != FieldKind::Name {
+            continue;
+        }
+        **text = if edit.active && !edit.error.is_empty() {
+            edit.error.clone()
+        } else {
+            String::new()
+        };
+    }
 }
 
-/// Draw the room line: the current room, or the field while editing.
-///
-/// A caret is appended while editing so it is obvious the keyboard is captured —
-/// otherwise a modal field looks identical to a dead one, and the player has no
-/// way to tell why `S` stopped working.
-fn draw_room(room: Res<RoomId>, edit: Res<RoomEdit>, mut text: Query<&mut Text, With<RoomText>>) {
+/// Draw the room input: the buffer with a caret while focused, the current
+/// room otherwise; any commit error shows on the line beneath.
+fn draw_room(
+    room: Res<RoomId>,
+    edit: Res<RoomEdit>,
+    mut values: Query<(&mut Text, &InputText)>,
+    mut errors: Query<(&mut Text, &InputError)>,
+) {
     if !room.is_changed() && !edit.is_changed() {
         return;
     }
-    let Ok(mut text) = text.single_mut() else {
-        return;
-    };
-
-    **text = if edit.active {
-        let mut out = format!("Room: {}_\n  Enter joins, Esc cancels.", edit.buffer);
-        if !edit.error.is_empty() {
-            out.push_str(&format!("\n  {}", edit.error));
+    for (mut text, kind) in &mut values {
+        if kind.0 != FieldKind::Room {
+            continue;
         }
-        out
-    } else {
-        format!("Room: {}   (R to change)", room.0)
-    };
+        **text = if edit.active {
+            format!("{}_", edit.buffer)
+        } else {
+            room.0.clone()
+        };
+    }
+    for (mut text, kind) in &mut errors {
+        if kind.0 != FieldKind::Room {
+            continue;
+        }
+        **text = if edit.active && !edit.error.is_empty() {
+            edit.error.clone()
+        } else {
+            String::new()
+        };
+    }
 }
 
 /// Build the game for the chosen seating and seat the local player.
@@ -1208,8 +1331,14 @@ fn draw_room(room: Res<RoomId>, edit: Res<RoomEdit>, mut text: Query<&mut Text, 
 /// determines the starting position and there is no meaningful way to reseat a
 /// board that has already been dealt. Runs on entering the game, before
 /// `spawn_board`.
-pub fn apply_seats(net: Res<NetState>, chosen: Res<ChosenSeating>, mut session: ResMut<Session>) {
+pub fn apply_seats(
+    net: Res<NetState>,
+    chosen: Res<ChosenSeating>,
+    ai_seats: Res<crate::menu::AiSeats>,
+    mut session: ResMut<Session>,
+) {
     *session = Session::new(chosen.0);
+    session.ai_players = ai_seats.0.clone();
     session.local_player = net.my_player();
     // A declared spectator watches: local_player is already None for one, and
     // this flag stops hotseat-style "move everyone" from applying to them.

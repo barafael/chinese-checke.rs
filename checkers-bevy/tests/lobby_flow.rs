@@ -38,6 +38,7 @@ fn app() -> App {
         .insert_state(AppState::Lobby)
         .init_resource::<Session>()
         .init_resource::<ChosenSeating>()
+        .init_resource::<checkers_bevy::menu::AiSeats>()
         .init_resource::<checkers_net::NetState>()
         .add_systems(
             Update,

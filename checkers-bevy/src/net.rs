@@ -71,6 +71,7 @@ pub fn pump(
             // A guest cannot sequence, and lobby traffic is over.
             NetMsg::Move(_)
             | NetMsg::Spectate(_)
+            | NetMsg::Seating(_)
             | NetMsg::Hello { .. }
             | NetMsg::Roster(_)
             | NetMsg::Ready(_)

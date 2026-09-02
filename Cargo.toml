@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["checkers-bevy","checkers-core", "checkers-model", "checkers-net", "checkers-spec-gen"]
+members = ["checkers-ai","checkers-bevy","checkers-core", "checkers-model", "checkers-net", "checkers-spec-gen"]
 
 [workspace.package]
 edition = "2024"
@@ -10,6 +10,7 @@ version = "0.1.0"
 checkers-core = { path = "checkers-core" }
 checkers-model = { path = "checkers-model" }
 checkers-net = { path = "checkers-net" }
+checkers-ai = { path = "checkers-ai" }
 linkme = "0.3"
 
 bevy = "0.19"

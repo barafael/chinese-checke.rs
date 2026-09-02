@@ -1,0 +1,11 @@
+[package]
+name = "checkers-ai"
+edition.workspace = true
+version.workspace = true
+description = "Search engine and evaluation for the machine-checked Chinese Checkers rules"
+
+[dependencies]
+checkers-core.workspace = true
+
+[lints]
+workspace = true

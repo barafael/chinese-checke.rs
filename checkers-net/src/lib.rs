@@ -121,6 +121,10 @@ pub enum NetMsg {
     Ready(bool),
     /// Guest -> host: declare or renounce spectator status.
     Spectate(bool),
+    /// Host -> all: the seating the host has chosen, live — guests see the
+    /// table change as it is changed, not only when the game starts. Indices,
+    /// for the same reason as on [`NetMsg::Start`].
+    Seating(Vec<u32>),
     /// Host -> all: assignments are final, start playing.
     ///
     /// `players` carries which of the six players are seated, so every peer
