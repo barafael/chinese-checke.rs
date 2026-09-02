@@ -114,7 +114,7 @@ fn apply(net: &mut NetState, session: &mut Session, seq: u32, wire: WireMove) {
         return;
     };
 
-    session.game.play(&mv);
+    session.commit(&mv);
     net.last_applied_seq = Some(seq);
     session.selection = crate::Selection::None;
     after_turn(session);
@@ -125,7 +125,7 @@ fn apply(net: &mut NetState, session: &mut Session, seq: u32, wire: WireMove) {
 fn apply_outbox_directly(session: &mut Session) {
     for mv in std::mem::take(&mut session.outbox) {
         if session.game.legal_moves().contains(&mv) {
-            session.game.play(&mv);
+            session.commit(&mv);
             session.selection = crate::Selection::None;
             after_turn(session);
         }
@@ -139,6 +139,7 @@ fn after_turn(session: &mut Session) {
     while !session.game.is_over() && session.game.legal_moves().is_empty() {
         let stuck = session.game.turn();
         session.game.pass();
+        session.stats.passes += 1;
         session.message = format!("{} - player {} passed", session.message, stuck.index());
     }
 }

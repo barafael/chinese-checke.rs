@@ -104,6 +104,9 @@ fn main() {
                 sync_status,
                 sync_status_visibility,
                 sync_buttons,
+                sync_turn_indicator,
+                sync_camp_indicator,
+                sync_game_over,
             )
                 .chain()
                 .run_if(in_state(AppState::InGame)),
@@ -140,6 +143,22 @@ struct Overlay;
 
 #[derive(Component)]
 struct StatusText;
+
+/// The colour swatch naming the active home base.
+#[derive(Component)]
+struct TurnSwatch;
+
+/// The label beside the swatch: whose base is active, and whether it is ours.
+#[derive(Component)]
+struct TurnText;
+
+/// Entities of the game-over overlay, so it can be despawned on restart.
+#[derive(Component)]
+struct GameOverUi;
+
+/// Board rings marking the active player's home camp.
+#[derive(Component)]
+struct CampMarker;
 
 /// Whether the status panel is shown, toggled with `T`. A view preference,
 /// not game state, so it lives outside [`Session`].
@@ -253,21 +272,55 @@ fn setup(mut commands: Commands) {
 /// Spawn the in-game UI: status panel and turn controls. Not marked
 /// [`BoardVisual`]: the UI is the same in every visualization.
 fn spawn_ui(mut commands: Commands) {
-    commands.spawn((
-        Text::new(""),
-        TextFont {
-            font_size: FontSize::Px(15.0),
-            ..default()
-        },
-        TextColor(Color::srgb(0.85, 0.85, 0.88)),
-        Node {
+    // Bottom-left column: the active-base indicator (colour swatch + label)
+    // above the status text.
+    commands
+        .spawn(Node {
             position_type: PositionType::Absolute,
             bottom: Val::Px(10.0),
             left: Val::Px(12.0),
+            flex_direction: FlexDirection::Column,
+            row_gap: Val::Px(3.0),
             ..default()
-        },
-        StatusText,
-    ));
+        })
+        .with_children(|col| {
+            col.spawn(Node {
+                flex_direction: FlexDirection::Row,
+                align_items: AlignItems::Center,
+                column_gap: Val::Px(6.0),
+                ..default()
+            })
+            .with_children(|row| {
+                row.spawn((
+                    Node {
+                        width: Val::Px(11.0),
+                        height: Val::Px(11.0),
+                        border_radius: BorderRadius::all(Val::Px(2.0)),
+                        ..default()
+                    },
+                    BackgroundColor(Color::NONE),
+                    TurnSwatch,
+                ));
+                row.spawn((
+                    Text::new(""),
+                    TextFont {
+                        font_size: FontSize::Px(15.0),
+                        ..default()
+                    },
+                    TextColor(Color::srgb(0.85, 0.85, 0.88)),
+                    TurnText,
+                ));
+            });
+            col.spawn((
+                Text::new(""),
+                TextFont {
+                    font_size: FontSize::Px(15.0),
+                    ..default()
+                },
+                TextColor(Color::srgb(0.85, 0.85, 0.88)),
+                StatusText,
+            ));
+        });
 
     // Turn controls, top right: Confirm then Cancel.
     commands
@@ -804,24 +857,282 @@ fn sync_highlights(
     }
 }
 
-/// Dim the controls when they would do nothing, so the staged state is legible.
-fn sync_buttons(session: Res<Session>, mut buttons: Query<(&ControlButton, &mut BackgroundColor)>) {
+/// Dim the controls when they would do nothing, so the staged state is
+/// legible; brighten on hover, darken on press. Runs every frame so hover
+/// repaints immediately; writes only real colour changes.
+fn sync_buttons(
+    session: Res<Session>,
+    mut buttons: Query<(&Interaction, &ControlButton, &mut BackgroundColor)>,
+) {
+    for (interaction, which, mut bg) in buttons.iter_mut() {
+        let base = match which {
+            ControlButton::Confirm if session.can_confirm() => Color::srgb(0.20, 0.45, 0.28),
+            ControlButton::Cancel if session.selected_hole().is_some() => {
+                Color::srgb(0.45, 0.24, 0.24)
+            }
+            _ => Color::srgb(0.18, 0.18, 0.21),
+        };
+        let colour = match interaction {
+            Interaction::Pressed => base.darker(0.15),
+            Interaction::Hovered if base != Color::srgb(0.18, 0.18, 0.21) => base.lighter(0.15),
+            _ => base,
+        };
+        if bg.0 != colour {
+            bg.0 = colour;
+        }
+    }
+}
+
+/// The colour swatch + label naming the active home base: whose camp is to
+/// move, and whether it is ours.
+fn sync_turn_indicator(
+    session: Res<Session>,
+    mut swatch: Query<&mut BackgroundColor, With<TurnSwatch>>,
+    mut text: Query<&mut Text, With<TurnText>>,
+) {
     if !session.is_changed() {
         return;
     }
-    for (which, mut bg) in buttons.iter_mut() {
-        let enabled = match which {
-            ControlButton::Confirm => session.can_confirm(),
-            ControlButton::Cancel => session.selected_hole().is_some(),
-        };
-        bg.0 = if enabled {
-            match which {
-                ControlButton::Confirm => Color::srgb(0.20, 0.45, 0.28),
-                ControlButton::Cancel => Color::srgb(0.45, 0.24, 0.24),
+    let (Ok(mut swatch), Ok(mut text)) = (swatch.single_mut(), text.single_mut()) else {
+        return;
+    };
+
+    let (colour, label) = match session.game.outcome() {
+        Some(Outcome::Winner(p)) => (player_colour(p), "Game over".into()),
+        Some(Outcome::Draw) => (Color::srgb(0.6, 0.6, 0.66), "Game over - draw".into()),
+        None => {
+            let active = session.game.turn();
+            let colour = player_colour(active);
+            let label = if session.local_player() == Some(active) {
+                "Your home base - you to move".to_string()
+            } else if session.local_player().is_some() {
+                format!("Home base to move: player {} (waiting)", active.index())
+            } else {
+                format!("Home base to move: player {}", active.index())
+            };
+            (colour, label)
+        }
+    };
+
+    swatch.0 = colour;
+    **text = label;
+}
+
+/// Rings around the active player's home camp, so the base whose turn it is
+/// is visible on the board itself, not only in the status line. Rebuilt when
+/// the turn changes.
+fn sync_camp_indicator(
+    draw: DrawContext,
+    stale: Query<Entity, With<CampMarker>>,
+    session: Res<Session>,
+    style: Res<BoardStyle>,
+) {
+    let DrawContext {
+        mut commands,
+        mut meshes,
+        mut materials,
+        mut std_materials,
+    } = draw;
+    if !session.is_changed() && !style.is_changed() {
+        return;
+    }
+    for e in stale.iter() {
+        commands.entity(e).despawn();
+    }
+    if session.game.is_over() {
+        return;
+    }
+
+    let camp = session.game.turn().start_camp();
+    match *style {
+        BoardStyle::Classic => {
+            // The player's own hue, over the neutral grey camp.
+            let colour = player_colour(session.game.turn());
+            let ring = meshes.add(Annulus::new(PIECE_RADIUS + 1.0, PIECE_RADIUS + 3.0));
+            let mat = materials.add(colour.with_alpha(0.55));
+            for c in camp {
+                let p = coord_to_world(c);
+                commands.spawn((
+                    Mesh2d(ring.clone()),
+                    MeshMaterial2d(mat.clone()),
+                    Transform::from_xyz(p.x, p.y, 1.2),
+                    CampMarker,
+                ));
             }
-        } else {
-            Color::srgb(0.18, 0.18, 0.21)
-        };
+        }
+        BoardStyle::Amlah => {
+            // White, reading against the same-hue accent triangle that marks
+            // every camp; only the active one is ringed.
+            let ring = meshes.add(Annulus::new(0.095, 0.11));
+            let mat = std_materials.add(StandardMaterial {
+                base_color: Color::WHITE,
+                unlit: true,
+                ..default()
+            });
+            for c in camp {
+                let w = board_amlah::plane_to_world3(coord_to_world(c));
+                commands.spawn((
+                    Mesh3d(ring.clone()),
+                    MeshMaterial3d(mat.clone()),
+                    Transform::from_rotation(Quat::from_rotation_x(
+                        -std::f32::consts::FRAC_PI_2,
+                    ))
+                    .with_translation(Vec3::new(w.x, 0.0065, w.z)),
+                    CampMarker,
+                ));
+            }
+        }
+    }
+}
+
+/// The game-over overlay: winner and statistics. Spawned when the game ends,
+/// despawned when a new game begins (`R`).
+fn sync_game_over(
+    session: Res<Session>,
+    existing: Query<Entity, With<GameOverUi>>,
+    mut commands: Commands,
+) {
+    let over = session.game.is_over();
+    let shown = !existing.is_empty();
+    if over == shown {
+        return;
+    }
+    if !over {
+        for e in existing.iter() {
+            commands.entity(e).despawn();
+        }
+        return;
+    }
+
+    let (title, title_colour) = match session.game.outcome() {
+        Some(Outcome::Winner(p)) => {
+            let title = if session.local_player() == Some(p) {
+                "You win!".to_string()
+            } else {
+                format!("Player {} wins!", p.index())
+            };
+            (title, player_colour(p))
+        }
+        _ => ("Draw: every player is blocked.".to_string(), Color::WHITE),
+    };
+
+    commands
+        .spawn((
+            Node {
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                ..default()
+            },
+            GameOverUi,
+        ))
+        .with_children(|root| {
+            root.spawn((
+                Node {
+                    flex_direction: FlexDirection::Column,
+                    align_items: AlignItems::Center,
+                    row_gap: Val::Px(8.0),
+                    padding: UiRect::axes(Val::Px(34.0), Val::Px(24.0)),
+                    border_radius: BorderRadius::all(Val::Px(8.0)),
+                    ..default()
+                },
+                BackgroundColor(Color::srgba(0.10, 0.10, 0.13, 0.97)),
+            ))
+            .with_children(|panel| {
+                panel.spawn((
+                    Text::new(title),
+                    TextFont {
+                        font_size: FontSize::Px(30.0),
+                        ..default()
+                    },
+                    TextColor(title_colour),
+                ));
+                panel.spawn((
+                    Text::new("Statistics"),
+                    TextFont {
+                        font_size: FontSize::Px(15.0),
+                        ..default()
+                    },
+                    TextColor(Color::srgb(0.62, 0.62, 0.68)),
+                ));
+                for p in session.seating.players() {
+                    let i = p.index() as usize;
+                    let mut line = format!(
+                        "Player {}:  {} moves  ({} by jump)",
+                        i, session.stats.moves[i], session.stats.jumps[i]
+                    );
+                    if let Some(pct) =
+                        (100 * session.stats.hops_over_others[i]).checked_div(session.stats.hops[i])
+                    {
+                        line.push_str(&format!(
+                            ",  {} hops ({pct}% over others)",
+                            session.stats.hops[i]
+                        ));
+                    }
+                    panel.spawn((
+                        Text::new(line),
+                        TextFont {
+                            font_size: FontSize::Px(15.0),
+                            ..default()
+                        },
+                        TextColor(Color::srgb(0.85, 0.85, 0.88)),
+                    ));
+                }
+                panel.spawn((
+                    Text::new(format!(
+                        "{} moves total, {} passed turns",
+                        session.stats.total_moves(),
+                        session.stats.passes
+                    )),
+                    TextFont {
+                        font_size: FontSize::Px(14.0),
+                        ..default()
+                    },
+                    TextColor(Color::srgb(0.72, 0.72, 0.78)),
+                ));
+                if session.stats.longest_jump > 0 {
+                    panel.spawn((
+                        Text::new(format!(
+                            "Longest jump: {} hops (player {})",
+                            session.stats.longest_jump, session.stats.longest_jump_by
+                        )),
+                        TextFont {
+                            font_size: FontSize::Px(14.0),
+                            ..default()
+                        },
+                        TextColor(Color::srgb(0.72, 0.72, 0.78)),
+                    ));
+                }
+                if let Some(d) = session.stats.duration() {
+                    panel.spawn((
+                        Text::new(format!("Round lasted about {}", format_duration(d))),
+                        TextFont {
+                            font_size: FontSize::Px(14.0),
+                            ..default()
+                        },
+                        TextColor(Color::srgb(0.72, 0.72, 0.78)),
+                    ));
+                }
+                panel.spawn((
+                    Text::new("Press R for a new game"),
+                    TextFont {
+                        font_size: FontSize::Px(13.0),
+                        ..default()
+                    },
+                    TextColor(Color::srgb(0.62, 0.62, 0.68)),
+                ));
+            });
+        });
+}
+
+/// Approximate human format for a round's duration.
+fn format_duration(d: std::time::Duration) -> String {
+    let s = d.as_secs();
+    if s >= 60 {
+        format!("{}m {:02}s", s / 60, s % 60)
+    } else {
+        format!("{s}s")
     }
 }
 

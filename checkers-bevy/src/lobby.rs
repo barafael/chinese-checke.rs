@@ -134,7 +134,7 @@ pub fn plugin(app: &mut App) {
                 (edit_room, edit_name),
                 (open_room_field, open_name_field).run_if(not_editing),
                 (choose_seating, handle_buttons).run_if(not_editing),
-                sync_seat_buttons,
+                sync_button_styles,
                 draw_roster,
                 draw_room,
                 draw_name,
@@ -154,20 +154,39 @@ pub fn not_editing(room: Res<RoomEdit>, name: Res<NameEdit>) -> bool {
     !room.active && !room.consumed_input && !name.active && !name.consumed_input
 }
 
-/// Highlight the chosen seating.
+/// Paint every button: selected mode, hover, press.
 ///
-/// Runs every frame but early-outs unless the choice changed, so clicking a
-/// seat button repaints once rather than continuously.
-fn sync_seat_buttons(
+/// Selected mode per button: the chosen seating for the seat buttons, the
+/// open editor for Room/Name, this peer's seat flags for Ready and Spectate.
+/// Momentary actions (Start, Solo, Back) have no mode to show. Runs every
+/// frame — a dozen buttons — and writes only real changes, so hover repaints
+/// immediately without dirtying the UI otherwise.
+fn sync_button_styles(
     chosen: Res<ChosenSeating>,
-    mut buttons: Query<(&LobbyButton, &mut BackgroundColor)>,
+    room: Res<RoomEdit>,
+    name: Res<NameEdit>,
+    net: Res<NetState>,
+    mut buttons: Query<(&Interaction, &LobbyButton, &mut BackgroundColor)>,
 ) {
-    if !chosen.is_changed() {
-        return;
-    }
-    for (button, mut bg) in buttons.iter_mut() {
-        if let LobbyButton::Seats(seating) = button {
-            bg.0 = if *seating == chosen.0 { CHOSEN } else { IDLE };
+    for (interaction, button, mut bg) in buttons.iter_mut() {
+        let selected = match button {
+            LobbyButton::Seats(s) => *s == chosen.0,
+            LobbyButton::Room => room.active,
+            LobbyButton::Name => name.active,
+            LobbyButton::Ready => net.my_seat().is_some_and(|s| s.ready && !s.spectate),
+            LobbyButton::Spectate => net.my_seat().is_some_and(|s| s.spectate),
+            LobbyButton::Start | LobbyButton::Solo | LobbyButton::Back => false,
+        };
+        let colour = match interaction {
+            Interaction::Pressed if selected => CHOSEN_DOWN,
+            Interaction::Pressed => DOWN,
+            Interaction::Hovered if selected => CHOSEN_HOVER,
+            Interaction::Hovered => HOVER,
+            Interaction::None if selected => CHOSEN,
+            Interaction::None => IDLE,
+        };
+        if bg.0 != colour {
+            bg.0 = colour;
         }
     }
 }
@@ -196,10 +215,15 @@ fn button(parent: &mut ChildSpawnerCommands, label: &str, tag: LobbyButton) {
         ));
 }
 
-/// An unselected button, and the selected seating. Named because
-/// [`sync_seat_buttons`] has to reset to exactly the spawn colour.
-const IDLE: Color = Color::srgb(0.22, 0.22, 0.27);
-const CHOSEN: Color = Color::srgb(0.20, 0.45, 0.28);
+/// An unselected button; hover and press brighten then darken it. `CHOSEN`
+/// marks the button whose mode is active, with its own hover and press.
+/// Shared with the menu screens so every screen speaks one vocabulary.
+pub(crate) const IDLE: Color = Color::srgb(0.22, 0.22, 0.27);
+pub(crate) const HOVER: Color = Color::srgb(0.29, 0.29, 0.35);
+pub(crate) const DOWN: Color = Color::srgb(0.17, 0.17, 0.21);
+pub(crate) const CHOSEN: Color = Color::srgb(0.20, 0.45, 0.28);
+pub(crate) const CHOSEN_HOVER: Color = Color::srgb(0.25, 0.53, 0.34);
+pub(crate) const CHOSEN_DOWN: Color = Color::srgb(0.16, 0.37, 0.23);
 
 /// The room-name editor.
 ///

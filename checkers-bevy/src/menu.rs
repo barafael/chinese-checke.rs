@@ -12,7 +12,7 @@
 use bevy::prelude::*;
 
 use crate::AppState;
-use crate::lobby::ChosenSeating;
+use crate::lobby::{CHOSEN, CHOSEN_DOWN, CHOSEN_HOVER, ChosenSeating, DOWN, HOVER, IDLE};
 use crate::setup::Seating;
 
 use checkers_net::NetState;
@@ -24,7 +24,8 @@ pub fn plugin(app: &mut App) {
         .add_systems(OnExit(AppState::Hotseat), despawn)
         .add_systems(
             Update,
-            handle_buttons.run_if(in_state(AppState::Menu).or_else(in_state(AppState::Hotseat))),
+            (handle_buttons, sync_button_styles)
+                .run_if(in_state(AppState::Menu).or_else(in_state(AppState::Hotseat))),
         );
 }
 
@@ -47,11 +48,8 @@ pub enum MenuButton {
     Back,
 }
 
-/// An unselected button, matching the lobby's vocabulary.
-const IDLE: Color = Color::srgb(0.22, 0.22, 0.27);
-
-/// One button, styled exactly like the lobby's — the screens share one
-/// vocabulary so moving between them feels like moving, not like changing apps.
+/// One button, styled exactly like the lobby's (the palette is imported, so
+/// the screens share one vocabulary and cannot drift apart).
 fn button(parent: &mut ChildSpawnerCommands, label: &str, tag: MenuButton) {
     parent
         .spawn((
@@ -237,6 +235,29 @@ struct DealsText;
 fn despawn(mut commands: Commands, ui: Query<Entity, With<MenuUi>>) {
     for e in ui.iter() {
         commands.entity(e).despawn();
+    }
+}
+
+/// Paint every button: chosen seating, hover, press. The hotseat panel has no
+/// keys, so this is also what makes picking a player count visible — before
+/// this, the seat buttons never highlighted at all.
+fn sync_button_styles(
+    chosen: Res<ChosenSeating>,
+    mut buttons: Query<(&Interaction, &MenuButton, &mut BackgroundColor)>,
+) {
+    for (interaction, button, mut bg) in buttons.iter_mut() {
+        let selected = matches!(button, MenuButton::Seats(s) if *s == chosen.0);
+        let colour = match interaction {
+            Interaction::Pressed if selected => CHOSEN_DOWN,
+            Interaction::Pressed => DOWN,
+            Interaction::Hovered if selected => CHOSEN_HOVER,
+            Interaction::Hovered => HOVER,
+            Interaction::None if selected => CHOSEN,
+            Interaction::None => IDLE,
+        };
+        if bg.0 != colour {
+            bg.0 = colour;
+        }
     }
 }
 

@@ -30,7 +30,7 @@ use bevy::prelude::*;
 use checkers_core::audit::audit_position;
 use checkers_core::geometry::Coord;
 use checkers_core::position::{Move as GameMove, MoveKind as GameMoveKind, Player, Position};
-use checkers_core::rules::Game;
+use checkers_core::rules::{Game, jump_routes};
 use checkers_core::turn::{JumpTurn, single_hop_destinations, step_destinations};
 
 use crate::setup::Seating;
@@ -64,6 +64,44 @@ pub enum Selection {
     Jumping { turn: JumpTurn },
 }
 
+/// Running totals for the game-over screen.
+///
+/// Counted where moves are applied ([`net::pump`]), so every peer — replaying
+/// the same sequenced moves — agrees on the numbers.
+#[derive(Default, Debug, Clone, Copy)]
+pub struct GameStats {
+    /// Committed moves per player index.
+    pub moves: [u32; 6],
+    /// Committed jump moves per player index.
+    pub jumps: [u32; 6],
+    /// Turns forfeited because the player had no legal move.
+    pub passes: u32,
+    /// Single hops flown per player; one jump turn can chain many.
+    pub hops: [u32; 6],
+    /// Hops per player that crossed a piece belonging to *another* player.
+    pub hops_over_others: [u32; 6],
+    /// The longest single jump turn, in hops.
+    pub longest_jump: u32,
+    /// Who flew [`GameStats::longest_jump`].
+    pub longest_jump_by: u8,
+    /// Wall clock at the first committed move.
+    pub started_at: Option<std::time::Instant>,
+    /// Wall clock when the game ended.
+    pub finished_at: Option<std::time::Instant>,
+}
+
+impl GameStats {
+    /// Every player's committed moves.
+    pub fn total_moves(&self) -> u32 {
+        self.moves.iter().sum()
+    }
+
+    /// How long the round took, approximately: first move to game end.
+    pub fn duration(&self) -> Option<std::time::Duration> {
+        Some(self.finished_at? - self.started_at?)
+    }
+}
+
 /// The game plus the UI's selection state.
 #[derive(Resource)]
 pub struct Session {
@@ -82,6 +120,8 @@ pub struct Session {
     outbox: Vec<GameMove>,
     /// Who is seated. A partial board is audited against its own seating.
     pub seating: Seating,
+    /// Running totals, shown on the game-over screen.
+    pub stats: GameStats,
 }
 
 impl Default for Session {
@@ -101,7 +141,74 @@ impl Session {
             spectating: false,
             outbox: Vec::new(),
             seating,
+            stats: GameStats::default(),
         }
+    }
+
+    /// The player this peer controls, if any.
+    pub fn local_player(&self) -> Option<Player> {
+        self.local_player
+    }
+
+    /// Record a committed move for the active player, then play it. The only
+    /// path through which the game advances.
+    pub(crate) fn commit(&mut self, mv: &GameMove) {
+        let mover = self.game.turn();
+        self.stats.moves[mover.index() as usize] += 1;
+        if self.stats.started_at.is_none() {
+            self.stats.started_at = Some(std::time::Instant::now());
+        }
+
+        if mv.kind == GameMoveKind::Jump {
+            self.stats.jumps[mover.index() as usize] += 1;
+            let (hops, over_others) = self.count_hops(mv, mover);
+            self.stats.hops[mover.index() as usize] += hops;
+            self.stats.hops_over_others[mover.index() as usize] += over_others;
+            if hops > self.stats.longest_jump {
+                self.stats.longest_jump = hops;
+                self.stats.longest_jump_by = mover.index();
+            }
+        }
+
+        self.game.play(mv);
+        if self.game.is_over() {
+            self.stats.finished_at = Some(std::time::Instant::now());
+        }
+    }
+
+    /// Hops in a jump move, and how many crossed another player's piece.
+    ///
+    /// The route is presentational on the wire, so a receiving peer rebuilds
+    /// one deterministically — `jump_routes` enumerates in fixed direction
+    /// order — and every peer counts the same numbers. The flown route and
+    /// the rebuilt one can differ; by chapter 10 the route is not part of
+    /// the move.
+    fn count_hops(&self, mv: &GameMove, mover: Player) -> (u32, u32) {
+        let pos = self.game.position();
+        let route = match &mv.route {
+            Some(r) => r.clone(),
+            None => jump_routes(pos, mv.origin, 64)
+                .into_iter()
+                .find(|r| r.last() == Some(&mv.destination))
+                .unwrap_or_default(),
+        };
+        if route.len() < 2 {
+            return (0, 0);
+        }
+
+        let mut hops = 0;
+        let mut over_others = 0;
+        for pair in route.windows(2) {
+            // A jump is symmetric: the crossed hole is the exact midpoint.
+            let mid = Coord::new((pair[0].q + pair[1].q) / 2, (pair[0].r + pair[1].r) / 2);
+            hops += 1;
+            if let Some(owner) = pos.occupant(mid)
+                && owner != mover
+            {
+                over_others += 1;
+            }
+        }
+        (hops, over_others)
     }
 }
 
