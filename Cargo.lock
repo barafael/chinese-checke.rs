@@ -2320,6 +2320,7 @@ dependencies = [
  "checkers-core",
  "checkers-net",
  "uuid",
+ "web-sys",
 ]
 
 [[package]]

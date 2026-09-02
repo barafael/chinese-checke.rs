@@ -96,8 +96,14 @@ pub struct Seat {
     pub peer: String,
     pub name: String,
     /// Which of the six players this peer commands, once the host assigns it.
+    /// `None` for spectators, and for peers beyond the seating's camps.
     pub player: Option<u32>,
     pub ready: bool,
+    /// Spectators watch the game and touch nothing: no camp, no ready flag,
+    /// no voice in when it starts. A seat that joined after the camps ran out
+    /// is also a spectator in effect, but this field is the *declared* choice.
+    #[serde(default)]
+    pub spectate: bool,
 }
 
 /// Top-level wire envelope.
@@ -113,6 +119,8 @@ pub enum NetMsg {
     Roster(Vec<Seat>),
     /// Guest -> host: toggle my ready flag.
     Ready(bool),
+    /// Guest -> host: declare or renounce spectator status.
+    Spectate(bool),
     /// Host -> all: assignments are final, start playing.
     ///
     /// `players` carries which of the six players are seated, so every peer
@@ -185,13 +193,26 @@ impl NetState {
         self.is_host || self.peers.is_empty()
     }
 
-    /// Which [`Player`] this peer commands, if the host has assigned one.
-    pub fn my_player(&self) -> Option<Player> {
+    /// Release every seat's camp binding, for offline play: hotseat and solo
+    /// drive all camps from one device, so no seat may pin the local player to
+    /// a single camp left over from lobby greetings.
+    pub fn unbind_players(&mut self) {
+        for seat in &mut self.seats {
+            seat.player = None;
+        }
+    }
+
+    /// This peer's roster entry, if it has one.
+    pub fn my_seat(&self) -> Option<&Seat> {
         let me = self.my_id?.to_string();
-        self.seats
-            .iter()
-            .find(|s| s.peer == me)
-            .and_then(|s| s.player)
+        self.seats.iter().find(|s| s.peer == me)
+    }
+
+    /// Which [`Player`] this peer commands, if the host has assigned one.
+    /// Spectators — and any seat beyond the seating — command nothing.
+    pub fn my_player(&self) -> Option<Player> {
+        self.my_seat()?
+            .player
             .and_then(|i| Player::ALL.get(i as usize).copied())
     }
 
@@ -518,6 +539,7 @@ mod room_tests {
                 name: "p".into(),
                 player: Some(0),
                 ready: true,
+                spectate: false,
             }],
             ..NetState::default()
         };

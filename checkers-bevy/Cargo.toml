@@ -18,3 +18,7 @@ uuid = "1"
 
 [lints]
 workspace = true
+
+# Reading and sharing the room name through the URL fragment (web only).
+[target.'cfg(target_family = "wasm")'.dependencies]
+web-sys = { version = "0.3", features = ["Location", "Window"] }

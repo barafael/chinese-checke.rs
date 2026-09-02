@@ -20,7 +20,7 @@ use checkers_bevy::board_view::{
     hole_edges, hole_points, world_to_coord,
 };
 use checkers_bevy::setup::Seating;
-use checkers_bevy::{AppState, Selection, Session, audit, lobby, net};
+use checkers_bevy::{AppState, Selection, Session, audit, lobby, menu, net};
 use checkers_core::geometry::{Coord, all_holes, camp_of, on_board};
 use checkers_core::law::{LAWS, verify_all};
 use checkers_core::position::{Player, Position};
@@ -70,6 +70,7 @@ fn main() {
         .init_resource::<BoardStyle>()
         .init_state::<AppState>()
         .add_plugins(lobby::plugin)
+        .add_plugins(menu::plugin)
         .add_systems(Startup, setup)
         // Not state-scoped: the lobby is the first thing shown, and it is the
         // screen whose buttons the old size hid.

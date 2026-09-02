@@ -81,6 +81,12 @@ pub enum LobbyButton {
     Seats(Seating),
     /// Open the room-name field.
     Room,
+    /// Open the player-name field.
+    Name,
+    /// Declare or renounce spectator status.
+    Spectate,
+    /// Back to the main menu.
+    Back,
 }
 
 #[derive(Component)]
@@ -91,6 +97,10 @@ struct RosterText;
 #[derive(Component)]
 struct RoomText;
 
+/// The player-name line: current name, or the edit buffer while typing.
+#[derive(Component)]
+struct NameText;
+
 /// The chosen seating, set in the lobby and read when the game starts.
 ///
 /// A resource rather than a field of [`Session`] because the session is rebuilt
@@ -100,10 +110,17 @@ struct RoomText;
 pub struct ChosenSeating(pub Seating);
 
 pub fn plugin(app: &mut App) {
+    // A share link carries the room in the URL fragment; honour it over the
+    // default so a link lands you in the sender's lobby. Native builds have no
+    // URL, and this is a no-op there.
+    if let Some(room) = crate::web::room_from_url() {
+        app.insert_resource(room);
+    }
     app.init_resource::<NetState>()
         .init_resource::<RoomId>()
         .init_resource::<ChosenSeating>()
         .init_resource::<RoomEdit>()
+        .init_resource::<NameEdit>()
         .add_systems(OnEnter(AppState::Lobby), (checkers_net::open_socket, spawn))
         .add_systems(OnExit(AppState::Lobby), despawn)
         .add_systems(
@@ -111,29 +128,30 @@ pub fn plugin(app: &mut App) {
             (
                 elect_host,
                 pump_socket,
-                // First, and the rest are suppressed while it holds the
+                // First, and the rest are suppressed while a field holds the
                 // keyboard: typing a room named "solo" must not start a game on
                 // the `s`.
-                edit_room,
-                open_room_field.run_if(not_editing),
+                (edit_room, edit_name),
+                (open_room_field, open_name_field).run_if(not_editing),
                 (choose_seating, handle_buttons).run_if(not_editing),
                 sync_seat_buttons,
                 draw_roster,
                 draw_room,
+                draw_name,
             )
                 .chain()
                 .run_if(in_state(AppState::Lobby)),
         );
 }
 
-/// Whether the room field has the keyboard.
+/// Whether a field has the keyboard.
 ///
 /// Every other lobby key is gated on this. Without it each character typed is
 /// also a command — `s` starts a solo game, `2` changes the seating, Enter
-/// starts a shared one — so the field would be unusable for any name containing
+/// starts a shared one — so a field would be unusable for any name containing
 /// them, which is nearly all of them.
-pub fn not_editing(edit: Res<RoomEdit>) -> bool {
-    !edit.active && !edit.consumed_input
+pub fn not_editing(room: Res<RoomEdit>, name: Res<NameEdit>) -> bool {
+    !room.active && !room.consumed_input && !name.active && !name.consumed_input
 }
 
 /// Highlight the chosen seating.
@@ -210,6 +228,17 @@ pub struct RoomEdit {
     pub consumed_input: bool,
 }
 
+/// The player-name editor. Same modal pattern as [`RoomEdit`] — including the
+/// input-consumption flag, for the same reason — but committing writes the
+/// display name and re-greets peers rather than reopening a socket.
+#[derive(Resource, Default)]
+pub struct NameEdit {
+    pub active: bool,
+    pub buffer: String,
+    pub error: String,
+    pub consumed_input: bool,
+}
+
 /// What a keypress does to the room-name editor.
 ///
 /// Returned rather than applied so the decision is testable without a window;
@@ -261,33 +290,27 @@ pub fn edit_action(key: KeyCode, text: Option<&str>) -> EditAction {
 /// window-filling column with the content at the top cannot place anything
 /// outside the window, whatever the window's size — so the failure mode is gone
 /// by construction rather than by choosing a better offset.
-fn spawn(mut commands: Commands, room: Res<RoomId>, chosen: Res<ChosenSeating>) {
+fn spawn(mut commands: Commands, chosen: Res<ChosenSeating>) {
     commands
         .spawn((
             Node {
                 width: Val::Percent(100.0),
                 height: Val::Percent(100.0),
                 flex_direction: FlexDirection::Column,
-                align_items: AlignItems::FlexStart,
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                row_gap: Val::Px(14.0),
                 padding: UiRect::all(Val::Px(40.0)),
-                row_gap: Val::Px(18.0),
                 ..default()
             },
             LobbyUi,
         ))
         .with_children(|col| {
-            col.spawn((
-                Text::new(format!("Room \"{}\"\nConnecting...", room.0)),
-                TextFont {
-                    font_size: FontSize::Px(17.0),
-                    ..default()
-                },
-                TextColor(Color::srgb(0.88, 0.88, 0.9)),
-                RosterText,
-            ));
+            header(col, "Lobby");
 
-            // The room field. Its text is driven by `draw_roster`, which is also
+            // The room field. Its text is driven by `draw_room`, which is also
             // where the editing caret and any validation error appear.
+            field_row(col, "Room", LobbyButton::Room, "R");
             col.spawn((
                 Text::new(String::new()),
                 TextFont {
@@ -297,23 +320,21 @@ fn spawn(mut commands: Commands, room: Res<RoomId>, chosen: Res<ChosenSeating>) 
                 TextColor(Color::srgb(0.72, 0.72, 0.78)),
                 RoomText,
             ));
-            col.spawn(Node {
-                column_gap: Val::Px(10.0),
-                ..default()
-            })
-            .with_children(|row| {
-                button(row, "Change room (R)", LobbyButton::Room);
-            });
 
-            // Seating, with the keys that also set it.
+            // The player-name field, driven by `draw_name`.
+            field_row(col, "Name", LobbyButton::Name, "N");
             col.spawn((
-                Text::new("Players  (2 / 3 / 6, or Tab to cycle)"),
+                Text::new(String::new()),
                 TextFont {
-                    font_size: FontSize::Px(14.0),
+                    font_size: FontSize::Px(15.0),
                     ..default()
                 },
-                TextColor(Color::srgb(0.62, 0.62, 0.68)),
+                TextColor(Color::srgb(0.72, 0.72, 0.78)),
+                NameText,
             ));
+
+            // Seating, with the keys that also set it.
+            header(col, "Players at this table");
             col.spawn(Node {
                 column_gap: Val::Px(10.0),
                 ..default()
@@ -324,21 +345,68 @@ fn spawn(mut commands: Commands, room: Res<RoomId>, chosen: Res<ChosenSeating>) 
                 }
             });
 
+            // The roster: who is here, ready, or spectating.
+            col.spawn((
+                Text::new(String::new()),
+                TextFont {
+                    font_size: FontSize::Px(15.0),
+                    ..default()
+                },
+                TextColor(Color::srgb(0.88, 0.88, 0.9)),
+                RosterText,
+            ));
+
             col.spawn(Node {
                 column_gap: Val::Px(10.0),
                 margin: UiRect::top(Val::Px(6.0)),
                 ..default()
             })
             .with_children(|row| {
-                button(row, "Play solo (S)", LobbyButton::Solo);
                 button(row, "Ready (Space)", LobbyButton::Ready);
-                button(row, "Start shared (Enter)", LobbyButton::Start);
+                button(row, "Start (Enter)", LobbyButton::Start);
+                button(row, "Spectate (P)", LobbyButton::Spectate);
+                button(row, "Solo (S)", LobbyButton::Solo);
+                button(row, "Back (Esc)", LobbyButton::Back);
             });
         });
 
     // Paint the initial choice, so the highlight is right on the first frame
     // rather than only after the first interaction.
     commands.insert_resource(*chosen);
+}
+
+/// A section heading in lobby/menu screens.
+fn header(parent: &mut ChildSpawnerCommands, label: &str) {
+    parent.spawn((
+        Text::new(label),
+        TextFont {
+            font_size: FontSize::Px(20.0),
+            ..default()
+        },
+        TextColor(Color::srgb(0.92, 0.92, 0.95)),
+    ));
+}
+
+/// One labelled field row: the label, then the button that opens the editor,
+/// then the key that does the same.
+fn field_row(parent: &mut ChildSpawnerCommands, label: &str, tag: LobbyButton, key: &str) {
+    parent
+        .spawn(Node {
+            column_gap: Val::Px(10.0),
+            align_items: AlignItems::Center,
+            ..default()
+        })
+        .with_children(|row| {
+            row.spawn((
+                Text::new(label),
+                TextFont {
+                    font_size: FontSize::Px(14.0),
+                    ..default()
+                },
+                TextColor(Color::srgb(0.62, 0.62, 0.68)),
+            ));
+            button(row, key, tag);
+        });
 }
 
 fn despawn(mut commands: Commands, ui: Query<Entity, With<LobbyUi>>) {
@@ -385,21 +453,25 @@ pub fn start_decision(net: &NetState, chosen: Seating) -> StartDecision {
     let waiting: Vec<&str> = net
         .seats
         .iter()
-        .filter(|s| !s.ready)
+        // Spectators have no say in when a game starts, so they cannot make
+        // anyone wait.
+        .filter(|s| !s.spectate && !s.ready)
         .map(|s| s.name.as_str())
         .collect();
     if waiting.is_empty() {
-        // A start with fewer seats than the seating's camps would strand the
+        // A start with fewer players than the seating's camps would strand the
         // uncontrolled ones: the turn would reach a player nobody commands and
-        // wait forever. Choosing Six with two peers joined must be a refusal,
-        // not a crippled game.
-        if net.seats.len() == chosen.count() {
+        // wait forever. Choosing Six with two joined players must be a
+        // refusal, not a crippled game. Spectators command nothing, so only
+        // seated players count.
+        let players = net.seats.iter().filter(|s| !s.spectate).count();
+        if players == chosen.count() {
             StartDecision::Multiplayer
         } else {
             StartDecision::Refuse(format!(
                 "{} joined but this seating needs {}. Press Tab or 2/3/6 to change it, \
                  or S to play solo.",
-                net.seats.len(),
+                players,
                 chosen.count()
             ))
         }
@@ -492,8 +564,18 @@ fn pump_socket(
         match msg {
             NetMsg::Hello { name } => {
                 if net.sequences() {
-                    seat_for(&mut net, &from.to_string(), &name);
-                    publish_roster(&mut socket, &net, &peers);
+                    // A repeat Hello from a known peer is a rename, not a
+                    // duplicate join: the name field re-greets precisely so
+                    // this happens.
+                    if let Some(seat) = net.seats.iter_mut().find(|s| s.peer == from.to_string()) {
+                        if seat.name != name {
+                            seat.name = name;
+                            publish_roster(&mut socket, &net, &peers);
+                        }
+                    } else {
+                        seat_for(&mut net, &from.to_string(), &name);
+                        publish_roster(&mut socket, &net, &peers);
+                    }
                 }
             }
             NetMsg::Ready(ready) => {
@@ -501,6 +583,20 @@ fn pump_socket(
                     let key = from.to_string();
                     if let Some(seat) = net.seats.iter_mut().find(|s| s.peer == key) {
                         seat.ready = ready;
+                    }
+                    publish_roster(&mut socket, &net, &peers);
+                }
+            }
+            NetMsg::Spectate(spectate) => {
+                if net.sequences() {
+                    let key = from.to_string();
+                    if let Some(seat) = net.seats.iter_mut().find(|s| s.peer == key) {
+                        // Leaving spectator mode must not strand the seat: it
+                        // gets no camp until the host next starts a game.
+                        seat.spectate = spectate;
+                        if spectate {
+                            seat.ready = true;
+                        }
                     }
                     publish_roster(&mut socket, &net, &peers);
                 }
@@ -538,6 +634,7 @@ fn seat_for(net: &mut NetState, peer: &str, name: &str) {
         name: name.to_string(),
         player,
         ready: false,
+        spectate: false,
     });
 }
 
@@ -588,9 +685,14 @@ pub fn start_message(net: &NetState, seating: Seating) -> NetMsg {
 /// Runs on the host at start, before [`start_message`] clones the seats, so
 /// the host's own [`NetState`] and every guest's arrive at the same binding.
 fn assign_seating(net: &mut NetState, seating: Seating) {
-    let camps = seating.indices();
-    for (i, seat) in net.seats.iter_mut().enumerate() {
-        seat.player = camps.get(i).copied();
+    // Camps go to seated players in join order; spectators command nothing,
+    // and — as ever — peers beyond the seating's camps sit out.
+    let mut next = seating.indices().into_iter();
+    for seat in net.seats.iter_mut().filter(|s| !s.spectate) {
+        seat.player = next.next();
+    }
+    for seat in net.seats.iter_mut().filter(|s| s.spectate) {
+        seat.player = None;
     }
 }
 
@@ -678,6 +780,9 @@ pub fn edit_room(
                     }
                     info!(from = %room.0, to = %parsed.0, "changing room");
                     *room = parsed;
+                    // Publish the new room in the URL, so the address always
+                    // points where this peer is.
+                    crate::web::share_room(&room);
                     net.leave_room();
                     net.status = format!("Joining room \"{}\"...", room.0);
                     // Drop the old socket and re-enter the lobby, which reopens
@@ -690,6 +795,88 @@ pub fn edit_room(
             EditAction::Ignore => {}
         }
     }
+}
+
+/// Apply the name editor's keypresses. Same classification as the room field —
+/// [`edit_action`] — but committing writes the display name and re-greets: the
+/// roster is only ever exchanged on Hello, so a rename without a re-greet would
+/// leave every peer looking at the old name.
+pub fn edit_name(
+    mut keys: MessageReader<KeyboardInput>,
+    mut edit: ResMut<NameEdit>,
+    mut net: ResMut<NetState>,
+) {
+    edit.consumed_input = false;
+
+    if !edit.active {
+        keys.clear();
+        return;
+    }
+
+    for event in keys.read() {
+        if event.state != ButtonState::Pressed {
+            continue;
+        }
+        edit.consumed_input = true;
+        match edit_action(event.key_code, event.text.as_deref()) {
+            EditAction::Insert(c) => {
+                if edit.buffer.chars().count() < RoomId::MAX_LEN {
+                    edit.buffer.push(c);
+                    edit.error.clear();
+                }
+            }
+            EditAction::Backspace => {
+                edit.buffer.pop();
+                edit.error.clear();
+            }
+            EditAction::Cancel => {
+                edit.active = false;
+                edit.buffer.clear();
+                edit.error.clear();
+            }
+            EditAction::Commit => {
+                let trimmed = edit.buffer.trim().to_string();
+                if trimmed.is_empty() {
+                    edit.error = "A name cannot be empty.".into();
+                } else {
+                    edit.active = false;
+                    if trimmed != net.name {
+                        net.name = trimmed;
+                        // Re-greet everyone, so the roster carries the new name.
+                        net.greeted.clear();
+                        net.status = "Name updated.".into();
+                    }
+                    edit.buffer.clear();
+                }
+            }
+            EditAction::Ignore => {}
+        }
+    }
+}
+
+/// Open the name field, from `N` or the button.
+fn open_name_field(
+    buttons: Query<(&Interaction, &LobbyButton), Changed<Interaction>>,
+    keys: Res<ButtonInput<KeyCode>>,
+    mut net: ResMut<NetState>,
+    mut edit: ResMut<NameEdit>,
+) {
+    let clicked = buttons
+        .iter()
+        .any(|(i, b)| *i == Interaction::Pressed && matches!(b, LobbyButton::Name));
+    if !(clicked || keys.just_pressed(KeyCode::KeyN)) {
+        return;
+    }
+
+    edit.active = true;
+    edit.buffer = if net.name.is_empty() {
+        String::new()
+    } else {
+        net.name.clone()
+    };
+    edit.error.clear();
+    edit.consumed_input = true;
+    net.status = "Editing player name. Enter accepts, Esc cancels.".into();
 }
 
 /// A system of its own rather than part of the button handling, because it needs
@@ -769,6 +956,8 @@ fn handle_buttons(
 ) {
     let mut ready = keys.just_pressed(KeyCode::Space);
     let mut start = keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::NumpadEnter);
+    let mut spectate = keys.just_pressed(KeyCode::KeyP);
+    let mut back = keys.just_pressed(KeyCode::Escape);
 
     // `S` starts a solo game unconditionally, without consulting the network at
     // all. Enter's behaviour depends on peers and readiness, and every way that
@@ -784,9 +973,18 @@ fn handle_buttons(
             LobbyButton::Ready => ready = true,
             LobbyButton::Start => start = true,
             LobbyButton::Solo => solo = true,
+            LobbyButton::Spectate => spectate = true,
+            LobbyButton::Back => back = true,
             // Handled by their own systems.
-            LobbyButton::Room | LobbyButton::Seats(_) => {}
+            LobbyButton::Room | LobbyButton::Name | LobbyButton::Seats(_) => {}
         }
+    }
+
+    if back {
+        // The socket stays: the menu's Lobby button comes straight back, and
+        // re-entering the lobby reopens it only if it was dropped.
+        next_state.set(AppState::Menu);
+        return;
     }
 
     // Checked before the socket is even looked at, so nothing about the network
@@ -795,9 +993,7 @@ fn handle_buttons(
         // Solo means this peer drives every seated camp, so no seat may keep a
         // player binding — a self-seat left over from lobby greetings would
         // otherwise pin the solo player to camp 0 and strand the rest.
-        for seat in &mut net.seats {
-            seat.player = None;
-        }
+        net.unbind_players();
         info!("starting a solo game");
         next_state.set(AppState::InGame);
         return;
@@ -813,20 +1009,48 @@ fn handle_buttons(
         return;
     };
     let peers = net.peers.clone();
+    let me = net.my_seat().map(|s| s.peer.clone()).unwrap_or_default();
 
-    if ready {
-        let me = net.my_id.map(|id| id.to_string()).unwrap_or_default();
-        let now = match net.seats.iter().find(|s| s.peer == me) {
-            Some(seat) => !seat.ready,
-            None => true,
-        };
-        if net.sequences() {
-            if let Some(seat) = net.seats.iter_mut().find(|s| s.peer == me) {
-                seat.ready = now;
+    if spectate {
+        // Spectator status is my own declaration; the host relays it through
+        // the roster. A declared spectator stops counting for readiness.
+        let now = !net.my_seat().is_some_and(|s| s.spectate);
+        if let Some(seat) = net.seats.iter_mut().find(|s| s.peer == me) {
+            seat.spectate = now;
+            if now {
+                seat.ready = true;
             }
+        }
+        if net.sequences() {
             publish_roster(&mut socket, &net, &peers);
         } else {
-            broadcast(&mut socket, &peers, &NetMsg::Ready(now));
+            broadcast(&mut socket, &peers, &NetMsg::Spectate(now));
+        }
+        net.status = if now {
+            "You are a spectator.".into()
+        } else {
+            "You are a player again; waiting for the next game.".into()
+        };
+    }
+
+    if ready {
+        // Spectators have nothing to ready up: nobody waits for them, so the
+        // toggle would only feign progress.
+        if net.my_seat().is_some_and(|s| s.spectate) {
+            net.status = "Spectators do not ready up.".into();
+        } else {
+            let now = match net.seats.iter().find(|s| s.peer == me) {
+                Some(seat) => !seat.ready,
+                None => true,
+            };
+            if net.sequences() {
+                if let Some(seat) = net.seats.iter_mut().find(|s| s.peer == me) {
+                    seat.ready = now;
+                }
+                publish_roster(&mut socket, &net, &peers);
+            } else if net.seats.iter().any(|s| s.peer == me) {
+                broadcast(&mut socket, &peers, &NetMsg::Ready(now));
+            }
         }
     }
 
@@ -834,7 +1058,7 @@ fn handle_buttons(
     // indistinguishable from a broken build, which is how the blank-screen bug
     // presented.
     if start {
-        match start_decision(&net, Seating::Two) {
+        match start_decision(&net, chosen.0) {
             StartDecision::Solo => next_state.set(AppState::InGame),
             StartDecision::Multiplayer => {
                 assign_seating(&mut net, chosen.0);
@@ -848,7 +1072,6 @@ fn handle_buttons(
 
 fn draw_roster(
     net: Res<NetState>,
-    room: Res<RoomId>,
     chosen: Res<ChosenSeating>,
     mut text: Query<&mut Text, With<RosterText>>,
 ) {
@@ -860,23 +1083,38 @@ fn draw_roster(
     };
 
     let mut out = format!(
-        "Room \"{}\"  |  {}  |  {} peer(s) connected  |  {}\n\n",
-        room.0,
+        "{}  |  {} peer(s) here  |  seating {}\n\n",
         if net.sequences() { "host" } else { "guest" },
         net.peers.len(),
         chosen.0.label(),
     );
     if net.seats.is_empty() {
-        out.push_str("No other players yet.\n");
+        out.push_str("No one here yet - share the room name.\n");
     }
-    let me = net.my_id.map(|id| id.to_string()).unwrap_or_default();
+    let me = net.my_seat().map(|s| s.peer.clone()).unwrap_or_default();
     for seat in &net.seats {
+        let role = if seat.spectate {
+            "spectator".into()
+        } else {
+            format!(
+                "player {}",
+                seat.player.map_or("-".into(), |p| p.to_string())
+            )
+        };
         out.push_str(&format!(
-            "  {} {}  player {}  {}\n",
+            "  {} {}  {}  {}\n",
             if seat.peer == me { ">" } else { " " },
             seat.name,
-            seat.player.map_or("-".into(), |p| p.to_string()),
-            if seat.ready { "ready" } else { "..." },
+            role,
+            // A declared spectator is never waited for, so the list says so
+            // instead of an endless "...".
+            if seat.spectate {
+                ""
+            } else if seat.ready {
+                "ready"
+            } else {
+                "..."
+            },
         ));
     }
 
@@ -887,14 +1125,33 @@ fn draw_roster(
     // hard-coding "all six players" left the hint contradicting the buttons
     // directly above it whenever a shorter game was picked.
     out.push_str(&format!(
-        "\nPress S to play solo now - all {} players on one board.\n\
-         Enter starts a shared game; Space toggles ready when others are here.",
+        "\nEnter starts a shared game; Space toggles ready; P spectates;\n\
+         S plays all {} camps on this device.",
         chosen.0.count()
     ));
     if !net.status.is_empty() {
         out.push_str(&format!("\n\n{}", net.status));
     }
     **text = out;
+}
+
+/// Draw the name line: the current name, or the field while editing. The same
+/// caret convention as [`draw_room`], so the two modal fields feel alike.
+fn draw_name(net: Res<NetState>, edit: Res<NameEdit>, mut text: Query<&mut Text, With<NameText>>) {
+    if !net.is_changed() && !edit.is_changed() {
+        return;
+    }
+    let Ok(mut text) = text.single_mut() else {
+        return;
+    };
+
+    **text = if edit.active {
+        format!("{}_\n  Enter accepts, Esc cancels.", edit.buffer)
+    } else if net.name.is_empty() {
+        "(no name yet - press N)".into()
+    } else {
+        net.name.clone()
+    };
 }
 
 /// Draw the room line: the current room, or the field while editing.
@@ -930,9 +1187,16 @@ fn draw_room(room: Res<RoomId>, edit: Res<RoomEdit>, mut text: Query<&mut Text, 
 pub fn apply_seats(net: Res<NetState>, chosen: Res<ChosenSeating>, mut session: ResMut<Session>) {
     *session = Session::new(chosen.0);
     session.local_player = net.my_player();
-    session.message = match session.local_player {
-        Some(p) => format!("You are player {} of {}", p.index(), chosen.0.count()),
-        None => format!("Playing all {} players locally", chosen.0.count()),
+    // A declared spectator watches: local_player is already None for one, and
+    // this flag stops hotseat-style "move everyone" from applying to them.
+    session.spectating = net.my_seat().is_some_and(|s| s.spectate);
+    session.message = if session.spectating {
+        "Spectating - watch, but do not touch.".into()
+    } else {
+        match session.local_player {
+            Some(p) => format!("You are player {} of {}", p.index(), chosen.0.count()),
+            None => format!("Playing all {} players locally", chosen.0.count()),
+        }
     };
 }
 
@@ -948,6 +1212,15 @@ mod tests {
             name: name.into(),
             player: Some(0),
             ready,
+            spectate: false,
+        }
+    }
+
+    fn spectator(name: &str) -> Seat {
+        Seat {
+            spectate: true,
+            ready: true,
+            ..seat(name, true)
         }
     }
 
@@ -1086,6 +1359,72 @@ mod tests {
             start_decision(&net, Seating::Two),
             StartDecision::Multiplayer,
             "and the same two seats are exactly right for two camps"
+        );
+    }
+
+    /// A spectator has no say in when the game starts, so an unready spectator
+    /// must not appear in the waiting list — and must not block the start.
+    #[test]
+    fn spectators_are_never_waited_for() {
+        let mut net = NetState::default();
+        net.peers.push(fake_peer());
+        net.is_host = true;
+        net.seats = vec![seat("ada", true), seat("grace", true), spectator("lee")];
+        assert!(matches!(spectator("lee"), Seat { spectate: true, .. }));
+
+        assert_eq!(
+            start_decision(&net, Seating::Two),
+            StartDecision::Multiplayer,
+            "a spectator neither readies nor blocks"
+        );
+    }
+
+    /// Camps bind to seated players in join order; a spectator takes none and
+    /// keeps none.
+    #[test]
+    fn spectators_take_no_camp() {
+        let mut net = NetState {
+            seats: vec![seat("ada", true), spectator("lee"), seat("grace", true)],
+            ..Default::default()
+        };
+
+        assign_seating(&mut net, Seating::Two);
+
+        assert_eq!(net.seats[0].player, Some(0), "first seated player: camp 0");
+        assert_eq!(net.seats[1].player, None, "the spectator commands nothing");
+        assert_eq!(
+            net.seats[2].player,
+            Some(3),
+            "the second seated player still gets the facing camp"
+        );
+    }
+
+    /// Spectators are extra bodies, not extra players: they count for neither
+    /// side of the camps-needed check.
+    #[test]
+    fn spectators_do_not_count_toward_the_camps() {
+        let mut net = NetState {
+            seats: vec![seat("ada", true), spectator("lee")],
+            ..Default::default()
+        };
+        net.peers.push(fake_peer());
+        net.is_host = true;
+
+        assert_eq!(
+            start_decision(&net, Seating::Two),
+            StartDecision::Refuse(
+                "1 joined but this seating needs 2. Press Tab or 2/3/6 to change it, \
+                 or S to play solo."
+                    .into()
+            ),
+            "one spectator plus nobody is still not a two-camp game"
+        );
+
+        net.seats.push(seat("grace", true));
+        assert_eq!(
+            start_decision(&net, Seating::Two),
+            StartDecision::Multiplayer,
+            "two seated players plus a spectator is fine"
         );
     }
 

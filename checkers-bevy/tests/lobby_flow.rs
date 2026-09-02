@@ -33,6 +33,9 @@ fn app() -> App {
     let mut app = App::new();
     app.add_plugins((MinimalPlugins, InputPlugin, StatesPlugin))
         .init_state::<AppState>()
+        // The app boots into the main menu; these tests exercise the lobby, so
+        // they start there directly.
+        .insert_state(AppState::Lobby)
         .init_resource::<Session>()
         .init_resource::<ChosenSeating>()
         .init_resource::<checkers_net::NetState>()

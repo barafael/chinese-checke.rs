@@ -21,8 +21,10 @@ pub mod board_amlah;
 pub mod board_style;
 pub mod board_view;
 pub mod lobby;
+pub mod menu;
 pub mod net;
 pub mod setup;
+pub mod web;
 
 use bevy::prelude::*;
 use checkers_core::audit::audit_position;
@@ -33,13 +35,19 @@ use checkers_core::turn::{JumpTurn, single_hop_destinations, step_destinations};
 
 use crate::setup::Seating;
 
-/// Lobby first, then the board. The board only exists in
-/// [`AppState::InGame`], so every way the lobby can refuse to start must say
+/// The menu first, then either the lobby (networked) or the hotseat panel
+/// (one device), then the board. The board only exists in
+/// [`AppState::InGame`], so every way a screen can refuse to start must say
 /// so — a silent refusal would look like a blank screen.
 #[derive(States, Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum AppState {
+    /// Title screen: choose multiplayer or hotseat.
     #[default]
+    Menu,
+    /// Networked play: room, roster, readiness.
     Lobby,
+    /// Offline play with every camp on this device.
+    Hotseat,
     InGame,
 }
 
@@ -62,9 +70,13 @@ pub struct Session {
     pub game: Game,
     pub selection: Selection,
     pub message: String,
-    /// Which player this peer may move. `None` in solo play, where every player
-    /// is controlled locally, or when spectating a full game.
+    /// Which player this peer may move. `None` in hotseat play, where every
+    /// player is controlled locally, or when spectating a networked game.
     local_player: Option<Player>,
+    /// True when this peer explicitly joined as a spectator. Distinguishes
+    /// "watches by choice" from hotseat's "moves everyone", which are both
+    /// `local_player: None`.
+    pub spectating: bool,
     /// Moves this peer has committed but that are not yet applied. Submitted
     /// by [`net::pump`] for sequencing; solo play takes the same path.
     outbox: Vec<GameMove>,
@@ -79,13 +91,14 @@ impl Default for Session {
 }
 
 impl Session {
-    /// A session for the given seating.
+    /// A session for the given seating: every camp driven locally.
     pub fn new(seating: Seating) -> Self {
         Self {
             game: seating.game(),
             selection: Selection::None,
             message: "Click one of your pieces".into(),
             local_player: None,
+            spectating: false,
             outbox: Vec::new(),
             seating,
         }
@@ -147,14 +160,18 @@ impl Session {
     /// on its own turn. The rules re-check on the receiving side.
     fn may_act(&self) -> bool {
         match self.local_player {
-            None => true,
+            None => !self.spectating,
             Some(p) => p == self.game.turn(),
         }
     }
 
     pub fn select(&mut self, hole: Coord) {
         if !self.may_act() {
-            self.message = format!("Waiting for player {}", self.game.turn().index());
+            if self.spectating {
+                self.message = "You are spectating.".into();
+            } else {
+                self.message = format!("Waiting for player {}", self.game.turn().index());
+            }
             return;
         }
         let player = self.game.turn();

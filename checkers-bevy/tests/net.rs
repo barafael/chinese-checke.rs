@@ -183,6 +183,7 @@ fn the_hosts_seating_reaches_the_guest_over_the_wire() {
                 name: "host".into(),
                 player: Some(0),
                 ready: true,
+                spectate: false,
             }],
             players: host_seating.indices(),
         };

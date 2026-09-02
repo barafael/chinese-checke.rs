@@ -12,7 +12,8 @@ use bevy::prelude::*;
 use bevy::state::app::StatesPlugin;
 use checkers_bevy::AppState;
 use checkers_bevy::lobby::{
-    ChosenSeating, EditAction, RoomEdit, choose_seating, edit_action, edit_room, not_editing,
+    ChosenSeating, EditAction, NameEdit, RoomEdit, choose_seating, edit_action, edit_room,
+    not_editing,
 };
 use checkers_bevy::setup::Seating;
 use checkers_net::{NetState, RoomId, Seat};
@@ -21,8 +22,12 @@ fn app() -> App {
     let mut app = App::new();
     app.add_plugins((MinimalPlugins, InputPlugin, StatesPlugin))
         .init_state::<AppState>()
+        // The app boots into the menu; these tests exercise lobby fields.
+        .insert_state(AppState::Lobby)
         .init_resource::<RoomId>()
         .init_resource::<RoomEdit>()
+        // `not_editing` reads both editors.
+        .init_resource::<NameEdit>()
         .init_resource::<ChosenSeating>()
         .init_resource::<NetState>()
         .add_systems(Update, edit_room.run_if(in_state(AppState::Lobby)));
@@ -105,6 +110,7 @@ fn changing_room_forgets_the_old_rooms_state() {
             name: "p".into(),
             player: Some(0),
             ready: true,
+            spectate: false,
         }];
     }
 
@@ -244,8 +250,12 @@ fn chained_app() -> App {
     let mut app = App::new();
     app.add_plugins((MinimalPlugins, InputPlugin, StatesPlugin))
         .init_state::<AppState>()
+        // The app boots into the menu; these tests exercise lobby fields.
+        .insert_state(AppState::Lobby)
         .init_resource::<RoomId>()
         .init_resource::<RoomEdit>()
+        // `not_editing` reads both editors.
+        .init_resource::<NameEdit>()
         .init_resource::<ChosenSeating>()
         .init_resource::<NetState>()
         .add_systems(
@@ -299,8 +309,12 @@ fn the_committing_keypress_does_not_leak_downstream() {
     let mut app = App::new();
     app.add_plugins((MinimalPlugins, InputPlugin, StatesPlugin))
         .init_state::<AppState>()
+        // The app boots into the menu; these tests exercise lobby fields.
+        .insert_state(AppState::Lobby)
         .init_resource::<RoomId>()
         .init_resource::<RoomEdit>()
+        // `not_editing` reads both editors.
+        .init_resource::<NameEdit>()
         .init_resource::<ChosenSeating>()
         .init_resource::<NetState>()
         .init_resource::<SawEnter>()
