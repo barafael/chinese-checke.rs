@@ -71,10 +71,9 @@ lives in `checkers-core/src/spec.rs` as [`Chapter`] text, and the generated
 `specs/specification.md` supersedes them.
 
 `docs/superseded/` retains the originals only as a source for prose not yet
-transcribed. The geometry chapters (1–5) are done; what remains to verify against
-the originals is the detail of chapters 6–15, whose claims are currently stated in
-prose but **not** yet formalised as laws. The generated document lists exactly
-which those are, under "Coverage".
+transcribed. All fifteen chapters are formalised: every normative claim is
+backed by a law, and the claims that are not — deliberately — are recorded
+with their reasons in `docs/claim-inventory.md`.
 
 ### Reading order
 

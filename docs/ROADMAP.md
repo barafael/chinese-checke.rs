@@ -62,17 +62,17 @@ not repair.
 The project's stated purpose (README:73-77): chapters 6–15 prose detail is
 stated but not yet formalised as laws.
 
-- [ ] Claim inventory: extract every normative claim from the chapter prose
-  (generated `specs/specification.md`; originals in `docs/superseded/`), diff
-  against the 43 existing law IDs, and record the gap as a checklist (this
-  file or `docs/claim-inventory.md`).
-- [ ] Chapter-by-chapter slices, each ending green: laws written (stable ID,
-  `STATEMENT`, one-sentence `NOTE`, strongest honest evidence), registered,
-  spec regenerated, full gates.
-- [ ] Mutation-test the riskiest new laws; `scripts/verify-proofs.sh` whenever
-  geometry or move generation is touched.
-- Suggested order: 6 (players/initial) → 7 (steps) → 8–9 (jumps) → 10–11 →
-  12 → 13 → 14 → 15 (variants, composing with the `Seating` work).
+- [x] Claim inventory: every normative claim in chapters 6–15 maps to a law
+  (`docs/claim-inventory.md`). The prose's two uncovered statements — turn
+  kind purity and win terminality — are true by construction or by guard,
+  and are recorded there as declined candidates with their reasons. The
+  README's "chapters 6–15 remain" paragraph was stale and is fixed.
+- [x] Chapter-by-chapter slices: nothing to formalise — closed by the
+  inventory. Any future prose change extends the registry in the same
+  commit.
+- [ ] Mutation-test the riskiest *existing* laws beyond the 14/14 exercise
+  already recorded; `scripts/verify-proofs.sh` whenever geometry or move
+  generation changes.
 
 ## Phase 4 — Save / resume / replay
 
