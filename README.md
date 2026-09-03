@@ -166,6 +166,7 @@ committed until you confirm, so any chain can be abandoned.
 | Enter / Confirm button | Commit the staged turn |
 | Backspace / Cancel button | Abandon the staged turn |
 | Resign button | Concede the round (local modes; not over the network yet) |
+| Save / Open buttons | Write the round to a `.cchkrs` record, or resume one |
 | U | Undo the last staged hop |
 | Escape | Clear the selection |
 | A | Let the computer play the current seat once |

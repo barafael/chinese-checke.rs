@@ -79,17 +79,21 @@ stated but not yet formalised as laws.
 Storage decided: **real files on native, localStorage on wasm**. Records use
 the **`.cchkrs`** extension (decided).
 
-- [ ] Record format: versioned text header (format version, seating,
-  players, result) followed by the sequenced move list, reusing
-  `checkers-net`'s `WireMove` forms so replay rides the same path the net
-  tests exercise.
-- [ ] Save: native file dialog (`rfd` or equivalent); wasm localStorage;
-  clipboard copy as the universal fallback.
-- [ ] Resume: parse, then replay through the sequencing path with the law
-  audit applied per move — a stale or illegal record is rejected honestly.
-- [ ] Replay viewer: step and autoplay controls, paced like `AiPace`.
-- [ ] Tests: save→load round-trip identity (position, turn, outcome); a
-  corrupted record is rejected with a readable message.
+- [x] Record format: versioned text header (format version, seating, engine
+  seats) followed by the moves in play order as route-free `WireMove` lines —
+  the position is *derived*, not stored, so a record cannot smuggle the game
+  anywhere the rules disallow (`checkers-bevy/src/record.rs`).
+- [x] Save: native file dialog (`rfd`); wasm localStorage. Clipboard fallback
+  turned out unnecessary — both platforms are covered; revisit if a browser
+  ever refuses storage.
+- [x] Resume: parse, then replay through `WireMove::resolve` against the legal
+  moves of each position, law audit per move — a stale, forged, or corrupted
+  record is refused with a readable fault. Auto-passes re-derive exactly.
+- [ ] Replay viewer: step and autoplay *through a saved record* (distinct
+  from the last-turn animation, which landed with the replay module).
+- [x] Tests: round-trip identity (position, turn, outcome, move counts);
+  corrupted records (header, seating, move lines, count) refused; an illegal
+  recorded move rejected on replay; resumed position passes the audit.
 
 ## Phase 5 — Networked AI seats
 
@@ -103,12 +107,9 @@ the **`.cchkrs`** extension (decided).
 
 ## Phase 6 — Move animation
 
-- [ ] Tween each hop over ~120 ms, driven by Bevy's `Time` (wasm-safe, same
-  discipline as `AiPace`). Applies to human hops, AI hops, and replay.
-- [ ] `sync_pieces` snaps only on commit, new deal, or style switch — it must
-  never fight an in-flight tween.
-- [ ] Purely visual: no law impact. Headless test — the tween lands exactly on
-  `coord_to_world(target)`.
+- [x] Largely delivered by the replay module: the opponent's last turn flies
+  hop by hop with the route left as a grey trace, driven by Bevy's time.
+  Remaining: animate the *staged* hop preview for the human's own hops.
 
 ## Phase 7 — Touch input (spike first)
 
