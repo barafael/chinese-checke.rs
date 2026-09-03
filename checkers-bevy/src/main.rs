@@ -24,7 +24,7 @@ use checkers_bevy::board_view::{
     hole_edges, hole_points, world_to_coord,
 };
 use checkers_bevy::setup::Seating;
-use checkers_bevy::{AppState, Selection, Session, audit, lobby, menu, net, web};
+use checkers_bevy::{AppState, Selection, Session, audit, lobby, menu, menu_bg, net, web};
 use checkers_core::geometry::{Coord, all_holes, camp_of, on_board};
 use checkers_core::law::{LAWS, verify_all};
 use checkers_core::position::{Player, Position};
@@ -82,6 +82,7 @@ fn main() {
         .init_resource::<AiPace>()
         .add_plugins(lobby::plugin)
         .add_plugins(menu::plugin)
+        .add_plugins(menu_bg::plugin)
         .add_systems(Startup, setup)
         // Not state-scoped: the lobby is the first thing shown, and it is the
         // screen whose buttons the old size hid.
@@ -204,14 +205,7 @@ enum ControlButton {
 
 /// Distinct, roughly colour-blind-safe hues for the six players.
 fn player_colour(player: Player) -> Color {
-    match player.index() {
-        0 => Color::srgb(0.90, 0.35, 0.30),
-        1 => Color::srgb(0.95, 0.72, 0.20),
-        2 => Color::srgb(0.45, 0.78, 0.35),
-        3 => Color::srgb(0.35, 0.72, 0.90),
-        4 => Color::srgb(0.55, 0.50, 0.90),
-        _ => Color::srgb(0.92, 0.92, 0.92),
-    }
+    checkers_bevy::board_view::player_colour(player)
 }
 
 /// Size the window to two thirds of the monitor and centre it.

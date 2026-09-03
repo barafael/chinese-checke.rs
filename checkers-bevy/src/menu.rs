@@ -107,64 +107,78 @@ fn screen(commands: &mut Commands) -> Entity {
 fn spawn_menu(mut commands: Commands) {
     let screen = screen(&mut commands);
     commands.entity(screen).with_children(|col| {
+        // A translucent card over the bot race playing behind the menu, so the
+        // title and buttons stay readable without hiding the board.
         col.spawn((
-            Text::new("Chinese Checkers"),
-            TextFont {
-                font_size: FontSize::Px(34.0),
+            Node {
+                padding: UiRect::axes(Val::Px(34.0), Val::Px(26.0)),
+                border_radius: BorderRadius::all(Val::Px(12.0)),
+                flex_direction: FlexDirection::Column,
+                align_items: AlignItems::Center,
                 ..default()
             },
-            TextColor(Color::srgb(0.95, 0.95, 0.97)),
-        ));
-        col.spawn((
-            Text::new("the machine-checked star"),
-            TextFont {
-                font_size: FontSize::Px(14.0),
-                ..default()
-            },
-            TextColor(Color::srgb(0.6, 0.6, 0.66)),
-        ));
-
-        // A little air between the title and the choices.
-        col.spawn(Node {
-            height: Val::Px(24.0),
-            ..default()
-        });
-
-        col.spawn(Node {
-            flex_direction: FlexDirection::Column,
-            row_gap: Val::Px(12.0),
-            align_items: AlignItems::Center,
-            ..default()
-        })
+            BackgroundColor(Color::srgba(0.07, 0.07, 0.09, 0.78)),
+        ))
         .with_children(|col| {
-            // Buttons wide enough to read as the two paths, stacked so the eye
-            // picks one without scanning a row.
-            for (label, tag) in [
-                ("Multiplayer", MenuButton::Lobby),
-                ("Hotseat", MenuButton::Hotseat),
-                ("Watch two computers", MenuButton::Watch),
-            ] {
-                col.spawn((
-                    Button,
-                    Node {
-                        width: Val::Px(220.0),
-                        justify_content: JustifyContent::Center,
-                        padding: UiRect::axes(Val::Px(18.0), Val::Px(10.0)),
-                        border_radius: BorderRadius::all(Val::Px(5.0)),
-                        ..default()
-                    },
-                    BackgroundColor(IDLE),
-                    tag,
-                ))
-                .with_child((
-                    Text::new(label),
-                    TextFont {
-                        font_size: FontSize::Px(17.0),
-                        ..default()
-                    },
-                    TextColor(Color::srgb(0.9, 0.9, 0.92)),
-                ));
-            }
+            col.spawn((
+                Text::new("Chinese Checkers"),
+                TextFont {
+                    font_size: FontSize::Px(34.0),
+                    ..default()
+                },
+                TextColor(Color::srgb(0.95, 0.95, 0.97)),
+            ));
+            col.spawn((
+                Text::new("the machine-checked star"),
+                TextFont {
+                    font_size: FontSize::Px(14.0),
+                    ..default()
+                },
+                TextColor(Color::srgb(0.6, 0.6, 0.66)),
+            ));
+
+            // A little air between the title and the choices.
+            col.spawn(Node {
+                height: Val::Px(24.0),
+                ..default()
+            });
+
+            col.spawn(Node {
+                flex_direction: FlexDirection::Column,
+                row_gap: Val::Px(12.0),
+                align_items: AlignItems::Center,
+                ..default()
+            })
+            .with_children(|col| {
+                // Buttons wide enough to read as the two paths, stacked so the eye
+                // picks one without scanning a row.
+                for (label, tag) in [
+                    ("Multiplayer", MenuButton::Lobby),
+                    ("Hotseat", MenuButton::Hotseat),
+                    ("Watch 2 Bots", MenuButton::Watch),
+                ] {
+                    col.spawn((
+                        Button,
+                        Node {
+                            width: Val::Px(220.0),
+                            justify_content: JustifyContent::Center,
+                            padding: UiRect::axes(Val::Px(18.0), Val::Px(10.0)),
+                            border_radius: BorderRadius::all(Val::Px(5.0)),
+                            ..default()
+                        },
+                        BackgroundColor(IDLE),
+                        tag,
+                    ))
+                    .with_child((
+                        Text::new(label),
+                        TextFont {
+                            font_size: FontSize::Px(17.0),
+                            ..default()
+                        },
+                        TextColor(Color::srgb(0.9, 0.9, 0.92)),
+                    ));
+                }
+            });
         });
     });
 }

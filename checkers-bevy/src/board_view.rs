@@ -15,6 +15,20 @@ pub const HOLE_RADIUS: f32 = 7.0;
 /// Radius of a piece.
 pub const PIECE_RADIUS: f32 = 13.0;
 
+/// The colour used to draw a player's pieces. Shared by the in-game board and
+/// the menu's background bot race so the two can never disagree on a camp's
+/// colour.
+pub fn player_colour(player: Player) -> Color {
+    match player.index() {
+        0 => Color::srgb(0.90, 0.35, 0.30),
+        1 => Color::srgb(0.95, 0.72, 0.20),
+        2 => Color::srgb(0.45, 0.78, 0.35),
+        3 => Color::srgb(0.35, 0.72, 0.90),
+        4 => Color::srgb(0.55, 0.50, 0.90),
+        _ => Color::srgb(0.92, 0.92, 0.92),
+    }
+}
+
 /// Half-extent of the star in world units, plus room for the piece radius.
 ///
 /// The star spans x ∈ [-204, 204] and y ∈ [-236, 236] at [`HOLE_SPACING`]; the

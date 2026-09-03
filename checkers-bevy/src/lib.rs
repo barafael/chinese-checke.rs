@@ -23,6 +23,7 @@ pub mod board_style;
 pub mod board_view;
 pub mod lobby;
 pub mod menu;
+pub mod menu_bg;
 pub mod move_log;
 pub mod net;
 pub mod setup;
@@ -143,6 +144,18 @@ impl Session {
             seating,
             stats: GameStats::default(),
         }
+    }
+
+    /// Re-seat this session as the "watch two bots" two-player deal: opposite
+    /// camps, both engines. Shared by the watched demo and the menu background
+    /// so the two can never disagree on what the race is.
+    pub fn deal_two(&mut self) {
+        self.seating = Seating::Two;
+        self.game = self.seating.game();
+        self.ai_players = vec![Player::ALL[0], Player::ALL[3]];
+        self.selection = Selection::None;
+        self.outbox.clear();
+        self.stats = GameStats::default();
     }
 
     /// The player this peer controls, if any.
