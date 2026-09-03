@@ -151,6 +151,11 @@ pub enum Outcome {
     Winner(Player),
     /// All six players passed in succession, so the position is frozen.
     Draw,
+    /// The named player conceded. No chapter forces or forbids conceding —
+    /// the rules govern play once a game is underway, not the decision to
+    /// stop — so the engine offers it to the front-end instead of deriving
+    /// it from the position.
+    Resigned(Player),
 }
 
 /// A game in progress.
@@ -309,6 +314,17 @@ impl Game {
         self.turn = self.next_active();
     }
 
+    /// The named player concedes, ending the game at once. The position is
+    /// deliberately untouched — a resignation says nothing about the board.
+    pub fn resign(&mut self, p: Player) {
+        assert!(!self.is_over(), "the game is already over");
+        assert!(
+            self.players.contains(&p),
+            "player {p:?} is not seated in this game"
+        );
+        self.outcome = Some(Outcome::Resigned(p));
+    }
+
     /// Advance until the game ends or `max_plies` is exhausted.
     pub fn run<F>(&mut self, max_plies: usize, mut choose: F) -> Option<Outcome>
     where
@@ -454,6 +470,43 @@ mod variant_tests {
         }
         assert_eq!(game.position().count_of(Player::ALL[0]), PIECES_PER_PLAYER);
         assert_eq!(game.position().count_of(Player::ALL[1]), PIECES_PER_PLAYER);
+    }
+
+    /// Conceding ends the game immediately, whatever the board says — the
+    /// outcome names the player who gave up.
+    #[test]
+    fn a_resignation_ends_the_game_for_the_resigned_seat() {
+        let mut game = Game::for_players(&[Player::ALL[0], Player::ALL[3]]);
+        game.resign(Player::ALL[3]);
+        assert!(game.is_over());
+        assert_eq!(game.outcome(), Some(Outcome::Resigned(Player::ALL[3])));
+    }
+
+    /// A resigned game accepts no further move.
+    #[test]
+    #[should_panic(expected = "already over")]
+    fn a_resigned_game_takes_no_further_move() {
+        let mut game = Game::for_players(&[Player::ALL[0], Player::ALL[3]]);
+        game.resign(Player::ALL[3]);
+        let mv = game.legal_moves().first().cloned().unwrap();
+        game.play(&mv);
+    }
+
+    /// Only a seated player can resign; the vacant camps are not in the game.
+    #[test]
+    #[should_panic(expected = "not seated")]
+    fn an_unseated_player_cannot_resign() {
+        let mut game = Game::for_players(&[Player::ALL[0], Player::ALL[3]]);
+        game.resign(Player::ALL[1]);
+    }
+
+    /// A finished game cannot end again.
+    #[test]
+    #[should_panic(expected = "already over")]
+    fn a_finished_game_cannot_be_resigned() {
+        let mut game = Game::for_players(&[Player::ALL[0], Player::ALL[3]]);
+        game.resign(Player::ALL[0]);
+        game.resign(Player::ALL[3]);
     }
 
     /// Chapter 12's draw is "all players pass in succession" — over the

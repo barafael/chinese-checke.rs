@@ -151,6 +151,26 @@ mod tests {
             Some(Duration::from_secs(60))
         );
     }
+
+    /// Where one player is pinned to this peer — solo play against the
+    /// computer — that player resigns even when it is not their turn:
+    /// pressing the button mid-AI-move must not concede the engine's seat.
+    #[test]
+    fn the_pinned_player_resigns_even_off_turn() {
+        let mut session = Session::new(Seating::Two);
+        session.local_player = Some(Player::ALL[3]);
+
+        // It is player 0's turn; the pinned seat is player 3.
+        assert_eq!(session.game.turn(), Player::ALL[0]);
+
+        session.resign();
+
+        assert_eq!(
+            session.game.outcome(),
+            Some(checkers_core::rules::Outcome::Resigned(Player::ALL[3])),
+            "the pinned seat gives up, not whoever happens to be on turn"
+        );
+    }
 }
 
 /// The game plus the UI's selection state.
@@ -433,6 +453,21 @@ impl Session {
                 }
             }
         }
+    }
+
+    /// The human concedes the round. The seat that gives up is this peer's
+    /// own where one is pinned (`local_player`); in a hotseat deal, where
+    /// every seat is local, it is the seat to move. Idempotent: a finished
+    /// game cannot be resigned again.
+    pub fn resign(&mut self) {
+        if self.game.is_over() {
+            return;
+        }
+        let who = self.local_player.unwrap_or_else(|| self.game.turn());
+        self.game.resign(who);
+        self.selection = Selection::None;
+        self.message = format!("Player {} resigned", who.index());
+        crate::move_log::log(&format!("# p{} resigns", who.index()));
     }
 
     /// Commit the staged move — a single step, or a chain of hops.

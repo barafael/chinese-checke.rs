@@ -165,6 +165,7 @@ committed until you confirm, so any chain can be abandoned.
 | Click a highlighted hole | Stage a step, or take one hop of a jump |
 | Enter / Confirm button | Commit the staged turn |
 | Backspace / Cancel button | Abandon the staged turn |
+| Resign button | Concede the round (local modes; not over the network yet) |
 | U | Undo the last staged hop |
 | Escape | Clear the selection |
 | A | Let the computer play the current seat once |

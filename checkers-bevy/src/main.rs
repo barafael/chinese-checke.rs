@@ -204,6 +204,9 @@ impl Default for StatusVisible {
 enum ControlButton {
     Confirm,
     Cancel,
+    /// Concede the round. Button-only by design: a resignation is a deliberate
+    /// visit to a labelled control, not a key a stray finger finds.
+    Resign,
 }
 
 /// Distinct, roughly colour-blind-safe hues for the six players.
@@ -343,7 +346,7 @@ fn spawn_ui(mut commands: Commands) {
             ));
         });
 
-    // Turn controls, top right: Confirm then Cancel.
+    // Turn controls, top right: Confirm, Cancel, Resign.
     commands
         .spawn(Node {
             position_type: PositionType::Absolute,
@@ -356,6 +359,7 @@ fn spawn_ui(mut commands: Commands) {
             for (which, label) in [
                 (ControlButton::Confirm, "Confirm (Enter)"),
                 (ControlButton::Cancel, "Cancel (Backspace)"),
+                (ControlButton::Resign, "Resign"),
             ] {
                 row.spawn((
                     Button,
@@ -524,6 +528,7 @@ fn handle_buttons(
         match which {
             ControlButton::Confirm => session.confirm(),
             ControlButton::Cancel => session.cancel(),
+            ControlButton::Resign => session.resign(),
         }
     }
 }
@@ -899,12 +904,32 @@ fn sync_highlights(
 
 /// Dim the controls when they would do nothing, so the staged state is
 /// legible; brighten on hover, darken on press. Runs every frame so hover
-/// repaints immediately; writes only real colour changes.
+/// repaints immediately; writes only real colour changes. The resign button
+/// is additionally hidden entirely in networked games — conceding there must
+/// reach every peer over the wire, which it does not yet.
 fn sync_buttons(
     session: Res<Session>,
-    mut buttons: Query<(&Interaction, &ControlButton, &mut BackgroundColor)>,
+    net: Res<NetState>,
+    mut buttons: Query<(
+        &Interaction,
+        &ControlButton,
+        &mut BackgroundColor,
+        &mut Visibility,
+    )>,
 ) {
-    for (interaction, which, mut bg) in buttons.iter_mut() {
+    for (interaction, which, mut bg, mut vis) in buttons.iter_mut() {
+        // Resign is a local-mode control for now: a networked concession
+        // would leave the peers disagreeing about whether the game is over.
+        if *which == ControlButton::Resign {
+            let wanted = if net.seats.is_empty() {
+                Visibility::Inherited
+            } else {
+                Visibility::Hidden
+            };
+            if *vis != wanted {
+                *vis = wanted;
+            }
+        }
         // Buttons do nothing on someone else's turn — dim them entirely so the
         // controls cannot look actionable. Confirm also needs a staged move to
         // submit, Cancel needs a selection to abandon.
@@ -915,6 +940,9 @@ fn sync_buttons(
             }
             ControlButton::Cancel if active && session.selected_hole().is_some() => {
                 Color::srgb(0.45, 0.24, 0.24)
+            }
+            ControlButton::Resign if active && !session.game.is_over() => {
+                Color::srgb(0.36, 0.27, 0.22)
             }
             _ => Color::srgb(0.18, 0.18, 0.21),
         };
@@ -946,6 +974,7 @@ fn sync_turn_indicator(
 
     let (colour, label) = match session.game.outcome() {
         Some(Outcome::Winner(p)) => (player_colour(p), "Game over".into()),
+        Some(Outcome::Resigned(p)) => (player_colour(p), "Game over - resignation".into()),
         Some(Outcome::Draw) => (Color::srgb(0.6, 0.6, 0.66), "Game over - draw".into()),
         None => {
             let active = session.game.turn();
@@ -1074,7 +1103,15 @@ fn sync_game_over(
             };
             (title, player_colour(p))
         }
-        _ => ("Draw: every player is blocked.".to_string(), Color::WHITE),
+        Some(Outcome::Resigned(p)) => {
+            let title = if session.local_player() == Some(p) {
+                "You resign.".to_string()
+            } else {
+                format!("{} resigns.", player_label(&net, p))
+            };
+            (title, player_colour(p))
+        }
+        Some(Outcome::Draw) | None => ("Draw: every player is blocked.".to_string(), Color::WHITE),
     };
 
     commands
@@ -1206,6 +1243,7 @@ fn sync_status(
 
     let header = match session.game.outcome() {
         Some(Outcome::Winner(p)) => format!("Player {} wins!", p.index()),
+        Some(Outcome::Resigned(p)) => format!("Player {} resigns.", p.index()),
         Some(Outcome::Draw) => "Draw: every player is blocked.".to_string(),
         None => format!("Player {}'s turn", session.game.turn().index()),
     };
@@ -1316,6 +1354,11 @@ fn ai_take_turn(
         let line = match session.game.outcome() {
             Some(checkers_core::rules::Outcome::Winner(p)) => format!(
                 "# game over: player {} wins after {} moves",
+                p.index(),
+                session.stats.total_moves()
+            ),
+            Some(checkers_core::rules::Outcome::Resigned(p)) => format!(
+                "# game over: player {} resigned after {} moves",
                 p.index(),
                 session.stats.total_moves()
             ),
