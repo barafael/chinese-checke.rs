@@ -12,7 +12,7 @@ use checkers_ai::Ai;
 use checkers_core::geometry::Coord;
 use checkers_core::position::{Move, MoveKind};
 use checkers_core::turn::JumpTurn;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// Minimum wall-clock spacing between two visible actions (a move, a commit,
 /// or a single hop). The engine's own thinking time comes on top of this.
@@ -42,7 +42,7 @@ pub enum Action {
 /// shown* is a driver concern, and the session is rebuilt on every deal.
 #[derive(Resource)]
 pub struct AiPace {
-    next_allowed: Option<Instant>,
+    next_allowed: Option<Duration>,
     /// Remaining hops of the staged jump, excluding the hop just taken. Empty
     /// while no jump is staged.
     route: Vec<Coord>,
@@ -95,11 +95,11 @@ impl AiPace {
         self.total_plies = 0;
     }
 
-    fn ready(&self, now: Instant) -> bool {
+    fn ready(&self, now: Duration) -> bool {
         self.next_allowed.is_none_or(|t| now >= t)
     }
 
-    fn schedule(&mut self, now: Instant) {
+    fn schedule(&mut self, now: Duration) {
         self.next_allowed = Some(now + MOVE_INTERVAL);
     }
 
@@ -158,7 +158,7 @@ impl AiPace {
     /// Advance the demo by one frame. `now` is injected so tests control the
     /// clock; every returned action is spaced at least [`MOVE_INTERVAL`]
     /// after the previous one.
-    pub fn advance(&mut self, session: &mut Session, ai: &mut Ai, now: Instant) -> Action {
+    pub fn advance(&mut self, session: &mut Session, ai: &mut Ai, now: Duration) -> Action {
         if session.game.is_over() {
             return Action::Wait;
         }

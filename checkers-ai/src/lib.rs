@@ -2,7 +2,9 @@
 //!
 //! Bevy-independent by design: the engine speaks [`checkers_core::rules::Game`]
 //! and [`checkers_core::position::Move`] and nothing else, so it can drive a
-//! Bevy system, a CLI, or a test the same way.
+//! Bevy system, a CLI, or a test the same way. The one nod to the web is
+//! `bevy_platform::time::Instant` for the search's wall-clock budget (see
+//! `search`), which works on `wasm32-unknown-unknown` where `std`'s panics.
 //!
 //! # What the research says the game is
 //!

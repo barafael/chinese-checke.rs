@@ -62,6 +62,10 @@ pub enum Selection {
     /// A piece is selected but no jump has begun, so both steps and first hops
     /// are available.
     Piece { origin: Coord },
+    /// A single move (a step) has been scheduled and awaits confirmation. Holds
+    /// the move plus a scratch preview so the board shows the piece at its
+    /// destination before the player commits.
+    Pend { mv: GameMove, preview: Position },
     /// A jump turn is under way and awaiting confirmation.
     Jumping { turn: JumpTurn },
 }
@@ -86,21 +90,12 @@ pub struct GameStats {
     pub longest_jump: u32,
     /// Who flew [`GameStats::longest_jump`].
     pub longest_jump_by: u8,
-    /// Wall clock at the first committed move.
-    pub started_at: Option<std::time::Instant>,
-    /// Wall clock when the game ended.
-    pub finished_at: Option<std::time::Instant>,
 }
 
 impl GameStats {
     /// Every player's committed moves.
     pub fn total_moves(&self) -> u32 {
         self.moves.iter().sum()
-    }
-
-    /// How long the round took, approximately: first move to game end.
-    pub fn duration(&self) -> Option<std::time::Duration> {
-        Some(self.finished_at? - self.started_at?)
     }
 }
 
@@ -160,9 +155,6 @@ impl Session {
     pub(crate) fn commit(&mut self, mv: &GameMove) {
         let mover = self.game.turn();
         self.stats.moves[mover.index() as usize] += 1;
-        if self.stats.started_at.is_none() {
-            self.stats.started_at = Some(std::time::Instant::now());
-        }
 
         if mv.kind == GameMoveKind::Jump {
             self.stats.jumps[mover.index() as usize] += 1;
@@ -176,9 +168,6 @@ impl Session {
         }
 
         self.game.play(mv);
-        if self.game.is_over() {
-            self.stats.finished_at = Some(std::time::Instant::now());
-        }
     }
 
     /// Hops in a jump move, and how many crossed another player's piece.
@@ -222,6 +211,7 @@ impl Session {
     pub fn display_position(&self) -> &Position {
         match &self.selection {
             Selection::Jumping { turn } => turn.preview(),
+            Selection::Pend { preview, .. } => preview,
             _ => self.game.position(),
         }
     }
@@ -231,6 +221,7 @@ impl Session {
         match &self.selection {
             Selection::None => None,
             Selection::Piece { origin } => Some(*origin),
+            Selection::Pend { mv, .. } => Some(mv.origin),
             Selection::Jumping { turn } => Some(turn.current()),
         }
     }
@@ -242,6 +233,9 @@ impl Session {
     pub fn highlights(&self) -> Vec<Coord> {
         match &self.selection {
             Selection::None => Vec::new(),
+            // A staged step has no further options until it is confirmed or
+            // cancelled; picking another destination first requires cancelling.
+            Selection::Pend { .. } => Vec::new(),
             Selection::Piece { origin } => {
                 // One piece's own steps and first hops. Filtering `legal_moves`
                 // would compute every other piece's jump closure and throw it
@@ -263,6 +257,7 @@ impl Session {
 
     pub fn can_confirm(&self) -> bool {
         match &self.selection {
+            Selection::Pend { .. } => true,
             Selection::Jumping { turn } => turn.can_commit(),
             _ => false,
         }
@@ -270,7 +265,7 @@ impl Session {
 
     /// May this peer act right now? Solo play (`None`) always; otherwise only
     /// on its own turn. The rules re-check on the receiving side.
-    fn may_act(&self) -> bool {
+    pub fn may_act(&self) -> bool {
         match self.local_player {
             None => !self.spectating,
             Some(p) => p == self.game.turn(),
@@ -317,10 +312,15 @@ impl Session {
         match &mut self.selection {
             Selection::None => {}
 
+            // A staged step offers no further destinations; guard above rejects
+            // the click already, this arm is just for exhaustiveness.
+            Selection::Pend { .. } => {}
+
             Selection::Piece { origin } => {
                 let origin = *origin;
 
-                // A step commits at once; a first hop begins a staged turn.
+                // A step is staged, not played, so the player must confirm it —
+                // the same guardrail as a jump. A first hop begins a staged turn.
                 let step = checkers_core::rules::legal_moves(self.game.position(), player)
                     .into_iter()
                     .find(|m| {
@@ -328,15 +328,22 @@ impl Session {
                     });
 
                 if let Some(mv) = step {
-                    self.outbox.push(mv);
-                    self.clear_selection();
+                    let dest = mv.destination;
+
+                    // Show the piece at its destination before the player
+                    // commits — same "it has moved" preview a staged jump shows.
+                    let mut preview = self.game.position().clone();
+                    preview.set(origin, None);
+                    preview.set(dest, Some(player));
+
+                    self.selection = Selection::Pend { mv, preview };
                     self.message = format!(
-                        "Player {} stepped ({},{}) -> ({},{})",
+                        "Player {} steps ({},{}) -> ({},{}) - press Enter to confirm",
                         player.index(),
                         origin.q,
                         origin.r,
-                        hole.q,
-                        hole.r
+                        dest.q,
+                        dest.r
                     );
                     return;
                 }
@@ -362,32 +369,48 @@ impl Session {
         }
     }
 
-    /// Commit the staged jump turn.
+    /// Commit the staged move — a single step, or a chain of hops.
     pub fn confirm(&mut self) {
-        let Selection::Jumping { turn } = &self.selection else {
-            return;
-        };
-        let mv = match turn.to_move() {
-            Ok(mv) => mv,
-            Err(e) => {
-                // Reachable: the piece hopped back to where it began.
-                self.message = format!("Cannot confirm - {e}");
-                return;
-            }
-        };
-
         let player = self.game.turn();
-        let hops = turn.hops();
-        let dest = mv.destination;
+        match &self.selection {
+            Selection::Pend { mv, .. } => {
+                let mv = mv.clone();
+                let (from, to) = (mv.origin, mv.destination);
+                self.outbox.push(mv);
+                self.clear_selection();
+                self.message = format!(
+                    "Player {} stepped ({},{}) -> ({},{})",
+                    player.index(),
+                    from.q,
+                    from.r,
+                    to.q,
+                    to.r
+                );
+            }
+            Selection::Jumping { turn } => {
+                let mv = match turn.to_move() {
+                    Ok(mv) => mv,
+                    Err(e) => {
+                        // Reachable: the piece hopped back to where it began.
+                        self.message = format!("Cannot confirm - {e}");
+                        return;
+                    }
+                };
 
-        self.outbox.push(mv);
-        self.clear_selection();
-        self.message = format!(
-            "Player {} jumped {hops} hop(s) to ({},{})",
-            player.index(),
-            dest.q,
-            dest.r
-        );
+                let hops = turn.hops();
+                let dest = mv.destination;
+
+                self.outbox.push(mv);
+                self.clear_selection();
+                self.message = format!(
+                    "Player {} jumped {hops} hop(s) to ({},{})",
+                    player.index(),
+                    dest.q,
+                    dest.r
+                );
+            }
+            _ => {}
+        }
     }
 
     /// Abandon the staged turn without touching the game.

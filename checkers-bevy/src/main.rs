@@ -28,7 +28,6 @@ use checkers_core::law::{LAWS, verify_all};
 use checkers_core::position::{Player, Position};
 use checkers_core::rules::Outcome;
 use checkers_net::NetState;
-use std::time::Instant;
 
 fn main() {
     App::new()
@@ -510,6 +509,11 @@ fn handle_buttons(
         if *interaction != Interaction::Pressed {
             continue;
         }
+        // On another player's move the controls are inert — the click would
+        // otherwise confirm or cancel a selection this peer cannot touch.
+        if !session.may_act() {
+            continue;
+        }
         match which {
             ControlButton::Confirm => session.confirm(),
             ControlButton::Cancel => session.cancel(),
@@ -587,13 +591,17 @@ fn handle_clicks(
 }
 
 fn handle_keys(keys: Res<ButtonInput<KeyCode>>, mut session: ResMut<Session>) {
-    if keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::NumpadEnter) {
+    if (keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::NumpadEnter))
+        && session.may_act()
+    {
+        // Someone else's turn: confirmation is inert so this peer cannot submit a
+        // move on another player's behalf.
         session.confirm();
     }
-    if keys.just_pressed(KeyCode::Backspace) {
+    if keys.just_pressed(KeyCode::Backspace) && session.may_act() {
         session.cancel();
     }
-    if keys.just_pressed(KeyCode::KeyU) {
+    if keys.just_pressed(KeyCode::KeyU) && session.may_act() {
         session.undo_hop();
     }
     if keys.just_pressed(KeyCode::Escape) {
@@ -883,9 +891,15 @@ fn sync_buttons(
     mut buttons: Query<(&Interaction, &ControlButton, &mut BackgroundColor)>,
 ) {
     for (interaction, which, mut bg) in buttons.iter_mut() {
+        // Buttons do nothing on someone else's turn — dim them entirely so the
+        // controls cannot look actionable. Confirm also needs a staged move to
+        // submit, Cancel needs a selection to abandon.
+        let active = session.may_act();
         let base = match which {
-            ControlButton::Confirm if session.can_confirm() => Color::srgb(0.20, 0.45, 0.28),
-            ControlButton::Cancel if session.selected_hole().is_some() => {
+            ControlButton::Confirm if active && session.can_confirm() => {
+                Color::srgb(0.20, 0.45, 0.28)
+            }
+            ControlButton::Cancel if active && session.selected_hole().is_some() => {
                 Color::srgb(0.45, 0.24, 0.24)
             }
             _ => Color::srgb(0.18, 0.18, 0.21),
@@ -1141,16 +1155,6 @@ fn sync_game_over(
                         TextColor(Color::srgb(0.72, 0.72, 0.78)),
                     ));
                 }
-                if let Some(d) = session.stats.duration() {
-                    panel.spawn((
-                        Text::new(format!("Round lasted about {}", format_duration(d))),
-                        TextFont {
-                            font_size: FontSize::Px(14.0),
-                            ..default()
-                        },
-                        TextColor(Color::srgb(0.72, 0.72, 0.78)),
-                    ));
-                }
                 panel.spawn((
                     Text::new("Press R for a new game"),
                     TextFont {
@@ -1161,16 +1165,6 @@ fn sync_game_over(
                 ));
             });
         });
-}
-
-/// Approximate human format for a round's duration.
-fn format_duration(d: std::time::Duration) -> String {
-    let s = d.as_secs();
-    if s >= 60 {
-        format!("{}m {:02}s", s / 60, s % 60)
-    } else {
-        format!("{s}s")
-    }
 }
 
 fn sync_status(
@@ -1201,6 +1195,10 @@ fn sync_status(
             };
             format!("  |  staging {} hop(s){why}", turn.hops())
         }
+        Selection::Pend { mv, .. } => format!(
+            "  |  staging a step to ({},{})",
+            mv.destination.q, mv.destination.r
+        ),
         _ => String::new(),
     };
 
@@ -1237,10 +1235,12 @@ fn ai_take_turn(
     mut session: ResMut<Session>,
     mut engine: ResMut<AiEngine>,
     mut pace: ResMut<AiPace>,
+    time: Res<Time>,
 ) {
     // The driver owns the staged-jump selection while its hops fly, so the
-    // human-selection gate lives inside it.
-    let now = Instant::now();
+    // human-selection gate lives inside it. The pacing clock is Bevy's, which
+    // is available on wasm where std's wall clock is not.
+    let now = time.elapsed();
     let move_no = session.stats.total_moves() + 1;
     match pace.advance(&mut session, &mut engine.0, now) {
         Action::Wait => {}

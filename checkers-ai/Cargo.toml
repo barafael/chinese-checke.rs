@@ -6,6 +6,10 @@ description = "Search engine and evaluation for the machine-checked Chinese Chec
 
 [dependencies]
 checkers-core.workspace = true
+# Only `bevy_platform::time::Instant` is used, not Bevy itself: it supplies a
+# working wall clock on `wasm32-unknown-unknown` (via `performance.now()`)
+# where `std::time::Instant` panics, and mirrors `std::time::Instant` elsewhere.
+bevy_platform = "0.19"
 
 [lints]
 workspace = true

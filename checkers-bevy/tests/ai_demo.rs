@@ -13,7 +13,7 @@ use checkers_bevy::setup::Seating;
 use checkers_core::audit::audit_position;
 use checkers_core::position::Player;
 use checkers_core::rules::Outcome;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 #[test]
 fn a_paced_demo_race_is_followable_and_legal() {
@@ -25,10 +25,10 @@ fn a_paced_demo_race_is_followable_and_legal() {
     });
     let mut pace = AiPace::default();
 
-    let mut now = Instant::now();
+    let mut now = Duration::ZERO;
     let mut moves = 0;
     let mut marked = false;
-    let mut last_action: Option<Instant> = None;
+    let mut last_action: Option<Duration> = None;
     let mut log: Vec<String> = Vec::new();
 
     let spacing = MOVE_INTERVAL - Duration::from_millis(1);

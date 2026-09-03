@@ -10,6 +10,7 @@
 //! calls is sound, and that the distinctions the UI draws — step vs. hop, commit
 //! vs. abandon — match the rules.
 
+use checkers_bevy::{Selection, Session};
 use checkers_core::audit::audit_position;
 use checkers_core::geometry::Coord;
 use checkers_core::position::{MoveKind, Player, Position};
@@ -184,4 +185,92 @@ fn step_destinations_matches_legal_moves() {
         actual.sort();
         assert_eq!(actual, expected, "player {}", player.index());
     }
+}
+
+/// A single step must be staged, not played: tapping an adjacent hole selects
+/// the move, and only a later confirm commits it to the outbox. This mirrors
+/// the jump contract — nothing moves without an explicit Enter.
+#[test]
+fn a_step_is_staged_until_confirmed() {
+    let mut session = Session::default();
+    let player = session.game.turn();
+
+    // Find a piece of the current player with at least one step destination
+    // (adjacent hole) so the interaction is guaranteed to take the step path.
+    let (origin, dest) = {
+        let mut found = None;
+        for c in session.game.position().pieces_of(player) {
+            if let Some(d) = step_destinations(session.game.position(), c).first() {
+                found = Some((c, *d));
+                break;
+            }
+        }
+        found.expect("the initial board offers steps")
+    };
+
+    session.select(origin);
+    session.activate(dest);
+
+    assert!(
+        session.outbox.is_empty(),
+        "a staged step must not auto-commit to the outbox"
+    );
+    assert!(
+        matches!(&session.selection, Selection::Pend { mv, .. } if mv.destination == dest),
+        "the step should be held as a pending staged move"
+    );
+    // The moved state must be visible *before* confirm: the piece has left the
+    // origin and sits on the destination in the displayed preview, while the
+    // underlying game is still untouched.
+    assert!(
+        session.display_position().occupant(origin).is_none(),
+        "the origin should read empty in the staged preview"
+    );
+    assert_eq!(
+        session.display_position().occupant(dest),
+        Some(player),
+        "the destination should show the piece in the staged preview"
+    );
+    // The real game position is untouched until the move is confirmed.
+    assert_eq!(
+        session.game.position().occupant(origin),
+        Some(player),
+        "the game itself must still have the piece at the origin"
+    );
+    assert!(session.game.position().occupant(dest).is_none());
+    session.confirm();
+    assert_eq!(session.outbox.len(), 1, "confirming should submit the step");
+    assert_eq!(session.outbox[0].origin, origin);
+    assert_eq!(session.outbox[0].destination, dest);
+    assert_eq!(session.outbox[0].kind, MoveKind::Step);
+    assert!(
+        matches!(session.selection, Selection::None),
+        "after confirm the selection clears"
+    );
+}
+
+/// The mirror image: tapping a *hop* destination begins a staged jump turn, and
+/// it must not be committed until confirm either. Guards the step/hoop split.
+#[test]
+fn a_hop_is_mutually_exclusive_with_a_staged_step() {
+    let mut session = Session::default();
+    let player = session.game.turn();
+
+    let origin = session
+        .game
+        .position()
+        .pieces_of(player)
+        .into_iter()
+        .find(|c| !single_hop_destinations(session.game.position(), *c).is_empty())
+        .expect("the initial position has jumps");
+    let hopped = single_hop_destinations(session.game.position(), origin)[0];
+
+    session.select(origin);
+    session.activate(hopped);
+
+    assert!(
+        matches!(&session.selection, Selection::Jumping { .. }),
+        "a hop must begin a staged jump, not a step"
+    );
+    assert!(session.outbox.is_empty(), "a hop must not auto-commit");
 }

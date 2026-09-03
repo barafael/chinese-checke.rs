@@ -23,7 +23,13 @@ use crate::engine::{RawMove, State};
 use crate::tables::TABLES;
 use crate::{AiConfig, AiStats};
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+// `Instant` is deliberately taken from Bevy's platform crate rather than std:
+// on `wasm32-unknown-unknown` std's wall clock panics, while Bevy's selects a
+// `performance.now()`-backed clock on the web and mirrors `std::time::Instant`
+// everywhere else. Neither the engine nor its config mention Bevy otherwise.
+use bevy_platform::time::Instant;
 
 /// A win is worth more than any evaluation; winning sooner ranks higher.
 const WIN: i32 = 100_000;
