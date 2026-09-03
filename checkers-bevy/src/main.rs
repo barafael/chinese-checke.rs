@@ -9,6 +9,7 @@
 //! ([`verify_all`]), and the linear position audit after every move
 //! ([`audit`]).
 
+use bevy::camera::ScalingMode;
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 // Not in the prelude, unlike the rest of the window API.
@@ -20,7 +21,7 @@ use checkers_bevy::board_style::{
     self, AmlahCamera, BoardStyle, BoardVisual, ClassicCamera, OrbitCamera,
 };
 use checkers_bevy::board_view::{
-    BOARD_HALF_EXTENT, HOLE_RADIUS, HOLE_SPACING, PIECE_RADIUS, camp_triangles, coord_to_world,
+    BOARD_FRAME, HOLE_RADIUS, HOLE_SPACING, PIECE_RADIUS, camp_triangles, coord_to_world,
     hole_edges, hole_points, world_to_coord,
 };
 use checkers_bevy::menu::AiStrength;
@@ -89,7 +90,7 @@ fn main() {
         .add_systems(Startup, setup)
         // Not state-scoped: the lobby is the first thing shown, and it is the
         // screen whose buttons the old size hid.
-        .add_systems(Update, size_to_monitor)
+        .add_systems(Update, (size_to_monitor, scale_ui_to_window))
         .add_systems(
             OnEnter(AppState::InGame),
             // Only the UI is spawned here. The board visuals are spawned by
@@ -125,8 +126,11 @@ fn main() {
                 apply_style,
                 toggle_status,
                 stamp_session_clock,
-                fit_camera_to_window,
                 board_style::orbit_camera,
+                // The zoom the player chose stays proportional when the window
+                // changes shape: scale the radius by the ratio of fit
+                // distances, so the board keeps its framing at any size.
+                board_style::fit_orbit_to_window,
                 // Drains the outbox and applies only host-sequenced moves, so
                 // it must run after input and before the view syncs.
                 // The computer plays through the same outbox as a human: one
@@ -281,22 +285,44 @@ fn setup(mut commands: Commands) {
     // and again by the display scale factor. The screenshot showed about a tenth
     // of the board, with the UI text blown up to match.
     //
-    // `WindowSize` maps one world unit to one pixel, which is what
-    // `HOLE_SPACING = 34` was chosen against. `fit_camera_to_window` handles the
-    // only case this leaves open: a window too small for the board.
+    // `WindowSize` mapped one world unit to one pixel, which is what
+    // `HOLE_SPACING = 34` was chosen against. It has one flaw: the board's
+    // on-screen size was then fixed in pixels, tiny on a large monitor and
+    // cropped in a small window. `fit_projection` replaces that: the camera
+    // frames the board plus breathing room, so the board fills the window at
+    // any size and any shape.
     //
     // Marked as the classic style's camera: `apply_style` despawns and
     // respawns it if the player ever switches visualizations. It must carry
     // `BoardVisual` for that, and the lobby needs a camera before the game
     // state exists, which is why `setup` spawns it rather than leaving it to
     // the style system.
-    commands.spawn((Camera2d, ClassicCamera, BoardVisual));
+    commands.spawn((Camera2d, fit_projection(), ClassicCamera, BoardVisual));
 
     // The full law registry is worth its cost once, at startup.
     if let Err(violation) = verify_all() {
         panic!("the specification does not hold: {violation}");
     }
     audit(&Position::initial(), Seating::Six);
+}
+
+/// The classic camera's framing: at least [`BOARD_FRAME`] world units visible,
+/// keeping aspect ratio.
+///
+/// `AutoMin` guarantees the board always fits entirely — window too small and
+/// the camera zooms out, window large and it zooms in until the frame is full —
+/// so the board's on-screen size follows the window instead of being pinned in
+/// pixels. The earlier `AutoMin` attempt that the `WindowSize` comment warns
+/// about was replaced by this one constant framing; the magnified-text symptom
+/// it describes came from pinning a *fixed* size, not from fitting a minimum.
+fn fit_projection() -> Projection {
+    Projection::Orthographic(OrthographicProjection {
+        scaling_mode: ScalingMode::AutoMin {
+            min_width: BOARD_FRAME.x,
+            min_height: BOARD_FRAME.y,
+        },
+        ..OrthographicProjection::default_2d()
+    })
 }
 
 /// Spawn the in-game UI: status panel and turn controls. Not marked
@@ -420,7 +446,7 @@ fn apply_style(
 
     match *style {
         BoardStyle::Classic => {
-            commands.spawn((Camera2d, ClassicCamera, BoardVisual));
+            commands.spawn((Camera2d, fit_projection(), ClassicCamera, BoardVisual));
             spawn_classic_board(&mut commands, &mut meshes, &mut materials);
         }
         BoardStyle::Amlah => {
@@ -646,27 +672,22 @@ fn stamp_session_clock(mut session: ResMut<Session>, time: Res<Time>) {
     session.stats.note_started(time.elapsed());
 }
 
-/// Zoom out when the window is too small to show the whole board. Never zooms
-/// in. Classic style only: the amlah camera always frames the whole board.
-fn fit_camera_to_window(
-    windows: Query<&Window, Changed<Window>>,
-    mut projections: Query<&mut Projection, With<Camera2d>>,
-) {
+/// Scale the interface with the window, so menus, fields, and the status panel
+/// use the available space rather than being pinned to the 900x700 window the
+/// widgets were laid out against. Tiny windows shrink the text but keep it
+/// legible; large monitors grow everything so the UI does not huddle in a
+/// corner of an otherwise empty screen.
+///
+/// One resource moves the whole interface: `UiScale` multiplies every fixed
+/// `px` value, and Bevy rasterises text at the scaled size, so it stays crisp.
+/// Bounds are a taste judgement — below the floor the layout would collapse,
+/// above the ceiling a full-screen lobby reads like a billboard.
+fn scale_ui_to_window(windows: Query<&Window, Changed<Window>>, mut scale: ResMut<UiScale>) {
     let Ok(window) = windows.single() else {
         return;
     };
-    let Ok(mut projection) = projections.single_mut() else {
-        return;
-    };
-    let Projection::Orthographic(ortho) = &mut *projection else {
-        return;
-    };
-
-    let needed = BOARD_HALF_EXTENT * 2.0;
-    let available = Vec2::new(window.width(), window.height());
-    // `scale` divides: >1 shows more world per pixel, i.e. zooms out.
-    let shortfall = (needed / available).max_element();
-    ortho.scale = shortfall.max(1.0);
+    let factor = (window.width() / 900.0).min(window.height() / 700.0);
+    scale.0 = factor.clamp(0.65, 1.5);
 }
 
 fn sync_status_visibility(

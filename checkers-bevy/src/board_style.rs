@@ -164,6 +164,71 @@ pub fn orbit_camera(
     transform.look_at(Vec3::ZERO, Vec3::Y);
 }
 
+// --- Viewport fitting -------------------------------------------------------
+
+/// How much room the framed board keeps off the screen edge, in both styles.
+pub const FIT_MARGIN: f32 = 1.12;
+
+/// The camera distance at which the framed board exactly fills the viewport.
+///
+/// Worst case is the top-down view: the screen's vertical axis then spans the
+/// board's full depth, its horizontal axis the full width divided by the
+/// aspect ratio. Oblique angles only foreshorten the depth, so fitting the
+/// top-down view fits every pitch. `fov_y` is the camera's vertical field of
+/// view, `aspect` the viewport's width over height — both live values, since
+/// the window decides the framing and the framing decides the distance.
+pub fn orbit_fit_radius(half_extent: Vec2, aspect: f32, fov_y: f32, margin: f32) -> f32 {
+    let half = half_extent * margin;
+    // The world height that must be visible for both axes to fit.
+    let needed_height = half.y.max(half.x / aspect);
+    // Visible height at distance `r` is `2 r tan(fov/2)`.
+    needed_height / (fov_y / 2.0).tan()
+}
+
+/// Keep the 3D board framed as the window changes size or shape.
+///
+/// A perspective camera cannot be auto-fitted the way an orthographic one
+/// can, so instead the system *rescales the orbit* by the ratio of fit
+/// distances when the aspect ratio changes: the player's chosen zoom — how
+/// tightly the board is framed — survives a window resize intact, and the
+/// board's on-screen coverage follows the window rather than drifting off it.
+/// Pure size changes need nothing here: with a fixed field of view, coverage
+/// already follows the window.
+///
+/// Classic (2D) has no [`AmlahCamera`]; the query is empty and this is a no-op.
+pub fn fit_orbit_to_window(
+    windows: Query<&Window, Changed<Window>>,
+    cameras: Query<&Projection, With<AmlahCamera>>,
+    mut orbit: ResMut<OrbitCamera>,
+    mut prev_aspect: Local<Option<f32>>,
+) {
+    let Ok(window) = windows.single() else {
+        return;
+    };
+    // `window.height()` is never zero for a real window, but resize can
+    // momentarily report degenerate sizes; the floor keeps the ratio sane.
+    let aspect = (window.width() / window.height()).max(0.2);
+    let Ok(Projection::Perspective(camera)) = cameras.single() else {
+        return;
+    };
+
+    let half_extent = crate::board_view::BOARD_HALF_EXTENT * crate::board_amlah::SCALE;
+    let fit = |aspect: f32| orbit_fit_radius(half_extent, aspect, camera.fov, FIT_MARGIN);
+
+    let Some(prev) = *prev_aspect else {
+        // First frame: adopt the window as-is, no correction.
+        *prev_aspect = Some(aspect);
+        return;
+    };
+    if (prev - aspect).abs() < 1e-3 {
+        return;
+    }
+
+    orbit.radius = (orbit.radius * fit(aspect) / fit(prev))
+        .clamp(ORBIT_RADIUS_MIN, ORBIT_RADIUS_MAX);
+    *prev_aspect = Some(aspect);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -210,5 +275,45 @@ mod tests {
         // origin, which is the one pose `look_at(..., Vec3::Y)` cannot take.
         let horiz = Vec2::new(high.eye().x, high.eye().z).length();
         assert!(horiz > 0.001, "eye must not sit on the vertical axis");
+    }
+
+    /// At a square viewport the board's depth (the larger half-extent) drives
+    /// the fit, and the geometry checks out against the pinhole formula.
+    #[test]
+    fn fit_radius_matches_the_pinhole_geometry() {
+        let half = Vec2::new(3.1, 3.55);
+        let fov = std::f32::consts::FRAC_PI_4; // 45 degrees
+        let r = orbit_fit_radius(half, 1.0, fov, 1.0);
+        assert!((r - 3.55 / (fov / 2.0).tan()).abs() < 1e-4);
+    }
+
+    /// Extra width is free: once the depth drives the fit, a wider window
+    /// needs no more distance. A narrower one does — the width divided by the
+    /// aspect takes over — and a wider field of view needs less.
+    #[test]
+    fn fit_radius_tracks_the_aspect_ratio() {
+        let half = Vec2::new(3.1, 3.55);
+        let fov = std::f32::consts::FRAC_PI_4;
+        let square = orbit_fit_radius(half, 1.0, fov, 1.0);
+        let landscape = orbit_fit_radius(half, 2.0, fov, 1.0);
+        let portrait = orbit_fit_radius(half, 0.5, fov, 1.0);
+        let narrow = orbit_fit_radius(half, 0.25, fov, 1.0);
+        let wide_fov = orbit_fit_radius(half, 1.0, fov * 2.0, 1.0);
+
+        assert!((landscape - square).abs() < 1e-4, "width fits freely at 2:1");
+        assert!(portrait > square, "portrait must back the camera up");
+        assert!(narrow > portrait, "narrower still needs more distance");
+        assert!(wide_fov < square, "a wider field of view needs less distance");
+    }
+
+    /// The margin is a plain multiplier, so a framed board keeps it off every
+    /// edge at any aspect.
+    #[test]
+    fn fit_radius_applies_the_margin_evenly() {
+        let half = Vec2::new(3.1, 3.55);
+        let fov = std::f32::consts::FRAC_PI_4;
+        let bare = orbit_fit_radius(half, 1.0, fov, 1.0);
+        let framed = orbit_fit_radius(half, 1.0, fov, FIT_MARGIN);
+        assert!((framed / bare - FIT_MARGIN).abs() < 1e-4);
     }
 }

@@ -37,6 +37,17 @@ pub fn player_colour(player: Player) -> Color {
 /// than derived by hand — see `the_board_fits_within_its_half_extent`.
 pub const BOARD_HALF_EXTENT: Vec2 = Vec2::new(204.0 + PIECE_RADIUS, 236.0 + PIECE_RADIUS);
 
+/// The whole board plus breathing room: what a camera should frame.
+///
+/// Cameras that fit the window (`ScalingMode::AutoMin`) guarantee at least
+/// this many world units are visible, so the star fills the window up to a
+/// tasteful margin without ever touching its edge, and its on-screen size
+/// follows the window size.
+pub const BOARD_FRAME: Vec2 = Vec2::new(
+    BOARD_HALF_EXTENT.x * 2.0 * 1.12,
+    BOARD_HALF_EXTENT.y * 2.0 * 1.12,
+);
+
 /// Axial to screen, using the pointy-top convention.
 ///
 /// $x = s\,(q + r/2)$ and $y = -\tfrac{\sqrt{3}}{2} s\, r$ for hole spacing
