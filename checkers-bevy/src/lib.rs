@@ -17,11 +17,13 @@
 //! styles switch mid-game (`V`) without touching play. Two styles: `Classic`
 //! (flat 2D) and `Amlah` ([`board_amlah`], 3D).
 
+pub mod ai;
 pub mod board_amlah;
 pub mod board_style;
 pub mod board_view;
 pub mod lobby;
 pub mod menu;
+pub mod move_log;
 pub mod net;
 pub mod setup;
 pub mod web;

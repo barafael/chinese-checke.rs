@@ -14,6 +14,7 @@ use bevy::prelude::*;
 // Not in the prelude, unlike the rest of the window API.
 use bevy::window::{Monitor, PrimaryMonitor};
 use checkers_ai::{Ai, AiConfig};
+use checkers_bevy::ai::{Action, AiPace};
 use checkers_bevy::board_amlah;
 use checkers_bevy::board_style::{self, AmlahCamera, BoardStyle, BoardVisual, ClassicCamera};
 use checkers_bevy::board_view::{
@@ -27,6 +28,7 @@ use checkers_core::law::{LAWS, verify_all};
 use checkers_core::position::{Player, Position};
 use checkers_core::rules::Outcome;
 use checkers_net::NetState;
+use std::time::Instant;
 
 fn main() {
     App::new()
@@ -72,6 +74,7 @@ fn main() {
         .init_resource::<BoardStyle>()
         .init_state::<AppState>()
         .init_resource::<AiEngine>()
+        .init_resource::<AiPace>()
         .add_plugins(lobby::plugin)
         .add_plugins(menu::plugin)
         .add_systems(Startup, setup)
@@ -84,7 +87,10 @@ fn main() {
             // `apply_style`, so entering the game and switching styles go
             // through one code path.
             (
-                |mut engine: ResMut<AiEngine>| engine.0.forget(),
+                |mut engine: ResMut<AiEngine>, mut pace: ResMut<AiPace>| {
+                    engine.0.forget();
+                    pace.reset();
+                },
                 lobby::apply_seats,
                 spawn_ui,
             )
@@ -1227,25 +1233,73 @@ impl Default for AiEngine {
 /// outbox like any human's, so multiplayer sequencing applies to it verbatim.
 /// The call is synchronous and thinks for the configured budget, so the frame
 /// it moves in takes as long as the engine thinks.
-fn ai_take_turn(mut session: ResMut<Session>, mut engine: ResMut<AiEngine>) {
-    // Never interject while a human is mid-selection.
-    if session.game.is_over() || session.is_jumping() || session.selected_hole().is_some() {
-        return;
+fn ai_take_turn(
+    mut session: ResMut<Session>,
+    mut engine: ResMut<AiEngine>,
+    mut pace: ResMut<AiPace>,
+) {
+    // The driver owns the staged-jump selection while its hops fly, so the
+    // human-selection gate lives inside it.
+    let now = Instant::now();
+    let move_no = session.stats.total_moves() + 1;
+    match pace.advance(&mut session, &mut engine.0, now) {
+        Action::Wait => {}
+        Action::Hop(hole) => {
+            session.message = format!(
+                "Player {} hops to ({},{})",
+                session.game.turn().index(),
+                hole.q,
+                hole.r
+            );
+        }
+        Action::Commit(mv) | Action::Play(mv) => {
+            let seat = session.game.turn().index();
+            let line = format!(
+                "{}. p{} {}",
+                move_no,
+                seat,
+                checkers_bevy::ai::describe(&mv)
+            );
+            checkers_bevy::move_log::log(&line);
+            session.message = format!(
+                "Player {} (computer): {}",
+                seat,
+                checkers_bevy::ai::describe(&mv)
+            );
+            session.outbox.push(mv);
+        }
+        Action::Pass => {
+            let seat = session.game.turn().index();
+            checkers_bevy::move_log::log(&format!("{}. p{} passes", move_no, seat));
+            session.game.pass();
+        }
+        // A headless stall neither side can resolve: log it honestly and stop
+        // advancing — the log is the whole point of watching the race.
+        Action::Abandon(reason) => {
+            checkers_bevy::move_log::log(&format!(
+                "# game abandoned: {reason} after {} moves",
+                session.stats.total_moves()
+            ));
+            session.message = "Game abandoned: mutual deadlock".to_string();
+            pace.result_logged = true;
+        }
     }
-    let seat = session.game.turn();
-    if !session.ai_players.contains(&seat) || !session.outbox.is_empty() {
-        return;
-    }
-    if let Some(mv) = engine.0.choose_move(&session.game) {
-        session.message = format!(
-            "Player {} (computer) plays ({},{}) -> ({},{})",
-            seat.index(),
-            mv.origin.q,
-            mv.origin.r,
-            mv.destination.q,
-            mv.destination.r
-        );
-        session.outbox.push(mv);
+
+    // The end-of-game line, exactly once.
+    if session.game.is_over() && !pace.result_logged {
+        pace.result_logged = true;
+        let line = match session.game.outcome() {
+            Some(checkers_core::rules::Outcome::Winner(p)) => format!(
+                "# game over: player {} wins after {} moves",
+                p.index(),
+                session.stats.total_moves()
+            ),
+            _ => format!(
+                "# game over: draw after {} moves",
+                session.stats.total_moves()
+            ),
+        };
+        checkers_bevy::move_log::log(&line);
     }
 }
 

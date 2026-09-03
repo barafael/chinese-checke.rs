@@ -1341,8 +1341,11 @@ pub fn apply_seats(
     session.ai_players = ai_seats.0.clone();
     session.local_player = net.my_player();
     // A declared spectator watches: local_player is already None for one, and
-    // this flag stops hotseat-style "move everyone" from applying to them.
-    session.spectating = net.my_seat().is_some_and(|s| s.spectate);
+    // this flag stops hotseat-style "move everyone" from applying to them. The
+    // same applies when the computer owns every seat — the humans are an
+    // audience, so board input is blocked while the engines race.
+    session.spectating = net.my_seat().is_some_and(|s| s.spectate)
+        || (!ai_seats.0.is_empty() && ai_seats.0.len() >= chosen.0.count());
     session.message = if session.spectating {
         "Spectating - watch, but do not touch.".into()
     } else {

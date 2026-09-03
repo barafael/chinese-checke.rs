@@ -34,3 +34,34 @@
 - **Protocol note**: the parallel session landed commits repeatedly during this
   session; every push was rebased onto it, and the stash-pop conflict in the
   main tree was resolved by committing the coherent working state.
+
+## 2026-09-03 — paced AI-vs-AI demo (main session)
+
+- **Menu "Watch two computers"** (`MenuButton::Watch`): deals a two-player
+  board to camps {0,3}, marks every seat as the computer's, and sends the
+  session straight to `InGame`. Spectator marking in `apply_seats` blocks board
+  input the same way networked spectating does.
+- **Paced driver** (`checkers-bevy/src/ai.rs`): `AiPace` throttles one visible
+  action (move, commit, or hop) per second and stages jumps through the rules'
+  own `JumpTurn` so the preview shows the piece mid-flight — a human can follow
+  the race, and every committed move is one the rules offer.
+- **`choose_move_route_for`** on `Ai`: returns the chosen move plus a landings-only
+  hop route (via `rules::jump_routes`, origin stripped) so the driver can animate
+  a jump hop by hop. Covered by `checkers-ai/tests/route.rs` (the two-rung chain).
+- **Headless demo test** (`checkers-bevy/tests/ai_demo.rs`): injected clock; asserts
+  1-second spacing, legal committed moves, per-ply audit, and termination — the
+  two-engine race resolves with a winner (90 plies).
+- **Stall backstop**: `AiPace` carries a progress-stall detector (leading seat's
+  sum-of-distance window) and a hard `MAX_MOVES` ceiling; either logs an honest
+  `# game abandoned` line, so a genuinely unresolvable game never runs forever.
+- **Engine eval experiment, reverted**: an attempted evacuation tax (per-piece
+  own-start-camp penalty ×80) and a wrong-camp dead-end penalty both *regressed*
+  the engine — `play.rs` self-play stopped finishing. Reverted to the original
+  `worst*12` eval; the existing anti-shuffle is what keeps a real race on track.
+  The lesson: the demo's termination safety belongs in the paced driver, not the
+  eval.
+
+### Session record
+- All gates green: fmt, clippy `--workspace --all-targets`, `test --workspace`
+  (25 test binaries, 0 failures), `doc --workspace --no-deps`, spec-gen
+  (`--check`, `--check-registry`), wasm build for `checkers-bevy`.

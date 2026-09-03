@@ -56,6 +56,8 @@ pub enum MenuButton {
     Back,
     /// Toggle the computer opponent (two-player hotseat only).
     Computer,
+    /// Deal a two-player board to two engines and let them race.
+    Watch,
 }
 
 /// One button, styled exactly like the lobby's (the palette is imported, so
@@ -140,6 +142,7 @@ fn spawn_menu(mut commands: Commands) {
             for (label, tag) in [
                 ("Multiplayer", MenuButton::Lobby),
                 ("Hotseat", MenuButton::Hotseat),
+                ("Watch two computers", MenuButton::Watch),
             ] {
                 col.spawn((
                     Button,
@@ -284,6 +287,8 @@ pub enum MenuAction {
     Play,
     /// Toggle the computer opponent.
     Computer,
+    /// Deal a two-player board to two engines.
+    Watch,
     Pick(Seating),
 }
 
@@ -294,6 +299,7 @@ pub fn action_for(button: MenuButton) -> MenuAction {
         MenuButton::Back => MenuAction::ToMenu,
         MenuButton::Play => MenuAction::Play,
         MenuButton::Computer => MenuAction::Computer,
+        MenuButton::Watch => MenuAction::Watch,
         MenuButton::Seats(s) => MenuAction::Pick(s),
     }
 }
@@ -319,6 +325,13 @@ fn handle_buttons(
         MenuAction::ToLobby => {
             ai_seats.0.clear();
             next_state.set(AppState::Lobby);
+        }
+        MenuAction::Watch => {
+            // Two engines, facing camps, no humans: the seats are the whole
+            // point of the mode, so they are set here rather than toggled.
+            chosen.0 = Seating::Two;
+            ai_seats.0 = vec![Player::ALL[0], Player::ALL[3]];
+            next_state.set(AppState::InGame);
         }
         MenuAction::ToHotseat => next_state.set(AppState::Hotseat),
         MenuAction::ToMenu => next_state.set(AppState::Menu),

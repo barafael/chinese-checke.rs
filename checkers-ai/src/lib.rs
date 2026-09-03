@@ -35,7 +35,7 @@ mod engine;
 mod search;
 mod tables;
 
-use checkers_core::geometry::Dir;
+use checkers_core::geometry::{Coord, Dir};
 use checkers_core::position::{Move, MoveKind, Player};
 use checkers_core::rules::Game;
 
@@ -134,6 +134,35 @@ impl Ai {
         let (raw, stats) = search::search(&state, &self.config, &self.recent);
         self.stats = stats;
         raw.map(decode)
+    }
+
+    /// The chosen move plus, for jumps, one concrete hop route that plays it:
+    /// every consecutive pair is a single legal hop, starting at the origin
+    /// and ending at the destination. Steps carry an empty route. This is what
+    /// lets a viewer animate the move hop by hop.
+    pub fn choose_move_route_for(
+        &mut self,
+        game: &Game,
+        player: Player,
+    ) -> Option<(Move, Vec<Coord>)> {
+        let mv = self.choose_move_for(game, player)?;
+        if mv.kind == MoveKind::Step {
+            return Some((mv, Vec::new()));
+        }
+        // The shortest concrete route the rules' enumerator knows that lands
+        // where the search decided. Route choice never changes the resulting
+        // position, so any route to the same hole is equally good to play.
+        let routes = checkers_core::rules::jump_routes(game.position(), mv.origin, 24);
+        let route = routes
+            .into_iter()
+            .find(|r| r.last() == Some(&mv.destination));
+        // The rules' enumerator lists each path with the origin first; the
+        // viewer wants the *landings only* — the sequence of holes the piece
+        // stops on, in order, ending at the destination.
+        let route = route
+            .and_then(|r| r.get(1..).map(|r| r.to_vec()))
+            .unwrap_or_else(|| vec![mv.destination]);
+        Some((mv, route))
     }
 }
 
