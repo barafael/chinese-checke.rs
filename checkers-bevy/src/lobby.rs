@@ -375,6 +375,31 @@ fn spawn(mut commands: Commands, chosen: Res<ChosenSeating>) {
             LobbyUi,
         ))
         .with_children(|col| {
+            // A back button pinned to the top-left corner, so returning to the
+            // main menu is always one obvious click away. Esc does the same;
+            // this just makes it visible next to every other navigation.
+            col.spawn((
+                Button,
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: Val::Px(16.0),
+                    top: Val::Px(16.0),
+                    padding: UiRect::axes(Val::Px(14.0), Val::Px(8.0)),
+                    border_radius: BorderRadius::all(Val::Px(5.0)),
+                    ..default()
+                },
+                BackgroundColor(IDLE),
+                LobbyButton::Back,
+            ))
+            .with_child((
+                Text::new("Back"),
+                TextFont {
+                    font_size: FontSize::Px(15.0),
+                    ..default()
+                },
+                TextColor(Color::srgb(0.9, 0.9, 0.92)),
+            ));
+
             header(col, "Lobby");
 
             // The room field: a real text input, click or `R` to focus.

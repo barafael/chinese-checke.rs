@@ -16,7 +16,18 @@ use checkers_net::RoomId;
 /// the place to complain about names, and a bad share link should degrade to
 /// the default room, not to an error screen.
 pub fn room_from_url() -> Option<RoomId> {
-    let fragment = read_fragment()?;
+    room_from_fragment(&read_fragment()?)
+}
+
+/// Parse the room id out of the URL *fragment* (the part after `#`), given
+/// already with or without its leading `#`. Kept pure and separate from
+/// [`room_from_url`] so the parsing is unit-testable without a window.
+///
+/// A share link is written as `#room=name`, so the sender can append extra
+/// params with `&` without breaking the lookup. The browser hands us the
+/// fragment *including* the `#`, which `strip_prefix` would otherwise reject.
+fn room_from_fragment(fragment: &str) -> Option<RoomId> {
+    let fragment = fragment.strip_prefix('#').unwrap_or(fragment);
     for pair in fragment.split(['&', ';']) {
         if let Some(value) = pair.strip_prefix("room=") {
             return RoomId::parse(value).ok();
@@ -61,3 +72,36 @@ fn read_fragment() -> Option<String> {
 
 #[cfg(not(target_family = "wasm"))]
 fn write_fragment(_fragment: &str) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The browser reports `window.location.hash` *with* its leading `#`;
+    /// that is exactly what `room_from_url` passes in, so the parser must cope.
+    #[test]
+    fn parses_a_share_link_fragment_with_leading_hash() {
+        let room = room_from_fragment("#room=myroom").expect("a valid share link must parse");
+        assert_eq!(room.0, "myroom");
+    }
+
+    #[test]
+    fn tolerates_a_fragment_without_the_hash() {
+        let room = room_from_fragment("room=myroom").expect("a raw fragment must parse");
+        assert_eq!(room.0, "myroom");
+    }
+
+    #[test]
+    fn finds_room_among_extra_params() {
+        let room = room_from_fragment("#other=x&room=friend&r=2").unwrap();
+        assert_eq!(room.0, "friend");
+    }
+
+    #[test]
+    fn default_is_no_room_when_none_is_named() {
+        assert_eq!(room_from_fragment(""), None);
+        assert_eq!(room_from_fragment("#spectate=1"), None);
+        assert_eq!(room_from_fragment("#room="), None); // empty value is invalid
+        assert_eq!(room_from_fragment("#room=has space!"), None); // invalid chars
+    }
+}
