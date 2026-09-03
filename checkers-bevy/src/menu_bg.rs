@@ -168,7 +168,8 @@ fn drive(mut demo: ResMut<MenuDemo>, time: Res<Time>) {
         demo.pace.result_logged = true;
         let line = match demo.session.game.outcome() {
             Some(Outcome::Winner(p)) => format!("player {}", p.index()),
-            _ => "draw".to_string(),
+            Some(Outcome::Resigned(p)) => format!("player {} resigned", p.index()),
+            Some(Outcome::Draw) | None => "draw".to_string(),
         };
         info!("menu background race over: {line}");
     }

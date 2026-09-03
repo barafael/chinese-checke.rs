@@ -10,7 +10,6 @@
 //! ([`audit`]).
 
 use bevy::camera::ScalingMode;
-use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 // Not in the prelude, unlike the rest of the window API.
 use bevy::window::{Monitor, PrimaryMonitor};
@@ -25,9 +24,11 @@ use checkers_bevy::board_view::{
     hole_edges, hole_points, world_to_coord,
 };
 use checkers_bevy::menu::AiStrength;
+use checkers_bevy::replay;
 use checkers_bevy::setup::Seating;
 use checkers_bevy::{
-    AppState, Selection, Session, audit, format_round_duration, lobby, menu, menu_bg, net, web,
+    AppState, Selection, Session, audit, format_round_duration, lobby, menu, menu_bg, net, record,
+    web,
 };
 use checkers_core::geometry::{Coord, all_holes, camp_of, on_board};
 use checkers_core::law::{LAWS, verify_all};
@@ -84,6 +85,7 @@ fn main() {
         .init_state::<AppState>()
         .init_resource::<AiEngine>()
         .init_resource::<AiPace>()
+        .init_resource::<replay::Replay>()
         .add_plugins(lobby::plugin)
         .add_plugins(menu::plugin)
         .add_plugins(menu_bg::plugin)
@@ -114,37 +116,60 @@ fn main() {
         .add_systems(
             Update,
             (
-                handle_buttons,
-                handle_clicks,
-                handle_keys,
-                ai_one_shot,
-                board_style::handle_style_key,
-                // Spawns the board for the current style on entry, and tears
-                // the old one down and builds the new one on `V`. Must run
-                // before the sync systems, which read the style to decide
-                // what kind of meshes pieces and highlights are.
-                apply_style,
-                toggle_status,
-                stamp_session_clock,
-                board_style::orbit_camera,
-                // The zoom the player chose stays proportional when the window
-                // changes shape: scale the radius by the ratio of fit
-                // distances, so the board keeps its framing at any size.
-                board_style::fit_orbit_to_window,
-                // Drains the outbox and applies only host-sequenced moves, so
-                // it must run after input and before the view syncs.
-                // The computer plays through the same outbox as a human: one
-                // sequencing path, no privileged moves.
-                ai_take_turn,
-                net::pump,
-                sync_pieces,
-                sync_highlights,
-                sync_status,
-                sync_status_visibility,
-                sync_buttons,
-                sync_turn_indicator,
-                sync_camp_indicator,
-                sync_game_over,
+                // Bevy caps a chained tuple at twenty systems, and this chain
+                // outgrew that. Split at the natural seam — input, styling,
+                // and move sequencing versus the view-sync systems — and
+                // chain the halves: order is preserved exactly.
+                (
+                    handle_buttons,
+                    handle_clicks,
+                    handle_keys,
+                    ai_one_shot,
+                    board_style::handle_style_key,
+                    // Spawns the board for the current style on entry, and
+                    // tears the old one down and builds the new one on `V`.
+                    // Must run before the sync systems, which read the style
+                    // to decide what kind of meshes pieces and highlights
+                    // are.
+                    apply_style,
+                    toggle_status,
+                    stamp_session_clock,
+                    board_style::orbit_camera,
+                    // The zoom the player chose stays proportional when the
+                    // window changes shape: scale the radius by the ratio of
+                    // fit distances, so the board keeps its framing at any
+                    // size.
+                    board_style::fit_orbit_to_window,
+                    // Drains the outbox and applies only host-sequenced moves,
+                    // so it must run after input and before the view syncs.
+                    // The computer plays through the same outbox as a human:
+                    // one sequencing path, no privileged moves.
+                    ai_take_turn,
+                    net::pump,
+                    // Queue the opponent's move for its replay before the
+                    // board is redrawn, so the flight takes over the piece on
+                    // the very frame it lands.
+                    replay::watch,
+                )
+                    .chain(),
+                (
+                    sync_pieces,
+                    // The flight drives the landed piece's transform; it must
+                    // see the rebuilt pieces first.
+                    replay::advance,
+                    sync_highlights,
+                    // Gray trace of the opponent's last path. After the
+                    // flight, so a completed animation paints its trace the
+                    // same frame.
+                    replay::sync_trace,
+                    sync_status,
+                    sync_status_visibility,
+                    sync_buttons,
+                    sync_turn_indicator,
+                    sync_camp_indicator,
+                    sync_game_over,
+                )
+                    .chain(),
             )
                 .chain()
                 .run_if(in_state(AppState::InGame)),
@@ -154,15 +179,9 @@ fn main() {
 
 // --- marker components -----------------------------------------------------
 
-/// Everything a view-rebuilding system needs in order to draw, bundled so
-/// system signatures stay short.
-#[derive(SystemParam)]
-struct DrawContext<'w, 's> {
-    commands: Commands<'w, 's>,
-    meshes: ResMut<'w, Assets<Mesh>>,
-    materials: ResMut<'w, Assets<ColorMaterial>>,
-    std_materials: ResMut<'w, Assets<StandardMaterial>>,
-}
+// The draw bundle lives in the library, so the replay module's trace system
+// shares it with these systems.
+use checkers_bevy::draw::DrawContext;
 
 #[derive(Component)]
 struct HoleMarker;
@@ -217,6 +236,10 @@ enum ControlButton {
     /// Concede the round. Button-only by design: a resignation is a deliberate
     /// visit to a labelled control, not a key a stray finger finds.
     Resign,
+    /// Save the round as a `.cchkrs` record.
+    Save,
+    /// Open a `.cchkrs` record and resume it.
+    Open,
 }
 
 /// Distinct, roughly colour-blind-safe hues for the six players.
@@ -392,6 +415,8 @@ fn spawn_ui(mut commands: Commands) {
                 (ControlButton::Confirm, "Confirm (Enter)"),
                 (ControlButton::Cancel, "Cancel (Backspace)"),
                 (ControlButton::Resign, "Resign"),
+                (ControlButton::Save, "Save"),
+                (ControlButton::Open, "Open"),
             ] {
                 row.spawn((
                     Button,
@@ -561,6 +586,30 @@ fn handle_buttons(
             ControlButton::Confirm => session.confirm(),
             ControlButton::Cancel => session.cancel(),
             ControlButton::Resign => session.resign(),
+            ControlButton::Save => {
+                let text = session.to_record().to_text();
+                match web::save_record(&text) {
+                    Ok(where_) => session.message = format!("Saved{where_}"),
+                    Err(e) => session.message = format!("Save failed: {e}"),
+                }
+            }
+            ControlButton::Open => match web::load_record() {
+                Ok(text) => match record::GameRecord::from_text(&text)
+                    .and_then(|rec| Session::resumed(&rec))
+                {
+                    Ok(resumed) => {
+                        let note = if session.game.is_over() || !session.history().is_empty() {
+                            " (the previous round is gone)"
+                        } else {
+                            ""
+                        };
+                        *session = resumed;
+                        session.message = format!("Resumed{note}");
+                    }
+                    Err(f) => session.message = format!("Could not resume: {f}"),
+                },
+                Err(e) => session.message = format!("Open failed: {e}"),
+            },
         }
     }
 }
@@ -755,6 +804,7 @@ fn sync_pieces(
                     MeshMaterial2d(mats[player.index() as usize].clone()),
                     Transform::from_xyz(p.x, p.y, 1.0),
                     PieceMarker,
+                    replay::PieceCoord(c),
                 ));
             }
         }
@@ -790,6 +840,7 @@ fn sync_pieces(
                         w.z,
                     ),
                     PieceMarker,
+                    replay::PieceCoord(c),
                 ));
             }
         }
@@ -945,9 +996,13 @@ fn sync_buttons(
     )>,
 ) {
     for (interaction, which, mut bg, mut vis) in buttons.iter_mut() {
-        // Resign is a local-mode control for now: a networked concession
-        // would leave the peers disagreeing about whether the game is over.
-        if *which == ControlButton::Resign {
+        // Record controls are local-mode, like resign: a networked round is
+        // shared state, and one peer's save would say nothing about the rest
+        // of the table.
+        if matches!(
+            which,
+            ControlButton::Resign | ControlButton::Save | ControlButton::Open
+        ) {
             let wanted = if net.seats.is_empty() {
                 Visibility::Inherited
             } else {
@@ -959,7 +1014,8 @@ fn sync_buttons(
         }
         // Buttons do nothing on someone else's turn — dim them entirely so the
         // controls cannot look actionable. Confirm also needs a staged move to
-        // submit, Cancel needs a selection to abandon.
+        // submit, Cancel needs a selection to abandon. Save and Open are
+        // always available in a local game: a finished round is worth saving.
         let active = session.may_act();
         let base = match which {
             ControlButton::Confirm if active && session.can_confirm() => {
@@ -971,6 +1027,7 @@ fn sync_buttons(
             ControlButton::Resign if active && !session.game.is_over() => {
                 Color::srgb(0.36, 0.27, 0.22)
             }
+            ControlButton::Save | ControlButton::Open => Color::srgb(0.22, 0.28, 0.38),
             _ => Color::srgb(0.18, 0.18, 0.21),
         };
         let colour = match interaction {

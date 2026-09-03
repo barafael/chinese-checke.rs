@@ -21,11 +21,14 @@ pub mod ai;
 pub mod board_amlah;
 pub mod board_style;
 pub mod board_view;
+pub mod draw;
 pub mod lobby;
 pub mod menu;
 pub mod menu_bg;
 pub mod move_log;
 pub mod net;
+pub mod record;
+pub mod replay;
 pub mod setup;
 pub mod web;
 
@@ -35,8 +38,10 @@ use checkers_core::geometry::Coord;
 use checkers_core::position::{Move as GameMove, MoveKind as GameMoveKind, Player, Position};
 use checkers_core::rules::{Game, jump_routes};
 use checkers_core::turn::{JumpTurn, single_hop_destinations, step_destinations};
+use checkers_net::WireMove;
 use std::time::Duration;
 
+use crate::record::RecordFault;
 use crate::setup::Seating;
 
 /// The menu first, then either the lobby (networked) or the hotseat panel
@@ -171,6 +176,95 @@ mod tests {
             "the pinned seat gives up, not whoever happens to be on turn"
         );
     }
+
+    /// A committed move is recorded with the path it flew: a step is the two
+    /// holes it touched.
+    #[test]
+    fn a_step_is_recorded_with_its_two_hole_path() {
+        let mut session = Session::new(Seating::Two);
+        let mv = session
+            .game
+            .legal_moves()
+            .into_iter()
+            .find(|m| m.kind == GameMoveKind::Step)
+            .expect("the opening position has steps");
+
+        session.commit(&mv);
+
+        let last = session.last_move.expect("a commit records the move");
+        assert_eq!(last.mover, Player::ALL[0]);
+        assert_eq!(last.path.len(), 2);
+        assert_eq!(last.path[0], mv.origin);
+        assert_eq!(*last.path.last().unwrap(), mv.destination);
+    }
+
+    /// A jump committed in route-free wire form still yields a concrete path:
+    /// the same deterministic rebuild the stats use.
+    #[test]
+    fn a_route_free_jump_is_rebuilt_into_a_path() {
+        let mut session = Session::new(Seating::Two);
+        let mut mv = session
+            .game
+            .legal_moves()
+            .into_iter()
+            .find(|m| m.kind == GameMoveKind::Jump)
+            .expect("the opening position has jumps");
+        mv.route = None;
+
+        session.commit(&mv.clone());
+
+        let last = session.last_move.expect("a commit records the move");
+        assert!(last.path.len() >= 2, "a jump path has at least two holes");
+        assert_eq!(last.path[0], mv.origin, "the path starts at the origin");
+        assert_eq!(
+            last.path.last(),
+            Some(&mv.destination),
+            "the path ends at the destination"
+        );
+        for pair in last.path.windows(2) {
+            let mid = Coord::new((pair[0].q + pair[1].q) / 2, (pair[0].r + pair[1].r) / 2);
+            assert!(
+                session.game.position().occupant(mid).is_some(),
+                "every hop's midpoint still holds the jumped piece (CC-JUMP-NO-CAPTURE)"
+            );
+        }
+    }
+
+    /// Only someone else's move is replay-animated. A seated peer skips its
+    /// own; an unseated one — hotseat, spectator — replays everything.
+    #[test]
+    fn only_an_opponents_move_is_replayed() {
+        let mut session = Session::new(Seating::Two);
+        let mv = session
+            .game
+            .legal_moves()
+            .into_iter()
+            .next()
+            .expect("moves exist");
+
+        // Hotseat: no seat, so every move animates.
+        session.commit(&mv);
+        assert!(session.should_replay());
+
+        // Seated as the mover: my own move is not news.
+        let mut mine = Session::new(Seating::Two);
+        mine.local_player = Some(Player::ALL[0]);
+        mine.commit(&mv);
+        assert!(!mine.should_replay());
+
+        // Seated elsewhere: the move is an opponent's.
+        let mut theirs = Session::new(Seating::Two);
+        theirs.local_player = Some(Player::ALL[3]);
+        theirs.commit(&mv);
+        assert!(theirs.should_replay());
+
+        // A new game clears the record.
+        let mut fresh = Session::new(Seating::Two);
+        fresh.commit(&mv);
+        fresh = Session::new(Seating::Two);
+        assert!(fresh.last_move.is_none());
+        assert!(!fresh.should_replay());
+    }
 }
 
 /// The game plus the UI's selection state.
@@ -195,6 +289,21 @@ pub struct Session {
     pub seating: Seating,
     /// Running totals, shown on the game-over screen.
     pub stats: GameStats,
+    /// Every committed move, in play order, in the route-free wire form the
+    /// record format stores. Appended by `commit` — the one point every path
+    /// through the game goes through.
+    history: Vec<WireMove>,
+    /// The move committed most recently and the concrete path it flew, set by
+    /// `commit` — the raw material for replaying the opponent's
+    /// last turn as an animation, with its trace left on the board.
+    pub last_move: Option<LastMove>,
+}
+
+/// A committed move and the path it took, origin first, destination last.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LastMove {
+    pub mover: Player,
+    pub path: Vec<Coord>,
 }
 
 impl Default for Session {
@@ -216,6 +325,8 @@ impl Session {
             ai_players: Vec::new(),
             seating,
             stats: GameStats::default(),
+            history: Vec::new(),
+            last_move: None,
         }
     }
 
@@ -229,6 +340,57 @@ impl Session {
         self.selection = Selection::None;
         self.outbox.clear();
         self.stats = GameStats::default();
+        self.history.clear();
+        self.last_move = None;
+    }
+
+    /// The round as a [`crate::record::GameRecord`]: seating, engine seats,
+    /// and every move committed so far.
+    pub fn to_record(&self) -> crate::record::GameRecord {
+        crate::record::GameRecord {
+            seating: self.seating,
+            ai_players: self.ai_players.clone(),
+            moves: self.history.clone(),
+        }
+    }
+
+    /// Every committed move so far, in play order.
+    pub fn history(&self) -> &[WireMove] {
+        &self.history
+    }
+
+    /// Rebuild a session from a record by replaying the moves through the
+    /// rules. Each recorded move is resolved against the legal moves of the
+    /// position it occurs in — the rules, not the record, decide — and the
+    /// law audit runs after every one, so a forged or corrupted record is
+    /// refused rather than resumed. Auto-passes are re-derived as they were
+    /// the first time round.
+    pub fn resumed(record: &crate::record::GameRecord) -> Result<Self, RecordFault> {
+        let mut session = Self::new(record.seating);
+        session.ai_players = record.ai_players.clone();
+        for (ply, wire) in record.moves.iter().enumerate() {
+            let Some(mv) = wire.resolve(&session.game.legal_moves()) else {
+                let kind = if wire.jump { "jump" } else { "step" };
+                return Err(RecordFault::Replay {
+                    ply,
+                    why: format!(
+                        "player {} cannot {} ({},{}) -> ({},{}) where it occurs",
+                        session.game.turn().index(),
+                        kind,
+                        wire.origin.0,
+                        wire.origin.1,
+                        wire.destination.0,
+                        wire.destination.1
+                    ),
+                });
+            };
+            session.commit(&mv);
+            crate::net::after_turn(&mut session);
+        }
+        // The record was replayed for state, not for show: nothing about a
+        // resumption should fire the opponent-move animation on load.
+        session.last_move = None;
+        Ok(session)
     }
 
     /// The player this peer controls, if any.
@@ -241,6 +403,7 @@ impl Session {
     pub(crate) fn commit(&mut self, mv: &GameMove) {
         let mover = self.game.turn();
         self.stats.moves[mover.index() as usize] += 1;
+        self.history.push(WireMove::from_move(mv));
 
         if mv.kind == GameMoveKind::Jump {
             self.stats.jumps[mover.index() as usize] += 1;
@@ -253,7 +416,42 @@ impl Session {
             }
         }
 
+        // Resolved before the move is played: a rebuilt route enumerates from
+        // the *pre-move* position.
+        self.last_move = Some(LastMove {
+            mover,
+            path: self.move_path(mv),
+        });
+
         self.game.play(mv);
+    }
+
+    /// Whether this peer wants the last committed move replayed: someone
+    /// else's. A peer with no seat of its own — hotseat, or a spectator —
+    /// replays every move, since whoever moves next is always watching
+    /// someone else's turn begin. One's own move arriving back sequenced is
+    /// not news worth animating.
+    pub fn should_replay(&self) -> bool {
+        let Some(last) = &self.last_move else {
+            return false;
+        };
+        self.local_player.is_none_or(|me| last.mover != me)
+    }
+
+    /// The concrete path a move flies: origin, any hop intermediates,
+    /// destination. The wire form carries no route — see [`Self::count_hops`]
+    /// — so a jump's is rebuilt the same deterministic way the stats are.
+    fn move_path(&self, mv: &GameMove) -> Vec<Coord> {
+        match mv.kind {
+            GameMoveKind::Step => vec![mv.origin, mv.destination],
+            GameMoveKind::Jump => match &mv.route {
+                Some(r) => r.clone(),
+                None => jump_routes(self.game.position(), mv.origin, 64)
+                    .into_iter()
+                    .find(|r| r.last() == Some(&mv.destination))
+                    .unwrap_or_default(),
+            },
+        }
     }
 
     /// Hops in a jump move, and how many crossed another player's piece.

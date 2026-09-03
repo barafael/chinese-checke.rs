@@ -123,7 +123,7 @@ fn apply(net: &mut NetState, session: &mut Session, seq: u32, wire: WireMove) {
 
 /// No socket: apply straight away. Keeps the board playable rather than
 /// silently swallowing moves.
-fn apply_outbox_directly(session: &mut Session) {
+pub(crate) fn apply_outbox_directly(session: &mut Session) {
     for mv in std::mem::take(&mut session.outbox) {
         if session.game.legal_moves().contains(&mv) {
             session.commit(&mv);
@@ -134,7 +134,7 @@ fn apply_outbox_directly(session: &mut Session) {
 }
 
 /// Audit the new position and pass over players with no legal move.
-fn after_turn(session: &mut Session) {
+pub(crate) fn after_turn(session: &mut Session) {
     audit(session.game.position(), session.seating);
 
     while !session.game.is_over() && session.game.legal_moves().is_empty() {

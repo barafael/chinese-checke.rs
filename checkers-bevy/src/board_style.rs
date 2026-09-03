@@ -224,8 +224,8 @@ pub fn fit_orbit_to_window(
         return;
     }
 
-    orbit.radius = (orbit.radius * fit(aspect) / fit(prev))
-        .clamp(ORBIT_RADIUS_MIN, ORBIT_RADIUS_MAX);
+    orbit.radius =
+        (orbit.radius * fit(aspect) / fit(prev)).clamp(ORBIT_RADIUS_MIN, ORBIT_RADIUS_MAX);
     *prev_aspect = Some(aspect);
 }
 
@@ -300,10 +300,16 @@ mod tests {
         let narrow = orbit_fit_radius(half, 0.25, fov, 1.0);
         let wide_fov = orbit_fit_radius(half, 1.0, fov * 2.0, 1.0);
 
-        assert!((landscape - square).abs() < 1e-4, "width fits freely at 2:1");
+        assert!(
+            (landscape - square).abs() < 1e-4,
+            "width fits freely at 2:1"
+        );
         assert!(portrait > square, "portrait must back the camera up");
         assert!(narrow > portrait, "narrower still needs more distance");
-        assert!(wide_fov < square, "a wider field of view needs less distance");
+        assert!(
+            wide_fov < square,
+            "a wider field of view needs less distance"
+        );
     }
 
     /// The margin is a plain multiplier, so a framed board keeps it off every

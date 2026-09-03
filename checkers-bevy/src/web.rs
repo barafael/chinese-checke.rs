@@ -73,6 +73,63 @@ fn read_fragment() -> Option<String> {
 #[cfg(not(target_family = "wasm"))]
 fn write_fragment(_fragment: &str) {}
 
+// --- Saved rounds (.cchkrs) -------------------------------------------------
+
+/// The browser slot a saved round lives in. One save per page: enough to
+/// close the tab after lunch and finish the game, and it cannot grow.
+#[cfg(target_family = "wasm")]
+const SAVE_SLOT: &str = "cchkrs.save";
+
+/// Save a round's `.cchkrs` text. Native asks for a file with a dialog and
+/// returns where it went, for the status line; the web writes the page's
+/// single localStorage slot and says so.
+#[cfg(not(target_family = "wasm"))]
+pub fn save_record(text: &str) -> Result<String, String> {
+    let path = rfd::FileDialog::new()
+        .set_title("Save the game")
+        .add_filter("Chinese Checkers record", &["cchkrs"])
+        .set_file_name("game.cchkrs")
+        .save_file()
+        .ok_or("no file chosen")?;
+    std::fs::write(&path, text).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(format!(" to {}", path.display()))
+}
+
+#[cfg(target_family = "wasm")]
+pub fn save_record(text: &str) -> Result<String, String> {
+    let storage = web_sys::window()
+        .and_then(|w| w.local_storage().ok())
+        .flatten()
+        .ok_or("the browser refuses local storage")?;
+    storage
+        .set_item(SAVE_SLOT, text)
+        .map_err(|_| "the browser refused the save".to_string())?;
+    Ok(" to this browser".to_string())
+}
+
+/// Load a round's `.cchkrs` text; the empty string faults name their source.
+#[cfg(not(target_family = "wasm"))]
+pub fn load_record() -> Result<String, String> {
+    let path = rfd::FileDialog::new()
+        .set_title("Open a saved game")
+        .add_filter("Chinese Checkers record", &["cchkrs"])
+        .pick_file()
+        .ok_or("no file chosen")?;
+    std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+#[cfg(target_family = "wasm")]
+pub fn load_record() -> Result<String, String> {
+    let storage = web_sys::window()
+        .and_then(|w| w.local_storage().ok())
+        .flatten()
+        .ok_or("the browser refuses local storage")?;
+    storage
+        .get_item(SAVE_SLOT)
+        .map_err(|_| "the browser refused the read".to_string())?
+        .ok_or_else(|| "nothing has been saved in this browser yet".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

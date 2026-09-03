@@ -20,8 +20,14 @@ uuid = "1"
 [lints]
 workspace = true
 
-# Reading and sharing the room name through the URL fragment (web only); and a
-# context-menu listener so the 3D camera's right-drag orbit is not interrupted.
+# Saving and opening `.cchkrs` rounds through a file dialog. Web builds use
+# localStorage instead, so the dialog crate is native-only.
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+rfd = "0.15"
+
+# Reading and sharing the room name through the URL fragment (web only); a
+# context-menu listener so the 3D camera's right-drag orbit is not interrupted;
+# and the localStorage slot a saved round lives in.
 [target.'cfg(target_family = "wasm")'.dependencies]
-web-sys = { version = "0.3", features = ["Location", "Window", "EventTarget"] }
+web-sys = { version = "0.3", features = ["Location", "Window", "EventTarget", "Storage"] }
 js-sys = "0.3"
