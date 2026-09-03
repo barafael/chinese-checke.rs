@@ -148,25 +148,39 @@ and arithmetic.
 
 `cargo run -p checkers-bevy`
 
-Steps commit immediately. Jumps are **staged**: selecting a piece shows only the
-destinations reachable in **one** hop; clicking one moves the piece, keeps it
-selected, and reveals the next hop. Nothing is committed until you confirm, so
-the whole chain can be abandoned.
+The main menu deals a game: play solo or against the computer, hand a seat to
+another person at the keyboard (hotseat), join a networked lobby, or watch two
+engines race ("Watch 2 Bots" — the menu itself sits over a live one). When it
+is not your turn, the turn controls are inert; a spectator can watch but never
+click.
+
+Every turn is **staged** — steps and jumps alike. Selecting a piece highlights
+the destinations reachable in **one** hop; taking one moves the piece in the
+view, keeps it selected, and for a jump reveals the next hop. Nothing is
+committed until you confirm, so any chain can be abandoned.
 
 | Input | Effect |
 |---|---|
 | Click own piece | Select it |
-| Click a highlighted hole | Take one hop, or make a step |
-| Enter / Confirm button | End the jump turn |
-| Backspace / Cancel button | Abandon the turn |
-| U | Undo the last hop |
+| Click a highlighted hole | Stage a step, or take one hop of a jump |
+| Enter / Confirm button | Commit the staged turn |
+| Backspace / Cancel button | Abandon the staged turn |
+| U | Undo the last staged hop |
 | Escape | Clear the selection |
-| R | Restart |
+| A | Let the computer play the current seat once |
+| T | Toggle the status panel |
+| V | Cycle board style: classic (2D) / amlah (3D) |
+| R | Restart with a fresh two-player deal |
+| Right-drag, wheel (amlah) | Orbit and zoom the 3D camera |
 
 Confirming before the piece has actually moved is refused. That is not a corner
 case to be tidied away: a piece can hop out over a blocker and straight back, so
 a turn can have taken two hops and still be at its origin — which chapter 9
 treats as not moving.
+
+A finished game shows a summary card: who won (or that every player is
+blocked), each seated player's moves, how many were jumps, and how long the
+round lasted.
 
 The front-end holds no rules. Destinations come from `checkers-core` and moves
 are *found* rather than constructed, so there is no code path to an illegal
