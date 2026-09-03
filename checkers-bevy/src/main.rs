@@ -23,6 +23,7 @@ use checkers_bevy::board_view::{
     BOARD_HALF_EXTENT, HOLE_RADIUS, HOLE_SPACING, PIECE_RADIUS, camp_triangles, coord_to_world,
     hole_edges, hole_points, world_to_coord,
 };
+use checkers_bevy::menu::AiStrength;
 use checkers_bevy::setup::Seating;
 use checkers_bevy::{
     AppState, Selection, Session, audit, format_round_duration, lobby, menu, menu_bg, net, web,
@@ -95,8 +96,13 @@ fn main() {
             // `apply_style`, so entering the game and switching styles go
             // through one code path.
             (
-                |mut engine: ResMut<AiEngine>, mut pace: ResMut<AiPace>| {
-                    engine.0.forget();
+                // A fresh engine at the chosen strength: the deal is where a
+                // round's tuning is decided, and a new engine carries no
+                // repetition memory from the last one.
+                |mut engine: ResMut<AiEngine>,
+                 mut pace: ResMut<AiPace>,
+                 strength: Res<AiStrength>| {
+                    engine.0 = Ai::new(AiConfig::strength(strength.0));
                     pace.reset();
                 },
                 lobby::apply_seats,

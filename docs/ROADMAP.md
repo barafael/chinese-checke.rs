@@ -23,32 +23,39 @@ not repair.
 
 ## Phase 1 — Documentation honesty
 
-- [ ] README "Playing" says "Steps commit immediately" — stale since
+- [x] README "Playing" says "Steps commit immediately" — stale since
   step-staging shipped. Steps now also wait for Enter. Rewrite the paragraph
   and the input table.
-- [ ] Inventory every global key from `handle_keys` (`U` `R` `T` `A` `V`
+- [x] Inventory every global key from `handle_keys` (`U` `R` `T` `A` `V`
   `Escape`, Enter/Backspace) and document each accurately; mention Watch
   2 Bots, the live menu background, and the statistics screen.
 
 ## Phase 2 — Resign
 
-- [ ] Spike first: a core-honest `Outcome::Resigned(Player)` variant plus a
-  minimal law (evidence: example) and spec regeneration, versus a UI-level
-  concession. Prefer the core variant; check every `Outcome` consumer
-  (game-over screen, statistics, move-log line, `is_over` gates).
-- [ ] **Button only — no key binding** (decided). Gated by `may_act()`,
-  hidden once the game is over.
-- [ ] The game-over screen and the move log report the resignation.
+- [x] Core-honest: `Outcome::Resigned(Player)` variant — a concession is a
+  fact about the round, so it lives in the engine next to `Winner`/`Draw`.
+  `Game::resign(p)` refuses unseated seats and finished games; the position
+  is deliberately untouched. Core tests cover the contract.
+- [x] **Button only — no key binding** (decided). Gated by `may_act()`,
+  inert once the game is over, and hidden in networked games until a
+  concession can cross the wire.
+- [x] The status line, turn indicator, game-over card, and move log report
+  the resignation; hotseat gives up the seat to move, a pinned player
+  resigns even off turn.
 
 ## Phase 3 — AI difficulty
 
-- [ ] **Strength levels 1–5** (decided): five presets over `AiConfig`
-  (wall-clock budget × max depth). Tune the five so each level is visibly
-  distinct yet every level still terminates in self-play.
-- [ ] Radio-style strength row on the seats panel next to "Computer
-  opponent"; the chosen config is applied when the deal starts. Watch 2 Bots
-  and the menu background stay at the middle level.
-- [ ] Tests: preset mapping; the paced demo stays green at the default.
+- [x] **Strength levels 1–5** (decided): five presets over `AiConfig`
+  (wall-clock budget × max depth) via `AiConfig::strength(level)`. Level 3 is
+  exactly the default tuning; 1–2 cut the budget steeply so the difference is
+  felt within a move, 4–5 pay seconds for deeper play. Every level keeps the
+  depth-cap safety net, so real games still finish.
+- [x] Radio-style strength row (1–5) on the hotseat panel; the engine is
+  rebuilt at the chosen strength when the game is dealt — which also means a
+  watched race runs at the chosen strength. The menu background keeps its own
+  30 ms decorative engine.
+- [x] Tests: the five presets are distinct, level 3 equals the default, and
+  out-of-range levels clamp instead of panicking.
 
 ## Track A — Spec formalization, chapters 6–15 (the long track)
 

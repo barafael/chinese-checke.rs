@@ -24,8 +24,20 @@ use checkers_net::NetState;
 #[derive(Resource, Default, Debug, Clone)]
 pub struct AiSeats(pub Vec<Player>);
 
+/// The engine strength picked on the hotseat panel, 1–5. Read when the game
+/// is dealt: the engine is rebuilt at that strength for the round.
+#[derive(Resource, Debug, Clone, Copy)]
+pub struct AiStrength(pub u8);
+
+impl Default for AiStrength {
+    fn default() -> Self {
+        Self(3)
+    }
+}
+
 pub fn plugin(app: &mut App) {
     app.init_resource::<AiSeats>()
+        .init_resource::<AiStrength>()
         .add_systems(OnEnter(AppState::Menu), spawn_menu)
         .add_systems(OnExit(AppState::Menu), despawn)
         .add_systems(OnEnter(AppState::Hotseat), spawn_hotseat)
@@ -56,6 +68,8 @@ pub enum MenuButton {
     Back,
     /// Toggle the computer opponent (two-player hotseat only).
     Computer,
+    /// Pick the engine's strength, 1 (quickest) to 5 (strongest).
+    Strength(u8),
     /// Deal a two-player board to two engines and let them race.
     Watch,
 }
@@ -238,6 +252,29 @@ fn spawn_hotseat(mut commands: Commands, chosen: Res<ChosenSeating>) {
             button(row, "Back", MenuButton::Back);
         });
 
+        // The engine's strength, always visible so the preference is settable
+        // before the computer opponent is toggled on. Meaningless — and
+        // visibly unchosen — until an engine actually sits at the table.
+        col.spawn(Node {
+            column_gap: Val::Px(10.0),
+            align_items: AlignItems::Center,
+            margin: UiRect::top(Val::Px(8.0)),
+            ..default()
+        })
+        .with_children(|row| {
+            row.spawn((
+                Text::new("Strength"),
+                TextFont {
+                    font_size: FontSize::Px(14.0),
+                    ..default()
+                },
+                TextColor(Color::srgb(0.62, 0.62, 0.68)),
+            ));
+            for level in 1..=5 {
+                button(row, &level.to_string(), MenuButton::Strength(level));
+            }
+        });
+
         // Which seating is currently picked, shown in place rather than as a
         // separate status line to read.
         col.spawn((
@@ -271,10 +308,15 @@ fn despawn(mut commands: Commands, ui: Query<Entity, With<MenuUi>>) {
 /// this, the seat buttons never highlighted at all.
 fn sync_button_styles(
     chosen: Res<ChosenSeating>,
+    strength: Res<AiStrength>,
     mut buttons: Query<(&Interaction, &MenuButton, &mut BackgroundColor)>,
 ) {
     for (interaction, button, mut bg) in buttons.iter_mut() {
-        let selected = matches!(button, MenuButton::Seats(s) if *s == chosen.0);
+        let selected = match button {
+            MenuButton::Seats(s) => *s == chosen.0,
+            MenuButton::Strength(level) => *level == strength.0.clamp(1, 5),
+            _ => false,
+        };
         let colour = match interaction {
             Interaction::Pressed if selected => CHOSEN_DOWN,
             Interaction::Pressed => DOWN,
@@ -301,6 +343,8 @@ pub enum MenuAction {
     Play,
     /// Toggle the computer opponent.
     Computer,
+    /// Set the engine's strength.
+    Strength(u8),
     /// Deal a two-player board to two engines.
     Watch,
     Pick(Seating),
@@ -315,6 +359,7 @@ pub fn action_for(button: MenuButton) -> MenuAction {
         MenuButton::Computer => MenuAction::Computer,
         MenuButton::Watch => MenuAction::Watch,
         MenuButton::Seats(s) => MenuAction::Pick(s),
+        MenuButton::Strength(level) => MenuAction::Strength(level),
     }
 }
 
@@ -323,6 +368,7 @@ fn handle_buttons(
     mut chosen: ResMut<ChosenSeating>,
     mut net: ResMut<NetState>,
     mut ai_seats: ResMut<AiSeats>,
+    mut strength: ResMut<AiStrength>,
     mut next_state: ResMut<NextState<AppState>>,
     mut deals: Query<&mut Text, With<DealsText>>,
 ) {
@@ -335,6 +381,9 @@ fn handle_buttons(
 
     match action {
         MenuAction::None => {}
+        // The strength row is a preference, not a mode change: it only takes
+        // effect when an engine is dealt into the game.
+        MenuAction::Strength(level) => strength.0 = level.clamp(1, 5),
         // Multiplayer seats humans only; the computer is a hotseat feature.
         MenuAction::ToLobby => {
             ai_seats.0.clear();

@@ -150,9 +150,10 @@ and arithmetic.
 
 The main menu deals a game: play solo or against the computer, hand a seat to
 another person at the keyboard (hotseat), join a networked lobby, or watch two
-engines race ("Watch 2 Bots" — the menu itself sits over a live one). When it
-is not your turn, the turn controls are inert; a spectator can watch but never
-click.
+engines race ("Watch 2 Bots" — the menu itself sits over a live one). The
+hotseat panel picks the engine's strength from 1 (quick) to 5 (strong); the
+choice is applied when the game is dealt. When it is not your turn, the turn
+controls are inert; a spectator can watch but never click.
 
 Every turn is **staged** — steps and jumps alike. Selecting a piece highlights
 the destinations reachable in **one** hop; taking one moves the piece in the

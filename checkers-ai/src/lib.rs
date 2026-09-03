@@ -46,7 +46,7 @@ use std::time::Duration;
 
 /// How the engine may spend its time. Defaults are tuned for a human-facing
 /// app: strong enough to punish shuffling, quick enough not to feel laggy.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AiConfig {
     /// Wall-clock budget per move. The search finishes its current depth
     /// before stopping, so this is a floor on thinking time, not a ceiling.
@@ -61,6 +61,68 @@ impl Default for AiConfig {
             budget: Duration::from_millis(600),
             max_depth: 24,
         }
+    }
+}
+
+impl AiConfig {
+    /// The five human-facing strengths. Level 3 is the default tuning; going
+    /// down cuts the budget steeply so the difference is felt within a move,
+    /// going up pays a few seconds for visibly deeper play. Every level must
+    /// still finish real games — the budget is a floor on the current depth,
+    /// and the depth caps keep cheap endgames from being cut short.
+    pub fn strength(level: u8) -> Self {
+        match level.clamp(1, 5) {
+            1 => Self {
+                budget: Duration::from_millis(60),
+                max_depth: 4,
+            },
+            2 => Self {
+                budget: Duration::from_millis(200),
+                max_depth: 8,
+            },
+            3 => Self::default(),
+            4 => Self {
+                budget: Duration::from_millis(1500),
+                max_depth: 24,
+            },
+            _ => Self {
+                budget: Duration::from_millis(4000),
+                max_depth: 32,
+            },
+        }
+    }
+}
+
+#[cfg(test)]
+mod strength_tests {
+    use super::*;
+
+    /// The five levels are five distinct tunings, and level 3 is exactly the
+    /// default — the menu's middle choice must not silently re-tune the
+    /// engine the rest of the app was balanced around.
+    #[test]
+    fn the_five_strengths_are_distinct_and_three_is_the_default() {
+        let all: Vec<AiConfig> = (1..=5).map(AiConfig::strength).collect();
+        for i in 0..all.len() {
+            for j in i + 1..all.len() {
+                assert_ne!(
+                    all[i].budget,
+                    all[j].budget,
+                    "levels {} and {} share a budget",
+                    i + 1,
+                    j + 1
+                );
+            }
+        }
+        assert_eq!(AiConfig::strength(3), AiConfig::default());
+    }
+
+    /// Out-of-range choices clamp into the row rather than panicking: a UI
+    /// that can only offer 1–5 never needs a failure path for 0 or 9.
+    #[test]
+    fn out_of_range_levels_clamp_into_the_row() {
+        assert_eq!(AiConfig::strength(0), AiConfig::strength(1));
+        assert_eq!(AiConfig::strength(9), AiConfig::strength(5));
     }
 }
 
