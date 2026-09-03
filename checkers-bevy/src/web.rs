@@ -30,6 +30,16 @@ pub fn share_room(room: &RoomId) {
     write_fragment(&format!("room={}", room.0));
 }
 
+/// Suppress the browser's right-click context menu so the 3D camera's
+/// right-drag orbit is not interrupted by a menu popping up. No-op off-web.
+pub fn prevent_context_menu() {
+    #[cfg(target_family = "wasm")]
+    if let Some(window) = web_sys::window() {
+        let callback = js_sys::Function::new_no_args("event.preventDefault();");
+        let _ = window.add_event_listener_with_callback("contextmenu", &callback);
+    }
+}
+
 #[cfg(target_family = "wasm")]
 fn read_fragment() -> Option<String> {
     web_sys::window()?.location().hash().ok()

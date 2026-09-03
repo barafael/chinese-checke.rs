@@ -16,13 +16,15 @@ use bevy::window::{Monitor, PrimaryMonitor};
 use checkers_ai::{Ai, AiConfig};
 use checkers_bevy::ai::{Action, AiPace};
 use checkers_bevy::board_amlah;
-use checkers_bevy::board_style::{self, AmlahCamera, BoardStyle, BoardVisual, ClassicCamera};
+use checkers_bevy::board_style::{
+    self, AmlahCamera, BoardStyle, BoardVisual, ClassicCamera, OrbitCamera,
+};
 use checkers_bevy::board_view::{
     BOARD_HALF_EXTENT, HOLE_RADIUS, HOLE_SPACING, PIECE_RADIUS, camp_triangles, coord_to_world,
     hole_edges, hole_points, world_to_coord,
 };
 use checkers_bevy::setup::Seating;
-use checkers_bevy::{AppState, Selection, Session, audit, lobby, menu, net};
+use checkers_bevy::{AppState, Selection, Session, audit, lobby, menu, net, web};
 use checkers_core::geometry::{Coord, all_holes, camp_of, on_board};
 use checkers_core::law::{LAWS, verify_all};
 use checkers_core::position::{Player, Position};
@@ -30,6 +32,9 @@ use checkers_core::rules::Outcome;
 use checkers_net::NetState;
 
 fn main() {
+    // Before anything else: on the web, keep the browser's right-click menu
+    // from interrupting the 3D camera's right-drag orbit. No-op on native.
+    web::prevent_context_menu();
     App::new()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
@@ -71,6 +76,7 @@ fn main() {
         .init_resource::<Session>()
         .init_resource::<StatusVisible>()
         .init_resource::<BoardStyle>()
+        .init_resource::<OrbitCamera>()
         .init_state::<AppState>()
         .init_resource::<AiEngine>()
         .init_resource::<AiPace>()
@@ -110,6 +116,7 @@ fn main() {
                 apply_style,
                 toggle_status,
                 fit_camera_to_window,
+                board_style::orbit_camera,
                 // Drains the outbox and applies only host-sequenced moves, so
                 // it must run after input and before the view syncs.
                 // The computer plays through the same outbox as a human: one
@@ -410,6 +417,9 @@ fn apply_style(
             spawn_classic_board(&mut commands, &mut meshes, &mut materials);
         }
         BoardStyle::Amlah => {
+            // Spawned at the fixed camera; `orbit_camera` repositions it to the
+            // player's remembered orbit every frame, so switching back to the
+            // 3D style restores the last view rather than jerking to a default.
             commands.spawn((
                 Camera3d::default(),
                 Transform::from_translation(board_amlah::CAMERA_POS)

@@ -20,6 +20,8 @@ uuid = "1"
 [lints]
 workspace = true
 
-# Reading and sharing the room name through the URL fragment (web only).
+# Reading and sharing the room name through the URL fragment (web only); and a
+# context-menu listener so the 3D camera's right-drag orbit is not interrupted.
 [target.'cfg(target_family = "wasm")'.dependencies]
-web-sys = { version = "0.3", features = ["Location", "Window"] }
+web-sys = { version = "0.3", features = ["Location", "Window", "EventTarget"] }
+js-sys = "0.3"

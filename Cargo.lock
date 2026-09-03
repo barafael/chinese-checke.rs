@@ -2328,6 +2328,7 @@ dependencies = [
  "checkers-ai",
  "checkers-core",
  "checkers-net",
+ "js-sys",
  "uuid",
  "web-sys",
 ]
