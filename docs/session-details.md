@@ -65,3 +65,25 @@
 - All gates green: fmt, clippy `--workspace --all-targets`, `test --workspace`
   (25 test binaries, 0 failures), `doc --workspace --no-deps`, spec-gen
   (`--check`, `--check-registry`), wasm build for `checkers-bevy`.
+
+## 2026-09-03 — step staging, menu background, rebase audit (main session)
+
+- **Steps are staged** (`57ad03d`): a single step lands in
+  `Selection::Pend { mv, preview }` and waits for Enter, exactly like a jump
+  chain; `preview` shows the piece at its destination before the commit.
+  Controls go inert on another player's turn (`Session::may_act` gates the
+  buttons, clicks, and the staged-turn keys; `R`/`V`/`T`/`Escape` stay live).
+- **Menu background**: a live two-bot race behind the main menu
+  (`menu_bg`), drawing into the startup camera with its own
+  `MenuDemo { session, ai, pace }`, rebuilt only on landed moves, despawned
+  on exit. `Session::deal_two` and a shared `board_view::player_colour` keep
+  it identical to the watched demo; the button is now "Watch 2 Bots"; the
+  menu sits on a translucent card for legibility.
+- **Rebase-conflict audit**: the parallel session's two `pull --rebase
+  --autostash` runs left both autostashes unpopped. Audit found nothing lost:
+  `stash@{0}` reverse-applies cleanly onto HEAD; `stash@{1}`'s features
+  landed in evolved form (`for_players`/`compose`, `apply_seats`,
+  `turn_order_skips_vacant_seats` supersedes its UI-level test). Both stashes
+  dropped after verification.
+- **Roadmap**: remaining work planned and written to `docs/ROADMAP.md`
+  (decisions: resign is button-only, `.cchkrs` records, AI strength 1–5).
