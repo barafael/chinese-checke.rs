@@ -1263,7 +1263,7 @@ fn draw_name(
     net: Res<NetState>,
     edit: Res<NameEdit>,
     mut values: Query<(&mut Text, &InputText)>,
-    mut errors: Query<(&mut Text, &InputError)>,
+    mut errors: Query<(&mut Text, &InputError), Without<InputText>>,
 ) {
     if !net.is_changed() && !edit.is_changed() {
         return;
@@ -1298,7 +1298,7 @@ fn draw_room(
     room: Res<RoomId>,
     edit: Res<RoomEdit>,
     mut values: Query<(&mut Text, &InputText)>,
-    mut errors: Query<(&mut Text, &InputError)>,
+    mut errors: Query<(&mut Text, &InputError), Without<InputText>>,
 ) {
     if !room.is_changed() && !edit.is_changed() {
         return;
