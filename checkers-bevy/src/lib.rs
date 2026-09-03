@@ -35,6 +35,7 @@ use checkers_core::geometry::Coord;
 use checkers_core::position::{Move as GameMove, MoveKind as GameMoveKind, Player, Position};
 use checkers_core::rules::{Game, jump_routes};
 use checkers_core::turn::{JumpTurn, single_hop_destinations, step_destinations};
+use std::time::Duration;
 
 use crate::setup::Seating;
 
@@ -91,12 +92,64 @@ pub struct GameStats {
     pub longest_jump: u32,
     /// Who flew [`GameStats::longest_jump`].
     pub longest_jump_by: u8,
+    /// The clock reading this round started from. `None` until a frame has
+    /// run, so fresh deals and tests start clean.
+    pub started_at: Option<Duration>,
 }
 
 impl GameStats {
     /// Every player's committed moves.
     pub fn total_moves(&self) -> u32 {
         self.moves.iter().sum()
+    }
+
+    /// Record the clock reading this round started from — the first call
+    /// wins, so a replaced session re-stamps on the next frame.
+    pub fn note_started(&mut self, now: Duration) {
+        self.started_at.get_or_insert(now);
+    }
+
+    /// How long the round has run, given the current clock reading.
+    pub fn round_duration(&self, now: Duration) -> Option<Duration> {
+        self.started_at.map(|start| now - start)
+    }
+}
+
+/// A round's length in words: seconds under a minute, minutes and seconds
+/// above. Bevy's clock, not the wall clock, so it works on wasm.
+pub fn format_round_duration(d: Duration) -> String {
+    let total = d.as_secs();
+    if total < 60 {
+        format!("{total}s")
+    } else {
+        format!("{}m {}s", total / 60, total % 60)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_round_under_a_minute_reports_seconds_only() {
+        assert_eq!(format_round_duration(Duration::from_secs(42)), "42s");
+    }
+
+    #[test]
+    fn a_round_over_a_minute_reports_minutes_and_seconds() {
+        assert_eq!(format_round_duration(Duration::from_secs(204)), "3m 24s");
+    }
+
+    #[test]
+    fn the_round_duration_runs_from_the_first_stamp() {
+        let mut stats = GameStats::default();
+        assert_eq!(stats.round_duration(Duration::from_secs(5)), None);
+        stats.note_started(Duration::from_secs(5));
+        stats.note_started(Duration::from_secs(9));
+        assert_eq!(
+            stats.round_duration(Duration::from_secs(65)),
+            Some(Duration::from_secs(60))
+        );
     }
 }
 

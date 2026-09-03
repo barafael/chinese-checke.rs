@@ -24,7 +24,9 @@ use checkers_bevy::board_view::{
     hole_edges, hole_points, world_to_coord,
 };
 use checkers_bevy::setup::Seating;
-use checkers_bevy::{AppState, Selection, Session, audit, lobby, menu, menu_bg, net, web};
+use checkers_bevy::{
+    AppState, Selection, Session, audit, format_round_duration, lobby, menu, menu_bg, net, web,
+};
 use checkers_core::geometry::{Coord, all_holes, camp_of, on_board};
 use checkers_core::law::{LAWS, verify_all};
 use checkers_core::position::{Player, Position};
@@ -116,6 +118,7 @@ fn main() {
                 // what kind of meshes pieces and highlights are.
                 apply_style,
                 toggle_status,
+                stamp_session_clock,
                 fit_camera_to_window,
                 board_style::orbit_camera,
                 // Drains the outbox and applies only host-sequenced moves, so
@@ -625,6 +628,13 @@ fn toggle_status(keys: Res<ButtonInput<KeyCode>>, mut visible: ResMut<StatusVisi
     }
 }
 
+/// Stamp the session's clock once per round. A replaced session arrives with
+/// `started_at: None`, so the next frame re-stamps it; nothing else writes
+/// the field. Bevy's clock, not the wall clock, so this works on wasm.
+fn stamp_session_clock(mut session: ResMut<Session>, time: Res<Time>) {
+    session.stats.note_started(time.elapsed());
+}
+
 /// Zoom out when the window is too small to show the whole board. Never zooms
 /// in. Classic style only: the amlah camera always frames the whole board.
 fn fit_camera_to_window(
@@ -1039,6 +1049,7 @@ fn sync_camp_indicator(
 fn sync_game_over(
     session: Res<Session>,
     net: Res<NetState>,
+    time: Res<Time>,
     existing: Query<Entity, With<GameOverUi>>,
     mut commands: Commands,
 ) {
@@ -1143,6 +1154,16 @@ fn sync_game_over(
                     },
                     TextColor(Color::srgb(0.72, 0.72, 0.78)),
                 ));
+                if let Some(d) = session.stats.round_duration(time.elapsed()) {
+                    panel.spawn((
+                        Text::new(format!("Round lasted {}", format_round_duration(d))),
+                        TextFont {
+                            font_size: FontSize::Px(14.0),
+                            ..default()
+                        },
+                        TextColor(Color::srgb(0.72, 0.72, 0.78)),
+                    ));
+                }
                 if session.stats.longest_jump > 0 {
                     let by = Player::new(session.stats.longest_jump_by)
                         .expect("longest-jump player is below six");
