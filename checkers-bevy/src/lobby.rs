@@ -785,7 +785,7 @@ fn seat_for(net: &mut NetState, peer: &str, name: &str) {
 }
 
 /// Seat an engine at the table: a roster entry no peer commands, ready from
-/// the moment it sits, which [`assign_seating`] hands a camp like any other
+/// the moment it sits, which the start sequence hands a camp like any other
 /// player. Host-only, and only while the chosen seating still has room.
 pub fn add_engine(net: &mut NetState, chosen: Seating) -> Result<(), String> {
     if !net.sequences() {
