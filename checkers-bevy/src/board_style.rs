@@ -6,6 +6,7 @@
 //! function, branches in the piece/highlight/click systems.
 
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
+use bevy::input::touch::Touches;
 use bevy::prelude::*;
 
 /// The board visualization currently on screen.
@@ -123,7 +124,9 @@ impl OrbitCamera {
     }
 }
 
-/// Drive the 3D camera: right-drag orbits the board, the wheel zooms.
+/// Drive the 3D camera: right-drag orbits the board, the wheel zooms. One
+/// finger orbits and a two-finger pinch zooms, so the 3D board stays
+/// navigable on a touchscreen, which has neither a right button nor a wheel.
 ///
 /// The classic (2D) style has no [`AmlahCamera`], so the query is empty there
 /// and this is a no-op. Picking needs no change: `handle_clicks` casts each
@@ -138,6 +141,7 @@ pub fn orbit_camera(
     mouse: Res<ButtonInput<MouseButton>>,
     motion: Res<AccumulatedMouseMotion>,
     scroll: Res<AccumulatedMouseScroll>,
+    touches: Res<Touches>,
     mut orbit: ResMut<OrbitCamera>,
     mut cam: Query<&mut Transform, With<AmlahCamera>>,
 ) {
@@ -152,6 +156,27 @@ pub fn orbit_camera(
         orbit.yaw += d.x * ORBIT_YAW_SPEED;
         orbit.pitch =
             (orbit.pitch - d.y * ORBIT_PITCH_SPEED).clamp(ORBIT_PITCH_MIN, ORBIT_PITCH_MAX);
+    }
+
+    // One finger orbits; two pinch the radius. Distances are order-free, so
+    // the fingers may swap roles between frames without a jolt.
+    let fingers: Vec<_> = touches.iter().collect();
+    match fingers.as_slice() {
+        [one] => {
+            let d = one.position() - one.previous_position();
+            orbit.yaw += d.x * ORBIT_YAW_SPEED;
+            orbit.pitch =
+                (orbit.pitch - d.y * ORBIT_PITCH_SPEED).clamp(ORBIT_PITCH_MIN, ORBIT_PITCH_MAX);
+        }
+        [a, b] => {
+            let now = a.position().distance(b.position());
+            let before = a.previous_position().distance(b.previous_position());
+            if now > 1.0 && before > 1.0 {
+                orbit.radius =
+                    (orbit.radius * before / now).clamp(ORBIT_RADIUS_MIN, ORBIT_RADIUS_MAX);
+            }
+        }
+        _ => {}
     }
 
     // The wheel zooms in and out.

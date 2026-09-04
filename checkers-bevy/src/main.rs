@@ -12,6 +12,8 @@
 use bevy::camera::ScalingMode;
 use bevy::prelude::*;
 // Not in the prelude, unlike the rest of the window API.
+use bevy::ecs::system::SystemParam;
+use bevy::input::touch::{TouchInput, TouchPhase};
 use bevy::window::{Monitor, PrimaryMonitor};
 use checkers_ai::{Ai, AiConfig};
 use checkers_bevy::ai::{Action, AiPace};
@@ -35,6 +37,7 @@ use checkers_core::law::{LAWS, verify_all};
 use checkers_core::position::{Player, Position};
 use checkers_core::rules::Outcome;
 use checkers_net::NetState;
+use std::collections::HashMap;
 
 fn main() {
     // Before anything else: on the web, keep the browser's right-click menu
@@ -649,6 +652,14 @@ fn handle_buttons(
     }
 }
 
+/// Fingers being tracked for a tap, and the feed they come from: a release
+/// near where its finger landed is a tap, a release far away is a drag.
+#[derive(SystemParam)]
+struct TouchTaps<'w, 's> {
+    events: MessageReader<'w, 's, TouchInput>,
+    starts: Local<'s, HashMap<u64, Vec2>>,
+}
+
 fn handle_clicks(
     buttons: Res<ButtonInput<MouseButton>>,
     windows: Query<&Window>,
@@ -656,9 +667,38 @@ fn handle_clicks(
     controls: Query<&Interaction, With<ControlButton>>,
     mut session: ResMut<Session>,
     viewer: Option<Res<replay::ReplayView>>,
+    mut taps: TouchTaps,
 ) {
     // The record viewer's board is read-only: clicks move nothing.
-    if viewer.is_some() || !buttons.just_pressed(MouseButton::Left) || session.game.is_over() {
+    if viewer.is_some() || session.game.is_over() {
+        return;
+    }
+
+    // A touch counts as a click when the finger lifts within a flick of where
+    // it landed. On the web canvas, winit prevents the browser's emulated
+    // mouse events, so without this a touchscreen could select nothing. The
+    // mouse path below is untouched, and a drag - which orbits the 3D board -
+    // travels too far to qualify.
+    let mut tap: Option<Vec2> = None;
+    for event in taps.events.read() {
+        match event.phase {
+            TouchPhase::Started => {
+                taps.starts.insert(event.id, event.position);
+            }
+            TouchPhase::Moved => {
+                taps.starts.insert(event.id, event.position);
+            }
+            TouchPhase::Ended | TouchPhase::Canceled => {
+                if let Some(start) = taps.starts.remove(&event.id)
+                    && start.distance(event.position) < 12.0
+                {
+                    tap = Some(event.position);
+                }
+            }
+        }
+    }
+    let mouse_click = buttons.just_pressed(MouseButton::Left);
+    if !mouse_click && tap.is_none() {
         return;
     }
     // Do not treat a click on a control button as a board click.
@@ -669,7 +709,7 @@ fn handle_clicks(
     let Ok(window) = windows.single() else {
         return;
     };
-    let Some(cursor) = window.cursor_position() else {
+    let Some(cursor) = tap.or_else(|| window.cursor_position()) else {
         return;
     };
     let Ok((camera, cam_tf, amlah_cam)) = cameras.single() else {
