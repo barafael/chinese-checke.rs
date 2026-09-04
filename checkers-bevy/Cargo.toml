@@ -23,7 +23,7 @@ workspace = true
 # Saving and opening `.cchkrs` rounds through a file dialog. Web builds use
 # localStorage instead, so the dialog crate is native-only.
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
-rfd = "0.15"
+rfd = "0.17"
 
 # Reading and sharing the room name through the URL fragment (web only); a
 # context-menu listener so the 3D camera's right-drag orbit is not interrupted;
