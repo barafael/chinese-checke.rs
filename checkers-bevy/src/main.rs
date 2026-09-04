@@ -28,7 +28,7 @@ use checkers_bevy::replay;
 use checkers_bevy::setup::Seating;
 use checkers_bevy::{
     AppState, Selection, Session, audit, format_round_duration, lobby, menu, menu_bg, net, record,
-    web,
+    sound, web,
 };
 use checkers_core::geometry::{Coord, all_holes, camp_of, on_board};
 use checkers_core::law::{LAWS, verify_all};
@@ -89,6 +89,7 @@ fn main() {
         .add_plugins(lobby::plugin)
         .add_plugins(menu::plugin)
         .add_plugins(menu_bg::plugin)
+        .add_plugins(sound::plugin)
         .add_systems(Startup, setup)
         // Not state-scoped: the lobby is the first thing shown, and it is the
         // screen whose buttons the old size hid.
@@ -150,6 +151,7 @@ fn main() {
                     // one sequencing path, no privileged moves.
                     ai_take_turn,
                     net::pump,
+                    sound_watch,
                     // Queue the opponent's move for its replay before the
                     // board is redrawn, so the flight takes over the piece on
                     // the very frame it lands.
@@ -575,6 +577,8 @@ fn handle_buttons(
     interactions: Query<(&Interaction, &ControlButton), Changed<Interaction>>,
     mut session: ResMut<Session>,
     viewer: Option<Res<replay::ReplayView>>,
+    sounds: Res<sound::Sounds>,
+    on: Res<sound::SoundOn>,
     mut commands: Commands,
 ) {
     // The viewer hides the controls, so this cannot fire — but if it ever
@@ -593,7 +597,10 @@ fn handle_buttons(
         }
         match which {
             ControlButton::Confirm => session.confirm(),
-            ControlButton::Cancel => session.cancel(),
+            ControlButton::Cancel => {
+                session.cancel();
+                sounds.play(&mut commands, *on, sound::SoundKind::Cancel);
+            }
             ControlButton::Resign => session.resign(),
             ControlButton::Save => {
                 let text = session.to_record().to_text();
@@ -717,6 +724,9 @@ fn handle_keys(
     keys: Res<ButtonInput<KeyCode>>,
     mut session: ResMut<Session>,
     viewer: Option<Res<replay::ReplayView>>,
+    sounds: Res<sound::Sounds>,
+    on: Res<sound::SoundOn>,
+    mut commands: Commands,
 ) {
     // The record viewer owns the keyboard while it is up.
     if viewer.is_some() {
@@ -731,6 +741,7 @@ fn handle_keys(
     }
     if keys.just_pressed(KeyCode::Backspace) && session.may_act() {
         session.cancel();
+        sounds.play(&mut commands, *on, sound::SoundKind::Cancel);
     }
     if keys.just_pressed(KeyCode::KeyU) && session.may_act() {
         session.undo_hop();
@@ -1098,6 +1109,41 @@ fn sync_buttons(
     }
 }
 
+/// Answer hops and commits with sound. Watches the session rather than the
+/// input paths, so a staged hop ticks whether it came from a click, a key,
+/// or the engine, and a commit settles whether it was applied locally or
+/// arrived already sequenced.
+fn sound_watch(
+    session: Res<Session>,
+    sounds: Res<sound::Sounds>,
+    on: Res<sound::SoundOn>,
+    mut staged: Local<usize>,
+    mut committed: Local<u32>,
+    mut commands: Commands,
+) {
+    let hops = staged_hop_count(&session);
+    if hops > *staged {
+        sounds.play(&mut commands, *on, sound::SoundKind::Hop);
+    }
+    *staged = hops;
+
+    let moves = session.stats.total_moves();
+    if moves > *committed {
+        sounds.play(&mut commands, *on, sound::SoundKind::Commit);
+    }
+    *committed = moves;
+}
+
+/// How many hops the staged turn has flown: none before a selection, one for
+/// a pending step, the chain length mid-jump.
+fn staged_hop_count(session: &Session) -> usize {
+    match &session.selection {
+        Selection::None | Selection::Piece { .. } => 0,
+        Selection::Pend { .. } => 1,
+        Selection::Jumping { turn } => turn.hops(),
+    }
+}
+
 /// The colour swatch + label naming the active home base: whose camp is to
 /// move, and whether it is ours.
 fn sync_turn_indicator(
@@ -1220,6 +1266,8 @@ fn sync_game_over(
     session: Res<Session>,
     net: Res<NetState>,
     time: Res<Time>,
+    sounds: Res<sound::Sounds>,
+    on: Res<sound::SoundOn>,
     existing: Query<Entity, With<GameOverUi>>,
     mut commands: Commands,
 ) {
@@ -1254,6 +1302,13 @@ fn sync_game_over(
         }
         Some(Outcome::Draw) | None => ("Draw: every player is blocked.".to_string(), Color::WHITE),
     };
+
+    // A resignation falls; any other ending rings.
+    let ending = match session.game.outcome() {
+        Some(Outcome::Resigned(_)) => sound::SoundKind::Resign,
+        _ => sound::SoundKind::Win,
+    };
+    sounds.play(&mut commands, *on, ending);
 
     commands
         .spawn((

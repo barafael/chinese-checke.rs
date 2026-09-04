@@ -30,6 +30,7 @@ pub mod net;
 pub mod record;
 pub mod replay;
 pub mod setup;
+pub mod sound;
 pub mod web;
 
 use bevy::prelude::*;
