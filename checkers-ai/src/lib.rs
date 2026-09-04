@@ -217,13 +217,12 @@ impl Ai {
         // where the search decided. Route choice never changes the resulting
         // position, so any route to the same hole is equally good to play.
         let routes = checkers_core::rules::jump_routes(game.position(), mv.origin, 24);
-        let route = routes
-            .into_iter()
-            .find(|r| r.last() == Some(&mv.destination));
         // The rules' enumerator lists each path with the origin first; the
         // viewer wants the *landings only* — the sequence of holes the piece
         // stops on, in order, ending at the destination.
-        let route = route
+        let route = routes
+            .into_iter()
+            .find(|r| r.last() == Some(&mv.destination))
             .and_then(|r| r.get(1..).map(|r| r.to_vec()))
             .unwrap_or_else(|| vec![mv.destination]);
         Some((mv, route))

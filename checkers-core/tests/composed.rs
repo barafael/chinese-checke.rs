@@ -40,7 +40,7 @@ const CONFIGS: [&[Player]; 2] = [
 fn composed_initial(players: &[Player]) -> Position {
     let mut pos = Position::empty();
     for p in players {
-        for c in p.start_camp() {
+        for &c in p.start_camp() {
             pos.set(c, Some(*p));
         }
     }

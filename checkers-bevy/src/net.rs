@@ -12,6 +12,22 @@ use checkers_net::{CH_RELIABLE, NetMsg, NetState, WireMove, broadcast, decode, s
 
 use crate::{Session, audit};
 
+/// Fold the socket's peer changes into [`NetState`]: connected peers are
+/// added, disconnected ones dropped. Shared by the in-game pump and the
+/// lobby's host election so the two can never disagree on who is present.
+pub(crate) fn sync_peers(socket: &mut MatchboxSocket, net: &mut NetState) {
+    for (peer, state) in socket.update_peers() {
+        match state {
+            PeerState::Connected => {
+                if !net.peers.contains(&peer) {
+                    net.peers.push(peer);
+                }
+            }
+            PeerState::Disconnected => net.peers.retain(|p| *p != peer),
+        }
+    }
+}
+
 /// Drain the outbox, then apply whatever arrived.
 pub fn pump(
     socket: Option<ResMut<MatchboxSocket>>,
@@ -25,16 +41,7 @@ pub fn pump(
         return;
     };
 
-    for (peer, state) in socket.update_peers() {
-        match state {
-            PeerState::Connected => {
-                if !net.peers.contains(&peer) {
-                    net.peers.push(peer);
-                }
-            }
-            PeerState::Disconnected => net.peers.retain(|p| *p != peer),
-        }
-    }
+    sync_peers(&mut socket, &mut net);
 
     let peers = net.peers.clone();
     let host = peers

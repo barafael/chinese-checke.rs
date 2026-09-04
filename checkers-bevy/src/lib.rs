@@ -211,7 +211,7 @@ mod tests {
             .expect("the opening position has jumps");
         mv.route = None;
 
-        session.commit(&mv.clone());
+        session.commit(&mv);
 
         let last = session.last_move.expect("a commit records the move");
         assert!(last.path.len() >= 2, "a jump path has at least two holes");
@@ -449,10 +449,12 @@ impl Session {
         self.local_player.is_none_or(|me| last.mover != me)
     }
 
-    /// The concrete path a move flies: origin, any hop intermediates,
-    /// destination. The wire form carries no route — see [`Self::count_hops`]
-    /// — so a jump's is rebuilt the same deterministic way the stats are.
-    fn move_path(&self, mv: &GameMove) -> Vec<Coord> {
+    /// The concrete hole-by-hole trajectory a move flies: origin, any hop
+    /// landings, destination. A step touches exactly its two holes. The wire
+    /// form carries no jump route — see [`Self::count_hops`] — so a jump's is
+    /// rebuilt the same deterministic way the stats are: `jump_routes`
+    /// enumerates from the pre-move position with the origin first.
+    fn fly_route(&self, mv: &GameMove) -> Vec<Coord> {
         match mv.kind {
             GameMoveKind::Step => vec![mv.origin, mv.destination],
             GameMoveKind::Jump => match &mv.route {
@@ -465,6 +467,11 @@ impl Session {
         }
     }
 
+    /// The concrete path a move flies, used to animate the opponent's replay.
+    fn move_path(&self, mv: &GameMove) -> Vec<Coord> {
+        self.fly_route(mv)
+    }
+
     /// Hops in a jump move, and how many crossed another player's piece.
     ///
     /// The route is presentational on the wire, so a receiving peer rebuilds
@@ -474,13 +481,7 @@ impl Session {
     /// the move.
     fn count_hops(&self, mv: &GameMove, mover: Player) -> (u32, u32) {
         let pos = self.game.position();
-        let route = match &mv.route {
-            Some(r) => r.clone(),
-            None => jump_routes(pos, mv.origin, 64)
-                .into_iter()
-                .find(|r| r.last() == Some(&mv.destination))
-                .unwrap_or_default(),
-        };
+        let route = self.fly_route(mv);
         if route.len() < 2 {
             return (0, 0);
         }

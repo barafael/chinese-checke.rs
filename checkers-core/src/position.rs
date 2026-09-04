@@ -82,13 +82,13 @@ impl Player {
     }
 
     /// Holes of this player's starting camp.
-    pub fn start_camp(self) -> Vec<Coord> {
-        camp_holes(self.index() as usize).to_vec()
+    pub fn start_camp(self) -> &'static [Coord] {
+        camp_holes(self.index() as usize)
     }
 
     /// Holes of this player's target camp, $O_i = C_{(i+3) \bmod 6}$.
-    pub fn target_camp(self) -> Vec<Coord> {
-        camp_holes(self.opposite().index() as usize).to_vec()
+    pub fn target_camp(self) -> &'static [Coord] {
+        camp_holes(self.opposite().index() as usize)
     }
 }
 
@@ -138,7 +138,7 @@ impl Position {
     pub fn initial() -> Self {
         let mut p = Self::empty();
         for player in Player::ALL {
-            for c in player.start_camp() {
+            for &c in player.start_camp() {
                 p.set(c, Some(player));
             }
         }

@@ -438,12 +438,4 @@ mod tests {
         let peak = flight_transform(&points, 0.5, BoardStyle::Amlah);
         assert!(peak.translation.y > rest.translation.y + 0.1);
     }
-
-    /// A degenerate path (fewer than two holes) never queues a flight —
-    /// `watch` filters it, since there is nothing to walk.
-    #[test]
-    fn a_one_hole_path_is_not_a_flight() {
-        let path: Vec<Coord> = vec![Coord::new(0, 0)];
-        assert!(path.len() < 2, "watch queues only paths with a segment");
-    }
 }

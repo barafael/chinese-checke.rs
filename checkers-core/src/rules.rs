@@ -207,7 +207,7 @@ impl Game {
 
         let mut position = Position::empty();
         for &p in &players {
-            for c in p.start_camp() {
+            for &c in p.start_camp() {
                 position.set(c, Some(p));
             }
         }
@@ -363,8 +363,8 @@ pub fn blocked_position() -> Position {
     let blocker = Player::ALL[1];
 
     let camp = player.start_camp();
-    for c in &camp {
-        pos.set(*c, Some(player));
+    for &c in camp {
+        pos.set(c, Some(player));
     }
 
     // Block the camp's frontier.
@@ -396,7 +396,8 @@ pub fn blocked_position() -> Position {
 /// A fully packed board: nobody can move at all.
 pub fn frozen_position() -> Position {
     let mut pos = Position::empty();
-    for (i, c) in pos.holes().to_vec().into_iter().enumerate() {
+    let holes = pos.holes().to_vec();
+    for (i, &c) in holes.iter().enumerate() {
         pos.set(c, Some(Player::wrapping((i % PLAYERS) as u8)));
     }
     pos

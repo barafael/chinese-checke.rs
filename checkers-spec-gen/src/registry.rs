@@ -117,12 +117,10 @@ fn scan(source: &str, module: &str) -> Vec<Registration> {
             continue;
         }
 
-        let Some(args) = after.split(')').next() else {
-            continue;
-        };
-        let Some(type_name) = args.split(',').next().map(str::trim) else {
-            continue;
-        };
+        // `split` on a `&str` always yields at least its first segment, so
+        // neither extraction below can be empty-handed.
+        let args = after.split(')').next().unwrap_or_default();
+        let type_name = args.split(',').next().unwrap_or_default().trim();
         // A `$law:ty` metavariable or anything else that is not a type name.
         if !type_name
             .chars()

@@ -383,7 +383,6 @@ mod tests {
             assert!(!seen.contains(&c), "{c:?} listed twice in ALL");
             seen.push(c);
         }
-        assert_eq!(seen.len(), Chapter::ALL.len());
     }
 
     #[test]

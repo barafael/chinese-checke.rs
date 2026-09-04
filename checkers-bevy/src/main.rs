@@ -21,7 +21,7 @@ use checkers_bevy::board_style::{
 };
 use checkers_bevy::board_view::{
     BOARD_FRAME, HOLE_RADIUS, HOLE_SPACING, PIECE_RADIUS, camp_triangles, coord_to_world,
-    hole_edges, hole_points, world_to_coord,
+    hole_edges, hole_points, player_colour, world_to_coord,
 };
 use checkers_bevy::menu::AiStrength;
 use checkers_bevy::replay;
@@ -246,11 +246,6 @@ enum ControlButton {
     Open,
     /// Open a `.cchkrs` record and walk through it.
     Replay,
-}
-
-/// Distinct, roughly colour-blind-safe hues for the six players.
-fn player_colour(player: Player) -> Color {
-    checkers_bevy::board_view::player_colour(player)
 }
 
 /// Size the window to two thirds of the monitor and centre it.
@@ -1186,7 +1181,7 @@ fn sync_camp_indicator(
             let colour = player_colour(session.game.turn());
             let ring = meshes.add(Annulus::new(PIECE_RADIUS + 1.0, PIECE_RADIUS + 3.0));
             let mat = materials.add(colour.with_alpha(0.55));
-            for c in camp {
+            for &c in camp {
                 let p = coord_to_world(c);
                 commands.spawn((
                     Mesh2d(ring.clone()),
@@ -1205,7 +1200,7 @@ fn sync_camp_indicator(
                 unlit: true,
                 ..default()
             });
-            for c in camp {
+            for &c in camp {
                 let w = board_amlah::plane_to_world3(coord_to_world(c));
                 commands.spawn((
                     Mesh3d(ring.clone()),

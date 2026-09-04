@@ -196,7 +196,7 @@ impl Seating {
     pub fn position(self) -> Position {
         let mut p = Position::empty();
         for player in self.players() {
-            for c in player.start_camp() {
+            for &c in player.start_camp() {
                 p.set(c, Some(player));
             }
         }
@@ -235,7 +235,7 @@ impl Seating {
         }
         let mut pos = Position::empty();
         for player in players {
-            for c in player.start_camp() {
+            for &c in player.start_camp() {
                 pos.set(c, Some(*player));
             }
         }

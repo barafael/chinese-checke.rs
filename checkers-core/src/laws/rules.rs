@@ -141,9 +141,6 @@ impl Law for OccupancyAccounting {
                 HOLES - expected
             ));
         }
-        if occupied + empty != HOLES {
-            return Err(format!("{occupied} + {empty} != {HOLES}"));
-        }
         Ok(())
     }
 
@@ -209,8 +206,8 @@ impl Law for TargetCampIsOpposite {
     type Subject = Player;
 
     fn holds(player: &Player) -> Result<(), String> {
-        let start: HashSet<Coord> = player.start_camp().into_iter().collect();
-        let target: HashSet<Coord> = player.target_camp().into_iter().collect();
+        let start: HashSet<Coord> = player.start_camp().iter().copied().collect();
+        let target: HashSet<Coord> = player.target_camp().iter().copied().collect();
 
         if start.len() != PIECES_PER_PLAYER || target.len() != PIECES_PER_PLAYER {
             return Err(format!(
@@ -1140,7 +1137,7 @@ impl Law for WinCondition {
     fn holds(player: &Player) -> Result<(), String> {
         // Filling the target camp wins, for this player only.
         let mut pos = Position::empty();
-        for c in player.target_camp() {
+        for &c in player.target_camp() {
             pos.set(c, Some(*player));
         }
         if !pos.has_won(*player) {

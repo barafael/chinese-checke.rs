@@ -248,14 +248,12 @@ fn negamax(
         return (score, None);
     }
 
-    let alpha_orig = alpha;
-    let mut best_mv: Option<RawMove> = ctx.tt.get(&state.hash).and_then(|e| e.mv);
-
     let entry = if ctx.no_tt {
         None
     } else {
         ctx.tt.get(&state.hash)
     };
+    let mut best_mv: Option<RawMove> = entry.and_then(|e| e.mv);
     if let Some(entry) = entry
         && entry.depth >= depth
     {
@@ -329,7 +327,6 @@ fn negamax(
             },
         );
     }
-    let _ = alpha_orig;
     (best_score, best_mv)
 }
 

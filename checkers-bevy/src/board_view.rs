@@ -290,8 +290,8 @@ mod tests {
                 );
             }
 
-            for hole in &camp {
-                let p = coord_to_world(*hole);
+            for &hole in camp {
+                let p = coord_to_world(hole);
                 let mut inside = true;
                 for (a, b) in [(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])] {
                     let s = cross(a, b, p);

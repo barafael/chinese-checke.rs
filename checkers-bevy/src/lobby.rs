@@ -626,16 +626,7 @@ fn elect_host(socket: Option<ResMut<MatchboxSocket>>, mut net: ResMut<NetState>)
         return;
     };
 
-    for (peer, state) in socket.update_peers() {
-        match state {
-            PeerState::Connected => {
-                if !net.peers.contains(&peer) {
-                    net.peers.push(peer);
-                }
-            }
-            PeerState::Disconnected => net.peers.retain(|p| *p != peer),
-        }
-    }
+    crate::net::sync_peers(&mut socket, &mut net);
 
     if net.my_id.is_none() {
         net.my_id = socket.id();
