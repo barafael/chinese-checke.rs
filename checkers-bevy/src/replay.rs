@@ -16,6 +16,7 @@
 
 use bevy::prelude::*;
 use checkers_core::geometry::Coord;
+use std::time::Duration;
 
 use crate::Session;
 use crate::board_amlah;
@@ -258,6 +259,144 @@ pub fn sync_trace(
 /// board; [`sync_trace`] redraws it in the new style.
 #[derive(Component)]
 pub struct TraceMarker;
+
+// --- The record viewer ------------------------------------------------------
+//
+// Stepping through a saved round. The session on screen is a derived copy
+// rebuilt at the cursor — `Session::resumed_prefix` — so every rendering
+// system works unchanged, the law audit holds at every ply by construction,
+// and a forward step animates through the ordinary flight machinery, since a
+// viewer session controls no seat and `should_replay` says everything is
+// news. Pause-to-eat safety: while the viewer resource exists, the play
+// systems stand down (see the body gates in `main`).
+
+/// Seconds between autoplay steps.
+const VIEW_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Stepping through a saved record. The cursor counts plies shown; the
+/// session the systems render is derived from the prefix.
+#[derive(Resource)]
+pub struct ReplayView {
+    pub record: crate::record::GameRecord,
+    pub cursor: usize,
+    pub autoplay: bool,
+    next_at: Option<Duration>,
+}
+
+impl ReplayView {
+    /// A viewer opened at the round's end — the position `Open` would have
+    /// resumed anyway, but with the whole path back through it walkable.
+    pub fn at_end(record: crate::record::GameRecord) -> Self {
+        Self {
+            cursor: record.moves.len(),
+            record,
+            autoplay: false,
+            next_at: None,
+        }
+    }
+}
+
+/// The viewer's keys: arrows step, Space toggles autoplay, Escape hands the
+/// board back to the round at its end. Registered instead of the play keys —
+/// the gate in `main` never lets both run on one frame.
+pub fn handle_view_keys(
+    keys: Res<ButtonInput<KeyCode>>,
+    time: Res<Time>,
+    mut session: ResMut<Session>,
+    mut view: ResMut<ReplayView>,
+    mut commands: Commands,
+) {
+    let mut changed = false;
+
+    if keys.just_pressed(KeyCode::ArrowRight) && view.cursor < view.record.moves.len() {
+        view.cursor += 1;
+        changed = true;
+    }
+    if keys.just_pressed(KeyCode::ArrowLeft) && view.cursor > 0 {
+        view.cursor -= 1;
+        view.autoplay = false;
+        changed = true;
+    }
+    if keys.just_pressed(KeyCode::Space) {
+        view.autoplay = !view.autoplay;
+        view.next_at = Some(time.elapsed() + VIEW_INTERVAL);
+    }
+    // Autoplay walks while it plays and stops honestly at the end.
+    if view.autoplay
+        && view.next_at.is_some_and(|at| time.elapsed() >= at)
+        && view.cursor < view.record.moves.len()
+    {
+        view.cursor += 1;
+        changed = true;
+        view.next_at = Some(time.elapsed() + VIEW_INTERVAL);
+    }
+
+    if keys.just_pressed(KeyCode::Escape) {
+        if let Ok(s) = Session::resumed(&view.record) {
+            *session = s;
+        }
+        commands.remove_resource::<ReplayView>();
+        return;
+    }
+
+    if changed {
+        match Session::resumed_prefix(&view.record, view.cursor) {
+            Ok(s) => {
+                *session = s;
+                session.message = format!(
+                    "Replay: move {} of {} - arrows step, Space autoplay, Esc back",
+                    view.cursor,
+                    view.record.moves.len()
+                );
+            }
+            Err(f) => {
+                // Our own record refused by our own rules can only mean a
+                // bug; leave the viewer rather than sit on a broken board.
+                error!("record refused on replay: {f}");
+                commands.remove_resource::<ReplayView>();
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod view_tests {
+    use super::*;
+    use crate::net;
+    use crate::setup::Seating;
+    use checkers_core::turn::step_destinations;
+
+    /// A record of a real step, sliced at every ply: each prefix is a lawful
+    /// position, and the full-length prefix equals a plain resume.
+    #[test]
+    fn prefixes_of_a_record_are_the_round_stopped_early() {
+        let mut session = Session::new(Seating::Two);
+        let player = session.game.turn();
+        let origin = session
+            .game
+            .position()
+            .pieces_of(player)
+            .into_iter()
+            .find(|c| !step_destinations(session.game.position(), *c).is_empty())
+            .expect("the initial board offers steps");
+        let dest = step_destinations(session.game.position(), origin)[0];
+        session.select(origin);
+        session.activate(dest);
+        session.confirm();
+        net::apply_outbox_directly(&mut session);
+        let record = session.to_record();
+
+        let empty = Session::resumed_prefix(&record, 0).expect("an empty prefix resumes");
+        assert_eq!(
+            empty.game.position(),
+            Session::new(Seating::Two).game.position()
+        );
+
+        let full = Session::resumed_prefix(&record, 99).expect("a long prefix clamps");
+        assert_eq!(full.game.position(), session.game.position());
+        assert_eq!(full.stats.total_moves(), 1);
+    }
+}
 
 #[cfg(test)]
 mod tests {

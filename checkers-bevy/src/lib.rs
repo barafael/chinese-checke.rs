@@ -366,9 +366,20 @@ impl Session {
     /// refused rather than resumed. Auto-passes are re-derived as they were
     /// the first time round.
     pub fn resumed(record: &crate::record::GameRecord) -> Result<Self, RecordFault> {
+        Self::resumed_prefix(record, record.moves.len())
+    }
+
+    /// Rebuild the session `up_to` plies into a record — the replay viewer's
+    /// cursor. A position part-way through a round is exactly the same
+    /// derivation as a full resume, just stopped early; `up_to` past the end
+    /// clamps to it.
+    pub fn resumed_prefix(
+        record: &crate::record::GameRecord,
+        up_to: usize,
+    ) -> Result<Self, RecordFault> {
         let mut session = Self::new(record.seating);
         session.ai_players = record.ai_players.clone();
-        for (ply, wire) in record.moves.iter().enumerate() {
+        for (ply, wire) in record.moves.iter().take(up_to).enumerate() {
             let Some(mv) = wire.resolve(&session.game.legal_moves()) else {
                 let kind = if wire.jump { "jump" } else { "step" };
                 return Err(RecordFault::Replay {

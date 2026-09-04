@@ -123,6 +123,10 @@ fn main() {
                 (
                     handle_buttons,
                     handle_clicks,
+                    // The record viewer's keys. It holds `ResMut<ReplayView>`,
+                    // so Bevy runs it only while a record is being walked
+                    // through; the play keys stand down for exactly that time.
+                    replay::handle_view_keys,
                     handle_keys,
                     ai_one_shot,
                     board_style::handle_style_key,
@@ -240,6 +244,8 @@ enum ControlButton {
     Save,
     /// Open a `.cchkrs` record and resume it.
     Open,
+    /// Open a `.cchkrs` record and walk through it.
+    Replay,
 }
 
 /// Distinct, roughly colour-blind-safe hues for the six players.
@@ -417,6 +423,7 @@ fn spawn_ui(mut commands: Commands) {
                 (ControlButton::Resign, "Resign"),
                 (ControlButton::Save, "Save"),
                 (ControlButton::Open, "Open"),
+                (ControlButton::Replay, "Replay"),
             ] {
                 row.spawn((
                     Button,
@@ -572,7 +579,14 @@ fn spawn_amalah_board(
 fn handle_buttons(
     interactions: Query<(&Interaction, &ControlButton), Changed<Interaction>>,
     mut session: ResMut<Session>,
+    viewer: Option<Res<replay::ReplayView>>,
+    mut commands: Commands,
 ) {
+    // The viewer hides the controls, so this cannot fire — but if it ever
+    // did, a click must not rewrite the derived session under the cursor.
+    if viewer.is_some() {
+        return;
+    }
     for (interaction, which) in interactions.iter() {
         if *interaction != Interaction::Pressed {
             continue;
@@ -610,6 +624,25 @@ fn handle_buttons(
                 },
                 Err(e) => session.message = format!("Open failed: {e}"),
             },
+            ControlButton::Replay => match web::load_record() {
+                Ok(text) => match record::GameRecord::from_text(&text) {
+                    Ok(rec) => {
+                        let n = rec.moves.len();
+                        match Session::resumed_prefix(&rec, n) {
+                            Ok(s) => {
+                                *session = s;
+                                commands.insert_resource(replay::ReplayView::at_end(rec));
+                                session.message = format!(
+                                    "Replay: move {n} of {n} - arrows step, Space autoplay, Esc back"
+                                );
+                            }
+                            Err(f) => session.message = format!("Could not replay: {f}"),
+                        }
+                    }
+                    Err(f) => session.message = format!("Could not open: {f}"),
+                },
+                Err(e) => session.message = format!("Replay failed: {e}"),
+            },
         }
     }
 }
@@ -620,8 +653,10 @@ fn handle_clicks(
     cameras: Query<(&Camera, &GlobalTransform, Option<&AmlahCamera>)>,
     controls: Query<&Interaction, With<ControlButton>>,
     mut session: ResMut<Session>,
+    viewer: Option<Res<replay::ReplayView>>,
 ) {
-    if !buttons.just_pressed(MouseButton::Left) || session.game.is_over() {
+    // The record viewer's board is read-only: clicks move nothing.
+    if viewer.is_some() || !buttons.just_pressed(MouseButton::Left) || session.game.is_over() {
         return;
     }
     // Do not treat a click on a control button as a board click.
@@ -683,7 +718,15 @@ fn handle_clicks(
     }
 }
 
-fn handle_keys(keys: Res<ButtonInput<KeyCode>>, mut session: ResMut<Session>) {
+fn handle_keys(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut session: ResMut<Session>,
+    viewer: Option<Res<replay::ReplayView>>,
+) {
+    // The record viewer owns the keyboard while it is up.
+    if viewer.is_some() {
+        return;
+    }
     if (keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::NumpadEnter))
         && session.may_act()
     {
@@ -717,7 +760,16 @@ fn toggle_status(keys: Res<ButtonInput<KeyCode>>, mut visible: ResMut<StatusVisi
 /// Stamp the session's clock once per round. A replaced session arrives with
 /// `started_at: None`, so the next frame re-stamps it; nothing else writes
 /// the field. Bevy's clock, not the wall clock, so this works on wasm.
-fn stamp_session_clock(mut session: ResMut<Session>, time: Res<Time>) {
+fn stamp_session_clock(
+    mut session: ResMut<Session>,
+    time: Res<Time>,
+    viewer: Option<Res<replay::ReplayView>>,
+) {
+    // A viewer session is rebuilt per step; stamping it would make the
+    // game-over card report the viewer's age, not the round's length.
+    if viewer.is_some() {
+        return;
+    }
     session.stats.note_started(time.elapsed());
 }
 
@@ -988,6 +1040,7 @@ fn sync_highlights(
 fn sync_buttons(
     session: Res<Session>,
     net: Res<NetState>,
+    viewer: Option<Res<replay::ReplayView>>,
     mut buttons: Query<(
         &Interaction,
         &ControlButton,
@@ -996,21 +1049,30 @@ fn sync_buttons(
     )>,
 ) {
     for (interaction, which, mut bg, mut vis) in buttons.iter_mut() {
-        // Record controls are local-mode, like resign: a networked round is
-        // shared state, and one peer's save would say nothing about the rest
-        // of the table.
-        if matches!(
+        // While the record viewer is up the whole row steps aside: its keys
+        // own the input, and the controls have nothing to act on.
+        let wanted = if viewer.is_some() {
+            Visibility::Hidden
+        } else if matches!(
             which,
-            ControlButton::Resign | ControlButton::Save | ControlButton::Open
+            ControlButton::Resign
+                | ControlButton::Save
+                | ControlButton::Open
+                | ControlButton::Replay
         ) {
-            let wanted = if net.seats.is_empty() {
+            // Record controls are local-mode, like resign: a networked round
+            // is shared state, and one peer's save would say nothing about
+            // the rest of the table.
+            if net.seats.is_empty() {
                 Visibility::Inherited
             } else {
                 Visibility::Hidden
-            };
-            if *vis != wanted {
-                *vis = wanted;
             }
+        } else {
+            Visibility::Inherited
+        };
+        if *vis != wanted {
+            *vis = wanted;
         }
         // Buttons do nothing on someone else's turn — dim them entirely so the
         // controls cannot look actionable. Confirm also needs a staged move to
@@ -1383,7 +1445,12 @@ fn ai_take_turn(
     mut engine: ResMut<AiEngine>,
     mut pace: ResMut<AiPace>,
     time: Res<Time>,
+    viewer: Option<Res<replay::ReplayView>>,
 ) {
+    // The viewer's session is a derived copy; the engine must not advance it.
+    if viewer.is_some() {
+        return;
+    }
     // The driver owns the staged-jump selection while its hops fly, so the
     // human-selection gate lives inside it. The pacing clock is Bevy's, which
     // is available on wasm where std's wall clock is not.
