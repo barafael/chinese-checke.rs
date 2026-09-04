@@ -104,6 +104,12 @@ pub struct Seat {
     /// is also a spectator in effect, but this field is the *declared* choice.
     #[serde(default)]
     pub spectate: bool,
+    /// A seat the host gave to an engine rather than a peer. It joins, takes a
+    /// camp, and reads as ready like anyone else; only the host's engine
+    /// actually plays it, and its moves reach the table as ordinary sequenced
+    /// moves — no privileged path.
+    #[serde(default)]
+    pub engine: bool,
 }
 
 /// Top-level wire envelope.
@@ -544,6 +550,7 @@ mod room_tests {
                 player: Some(0),
                 ready: true,
                 spectate: false,
+                engine: false,
             }],
             ..NetState::default()
         };

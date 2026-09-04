@@ -184,6 +184,7 @@ fn the_hosts_seating_reaches_the_guest_over_the_wire() {
                 player: Some(0),
                 ready: true,
                 spectate: false,
+                engine: false,
             }],
             players: host_seating.indices(),
         };

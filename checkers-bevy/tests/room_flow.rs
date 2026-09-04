@@ -111,6 +111,7 @@ fn changing_room_forgets_the_old_rooms_state() {
             player: Some(0),
             ready: true,
             spectate: false,
+            engine: false,
         }];
     }
 

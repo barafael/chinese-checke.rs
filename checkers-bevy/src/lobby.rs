@@ -59,6 +59,7 @@ use checkers_net::{CH_RELIABLE, NetMsg, NetState, RoomId, Seat, broadcast, decod
 
 use crate::setup::Seating;
 use crate::{AppState, Session};
+use checkers_core::position::Player;
 
 /// Push the host's roster to every peer. The roster broadcast follows every
 /// roster change, so it lives in one place.
@@ -81,6 +82,9 @@ pub enum LobbyButton {
     Seats(Seating),
     /// Declare or renounce spectator status.
     Spectate,
+    /// Seat an engine at the table (host only). The engine takes the next
+    /// camp in join order and plays it through the host's move path.
+    Engine,
     /// Back to the main menu.
     Back,
 }
@@ -180,7 +184,9 @@ fn sync_button_styles(
             LobbyButton::Seats(s) => *s == chosen.0,
             LobbyButton::Ready => net.my_seat().is_some_and(|s| s.ready && !s.spectate),
             LobbyButton::Spectate => net.my_seat().is_some_and(|s| s.spectate),
-            LobbyButton::Start | LobbyButton::Solo | LobbyButton::Back => false,
+            LobbyButton::Start | LobbyButton::Solo | LobbyButton::Engine | LobbyButton::Back => {
+                false
+            }
         };
         let colour = match interaction {
             Interaction::Pressed if selected => CHOSEN_DOWN,
@@ -458,6 +464,7 @@ fn spawn(mut commands: Commands, chosen: Res<ChosenSeating>) {
                 button(row, "Ready (Space)", LobbyButton::Ready);
                 button(row, "Start (Enter)", LobbyButton::Start);
                 button(row, "Spectate (P)", LobbyButton::Spectate);
+                button(row, "Add engine", LobbyButton::Engine);
                 button(row, "Solo (S)", LobbyButton::Solo);
                 button(row, "Back (Esc)", LobbyButton::Back);
             });
@@ -782,7 +789,50 @@ fn seat_for(net: &mut NetState, peer: &str, name: &str) {
         player,
         ready: false,
         spectate: false,
+        engine: false,
     });
+}
+
+/// Seat an engine at the table: a roster entry no peer commands, ready from
+/// the moment it sits, which [`assign_seating`] hands a camp like any other
+/// player. Host-only, and only while the chosen seating still has room.
+pub fn add_engine(net: &mut NetState, chosen: Seating) -> Result<(), String> {
+    if !net.sequences() {
+        return Err("Only the host can seat an engine.".into());
+    }
+    let seated = net.seats.iter().filter(|s| !s.spectate).count();
+    if seated >= chosen.count() {
+        return Err(format!(
+            "The table seats {} - no room for another engine. Choose a bigger seating.",
+            chosen.count()
+        ));
+    }
+    let n = net.seats.iter().filter(|s| s.engine).count();
+    net.seats.push(Seat {
+        peer: format!("engine-{n}"),
+        name: "Engine".into(),
+        player: None,
+        ready: true,
+        spectate: false,
+        engine: true,
+    });
+    Ok(())
+}
+
+/// The camps this peer's own engine should drive, from the roster's engine
+/// seats. Only the sequencing authority - the host - runs engines: its moves
+/// reach every peer as ordinary sequenced moves, and a guest that also ran
+/// them would drive the same seat twice.
+pub fn engine_camps(net: &NetState) -> Vec<Player> {
+    if !net.sequences() {
+        return Vec::new();
+    }
+    net.seats
+        .iter()
+        .filter(|s| s.engine)
+        .filter_map(|s| s.player)
+        .filter_map(|i| Player::new(i as u8))
+        .collect()
 }
 
 /// Which seating to deal on receiving the host's `Start`.
@@ -1103,6 +1153,9 @@ fn handle_buttons(
     let mut start = keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::NumpadEnter);
     let mut spectate = keys.just_pressed(KeyCode::KeyP);
     let mut back = keys.just_pressed(KeyCode::Escape);
+    // Seating an engine is deliberate button work, not a key a stray finger
+    // finds - the same reasoning as resignation.
+    let mut engine = false;
 
     // `S` starts a solo game unconditionally, without consulting the network at
     // all. Enter's behaviour depends on peers and readiness, and every way that
@@ -1119,6 +1172,7 @@ fn handle_buttons(
             LobbyButton::Start => start = true,
             LobbyButton::Solo => solo = true,
             LobbyButton::Spectate => spectate = true,
+            LobbyButton::Engine => engine = true,
             LobbyButton::Back => back = true,
             // Handled by their own systems.
             LobbyButton::Seats(_) => {}
@@ -1137,7 +1191,9 @@ fn handle_buttons(
     if solo || (start && matches!(start_decision(&net, chosen.0), StartDecision::Solo)) {
         // Solo means this peer drives every seated camp, so no seat may keep a
         // player binding — a self-seat left over from lobby greetings would
-        // otherwise pin the solo player to camp 0 and strand the rest.
+        // otherwise pin the solo player to camp 0 and strand the rest. The
+        // solo-versus-engine game lives in the hotseat panel, not here.
+        net.seats.retain(|s| !s.engine);
         net.unbind_players();
         info!("starting a solo game");
         next_state.set(AppState::InGame);
@@ -1196,6 +1252,18 @@ fn handle_buttons(
             } else if net.seats.iter().any(|s| s.peer == me) {
                 broadcast(&mut socket, &peers, &NetMsg::Ready(now));
             }
+        }
+    }
+
+    if engine {
+        match add_engine(&mut net, chosen.0) {
+            Ok(()) => {
+                // The roster broadcast is how every guest learns an engine
+                // has sat down.
+                publish_roster(&mut socket, &net, &peers);
+                net.status = "Engine seated - it takes the next camp at start.".into();
+            }
+            Err(why) => net.status = why,
         }
     }
 
@@ -1363,14 +1431,18 @@ pub fn apply_seats(
     mut session: ResMut<Session>,
 ) {
     *session = Session::new(chosen.0);
-    session.ai_players = ai_seats.0.clone();
+    // The hotseat panel's engine choice, and the host's lobby engines: two
+    // ways engines reach a game, and either way they are the same field.
+    let mut driven = ai_seats.0.clone();
+    driven.extend(engine_camps(&net));
+    session.ai_players = driven;
     session.local_player = net.my_player();
     // A declared spectator watches: local_player is already None for one, and
     // this flag stops hotseat-style "move everyone" from applying to them. The
     // same applies when the computer owns every seat — the humans are an
     // audience, so board input is blocked while the engines race.
     session.spectating = net.my_seat().is_some_and(|s| s.spectate)
-        || (!ai_seats.0.is_empty() && ai_seats.0.len() >= chosen.0.count());
+        || (!session.ai_players.is_empty() && session.ai_players.len() >= chosen.0.count());
     session.message = if session.spectating {
         "Spectating - watch, but do not touch.".into()
     } else {
@@ -1394,6 +1466,7 @@ mod tests {
             player: Some(0),
             ready,
             spectate: false,
+            engine: false,
         }
     }
 
@@ -1416,6 +1489,85 @@ mod tests {
         assert!(net.peers.is_empty(), "the fixture has no peers");
         assert!(net.seats.is_empty(), "and no seat has been created yet");
         assert_eq!(start_decision(&net, Seating::Two), StartDecision::Solo);
+    }
+
+    /// The host seats an engine; it reads as ready so it never blocks a start,
+    /// and assign_seating hands it a camp in join order like any player.
+    #[test]
+    fn an_engine_seat_takes_a_camp_like_any_player() {
+        let mut net = NetState {
+            is_host: true,
+            ..Default::default()
+        };
+        add_engine(&mut net, Seating::Two).expect("an empty table has room");
+        assert!(net.seats[0].engine);
+        assert!(net.seats[0].ready, "an engine must never block a start");
+        assert!(
+            net.seats[0].player.is_none(),
+            "camps are bound only at start"
+        );
+
+        assign_seating(&mut net, Seating::Two);
+        assert_eq!(
+            net.seats[0].player,
+            Some(0),
+            "join order: the engine sat first"
+        );
+        assert_eq!(net.seats[0].name, "Engine");
+    }
+
+    /// The table's capacity is the seating's: a Two-player deal cannot seat a
+    /// second engine alongside the one human already there.
+    #[test]
+    fn an_engine_cannot_outseat_the_table() {
+        let mut net = NetState {
+            is_host: true,
+            ..Default::default()
+        };
+        let mut human = seat("alice", true);
+        human.player = None;
+        net.seats.push(human);
+        add_engine(&mut net, Seating::Two).expect("one free camp");
+        let second = add_engine(&mut net, Seating::Two);
+        assert!(second.is_err(), "Two seats two players; both are taken");
+    }
+
+    /// Only the sequencing authority runs engines. A guest with the same
+    /// roster must not also drive the engine's camp, or the seat would be
+    /// played twice.
+    #[test]
+    fn engines_drive_on_the_host_alone() {
+        let mut host = NetState {
+            is_host: true,
+            ..Default::default()
+        };
+        let mut guest = NetState {
+            // A guest in a room: without peers it would sequence by itself.
+            peers: vec![fake_peer()],
+            ..Default::default()
+        };
+        add_engine(&mut host, Seating::Two).expect("the host seats an engine");
+        add_engine(&mut guest, Seating::Two).expect_err("a guest cannot seat an engine");
+
+        // Camps bind at start, on the host; the guest receives the roster.
+        assign_seating(&mut host, Seating::Two);
+        guest.seats = host.seats.clone();
+        assert_eq!(engine_camps(&host), vec![Player::ALL[0]]);
+        assert!(engine_camps(&guest).is_empty());
+    }
+
+    /// A guest starting solo strips engine seats: the solo-versus-engine game
+    /// is the hotseat panel's, and a stranded engine entry would take a camp
+    /// nobody can drive.
+    #[test]
+    fn solo_play_strips_engines() {
+        let mut net = NetState {
+            is_host: true,
+            ..Default::default()
+        };
+        add_engine(&mut net, Seating::Two).expect("room");
+        net.seats.retain(|s| !s.engine);
+        assert!(net.seats.is_empty());
     }
 
     /// Specifically the socket-never-connected case: no id, no seat, no peers.
