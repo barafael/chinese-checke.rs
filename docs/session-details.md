@@ -87,3 +87,37 @@
   dropped after verification.
 - **Roadmap**: remaining work planned and written to `docs/ROADMAP.md`
   (decisions: resign is button-only, `.cchkrs` records, AI strength 1–5).
+
+## 2026-09-04 — the roadmap, end to end (main session)
+
+- **Phases 1–3**: README honesty (steps are staged; every key documented);
+  the round-duration readout that `57ad03d`'s message had promised but the
+  rebase had eaten, restored; resignation as a core `Outcome` with a
+  button-only control; engine strength 1–5 with level 3 pinned to the old
+  default.
+- **Track A, closed by surprise**: the claim inventory found chapters 6–15
+  already fully formalised (28 of 43 laws); the README paragraph advertising
+  the gap was itself stale. `docs/claim-inventory.md` records the mapping
+  and the two declined candidates (turn-kind purity, win terminality).
+- **Phase 4**: `.cchkrs` records — the position is derived, not stored;
+  resume replays every move through `WireMove::resolve` with the law audit
+  per move, so a forged record is refused rather than resumed. Native file
+  dialog, web localStorage. The replay viewer walks a record: arrows step,
+  Space autoplays, the on-screen session is rebuilt at the cursor via
+  `resumed_prefix`, and while it is up the play systems stand down.
+- **Phase 5**: lobby Add engine seats a host-owned engine; it takes a camp
+  in join order, reads as ready, and only the sequencing authority's engine
+  drives it — moves flow as ordinary sequenced moves, so a guest cannot
+  double-drive. No host migration, by the standing rule.
+- **Phase 6**: own-move animation declined with reasoning — hotseat already
+  animates own moves; in solo they would delay the player's own feedback.
+- **Phase 7**: one-finger orbit, pinch zoom, and tap-as-click (winit
+  prevents emulated mouse events on the web canvas). The on-glass feel
+  spike stays manual.
+- **Phase 8**: sound via Bevy's built-in `Pitch` — the file/script question
+  dissolved; `M` mutes; the first click is the browser's gesture.
+- Two mid-flight collisions with the parallel session's own feature work
+  (a replay-animation module landing in the same `Session`): waited out the
+  edit-loop churn, merged coherently, and committed entangled slices
+  together per the standing policy. One of their fresh tests asserted the
+  opposite of `CC-JUMP-NO-CAPTURE`; fixed to assert the law.
