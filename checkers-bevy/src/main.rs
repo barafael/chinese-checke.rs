@@ -127,9 +127,9 @@ fn main() {
                 (
                     handle_buttons,
                     handle_clicks,
-                    // The record viewer's keys. It holds `ResMut<ReplayView>`,
-                    // so Bevy runs it only while a record is being walked
-                    // through; the play keys stand down for exactly that time.
+                    // The record viewer's keys. It takes the viewer
+                    // optionally and stands down while none is open; the play
+                    // keys do the same for exactly that time.
                     replay::handle_view_keys,
                     handle_keys,
                     ai_one_shot,

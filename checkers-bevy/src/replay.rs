@@ -303,9 +303,15 @@ pub fn handle_view_keys(
     keys: Res<ButtonInput<KeyCode>>,
     time: Res<Time>,
     mut session: ResMut<Session>,
-    mut view: ResMut<ReplayView>,
+    view: Option<ResMut<ReplayView>>,
     mut commands: Commands,
 ) {
+    // The viewer exists only while a record is walked through; when it does
+    // not, the key system must stand down rather than force Bevy to demand a
+    // resource no game has created.
+    let Some(mut view) = view else {
+        return;
+    };
     let mut changed = false;
 
     if keys.just_pressed(KeyCode::ArrowRight) && view.cursor < view.record.moves.len() {
