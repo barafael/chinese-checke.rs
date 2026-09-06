@@ -4,20 +4,14 @@
 //! source — the backend generates the wave itself, so there are no audio
 //! files, no decoder features, and nothing to load. One tone per meaning:
 //! a hop ticks, a commit settles, a cancel sinks, a win rings, a resignation
-//! falls. `M` mutes.
+//! falls. `M` mutes and unmutes; sound starts off.
 
 use bevy::prelude::*;
 use std::time::Duration;
 
-/// Whether this build answers with sound. On by default; `M` toggles.
-#[derive(Resource, Debug, Clone, Copy)]
+/// Whether this build answers with sound. Muted by default; `M` unmutes.
+#[derive(Resource, Debug, Clone, Copy, Default)]
 pub struct SoundOn(pub bool);
-
-impl Default for SoundOn {
-    fn default() -> Self {
-        Self(true)
-    }
-}
 
 /// The tones, built once at startup and kept by handle.
 #[derive(Resource)]
@@ -92,11 +86,11 @@ fn toggle(keys: Res<ButtonInput<KeyCode>>, mut on: ResMut<SoundOn>) {
 mod tests {
     use super::*;
 
-    /// Sound is born on: a fresh session of a game should be audible, and a
-    /// fresh build should not start muted by accident.
+    /// Sound is born muted: a fresh build should not surprise the player with
+    /// tones, and unmuting is one explicit `M`.
     #[test]
-    fn sound_starts_on() {
-        assert!(SoundOn::default().0);
+    fn sound_starts_muted() {
+        assert!(!SoundOn::default().0);
     }
 
     /// Muting is a toggle: M twice returns to where it was.
@@ -105,6 +99,6 @@ mod tests {
         let mut on = SoundOn::default();
         on.0 = !on.0;
         on.0 = !on.0;
-        assert!(on.0);
+        assert!(!on.0);
     }
 }
