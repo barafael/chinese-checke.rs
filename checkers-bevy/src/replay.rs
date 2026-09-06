@@ -18,6 +18,7 @@ use bevy::prelude::*;
 use checkers_core::geometry::Coord;
 use std::time::Duration;
 
+use crate::LastMove;
 use crate::Session;
 use crate::board_amlah;
 use crate::board_style::{BoardStyle, BoardVisual};
@@ -45,6 +46,11 @@ pub struct Replay {
     /// Bumped whenever `trace` is replaced or cleared, so [`sync_trace`] can
     /// tell a real change from a frame it has already drawn.
     trace_version: u64,
+    /// The [`Session::last_move`] that was already queued, so [`watch`] does
+    /// not re-queue the same move every frame. Bevy marks a resource changed
+    /// on every `ResMut` access regardless of whether the value moved, so
+    /// without this guard the flight replays infinitely.
+    last_queued: Option<LastMove>,
 }
 
 /// One move being flown, or waiting to be flown.
@@ -67,6 +73,7 @@ impl Replay {
     fn clear(&mut self) {
         self.pending = None;
         self.flight = None;
+        self.last_queued = None;
         if self.trace.is_some() {
             self.trace = None;
             self.trace_version += 1;
@@ -88,13 +95,23 @@ pub fn watch(session: Res<Session>, mut replay: ResMut<Replay>) {
         // A fresh session — new game, re-seated, resumed record. Nothing to
         // replay, and any trace from the previous game is stale.
         None => replay.clear(),
-        Some(last) if session.should_replay() && last.path.len() >= 2 => {
+        Some(last)
+            if session.should_replay()
+                && last.path.len() >= 2
+                // `session.is_changed()` fires every frame while any `ResMut`
+                // touches the session, even when the value is unchanged (Bevy
+                // marks the resource on access, not on mutation). Without the
+                // identity check the same move is queued again as soon as its
+                // flight finishes, producing an infinite loop.
+                && replay.last_queued.as_ref() != Some(last) =>
+        {
             replay.pending = Some(Flight {
                 path: last.path.clone(),
                 points: last.path.iter().map(|c| coord_to_world(*c)).collect(),
                 elapsed: 0.0,
                 total: (last.path.len() as f32 - 1.0) * SECONDS_PER_HOP,
             });
+            replay.last_queued = Some(last.clone());
         }
         // One's own move, or a degenerate path: nothing to animate, and the
         // trace of the opponent's previous move stays up.
