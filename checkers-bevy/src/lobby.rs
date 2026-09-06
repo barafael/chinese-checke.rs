@@ -60,6 +60,7 @@ use checkers_net::{CH_RELIABLE, NetMsg, NetState, RoomId, Seat, broadcast, decod
 use crate::setup::Seating;
 use crate::{AppState, Session};
 use checkers_core::position::Player;
+use checkers_core::rules::Variants;
 
 /// Push the host's roster to every peer. The roster broadcast follows every
 /// roster change, so it lives in one place.
@@ -82,6 +83,9 @@ pub enum LobbyButton {
     Seats(Seating),
     /// Declare or renounce spectator status.
     Spectate,
+    /// Toggle the house rule: no piece may rest in a triangle that is neither
+    /// its own camp nor its target camp. Host-only, like the seating.
+    ForeignCamps,
     /// Seat an engine at the table (host only). The engine takes the next
     /// camp in join order and plays it through the host's move path.
     Engine,
@@ -121,6 +125,13 @@ struct RosterText;
 #[derive(Resource, Default, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChosenSeating(pub Seating);
 
+/// The house-rule switches the host picked, set in the lobby and read when the
+/// game starts. Same resource-over-field reasoning as [`ChosenSeating`], and
+/// the same rule: only the host decides, since the shared game must play under
+/// one rule set for every peer.
+#[derive(Resource, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ChosenVariants(pub Variants);
+
 pub fn plugin(app: &mut App) {
     // A share link carries the room in the URL fragment; honour it over the
     // default so a link lands you in the sender's lobby. Native builds have no
@@ -131,6 +142,7 @@ pub fn plugin(app: &mut App) {
     app.init_resource::<NetState>()
         .init_resource::<RoomId>()
         .init_resource::<ChosenSeating>()
+        .init_resource::<ChosenVariants>()
         .init_resource::<RoomEdit>()
         .init_resource::<NameEdit>()
         .add_systems(OnEnter(AppState::Lobby), (checkers_net::open_socket, spawn))
@@ -176,6 +188,7 @@ pub fn not_editing(room: Res<RoomEdit>, name: Res<NameEdit>) -> bool {
 /// immediately without dirtying the UI otherwise.
 fn sync_button_styles(
     chosen: Res<ChosenSeating>,
+    variants: Res<ChosenVariants>,
     net: Res<NetState>,
     mut buttons: Query<(&Interaction, &LobbyButton, &mut BackgroundColor)>,
 ) {
@@ -184,6 +197,7 @@ fn sync_button_styles(
             LobbyButton::Seats(s) => *s == chosen.0,
             LobbyButton::Ready => net.my_seat().is_some_and(|s| s.ready && !s.spectate),
             LobbyButton::Spectate => net.my_seat().is_some_and(|s| s.spectate),
+            LobbyButton::ForeignCamps => variants.0.forbid_foreign_camps,
             LobbyButton::Start | LobbyButton::Solo | LobbyButton::Engine | LobbyButton::Back => {
                 false
             }
@@ -444,6 +458,16 @@ fn spawn(mut commands: Commands, chosen: Res<ChosenSeating>) {
                 }
             });
 
+            // House rules, one toggle per switch.
+            header(col, "Rules");
+            col.spawn(Node {
+                column_gap: Val::Px(10.0),
+                ..default()
+            })
+            .with_children(|row| {
+                button(row, "No foreign rest", LobbyButton::ForeignCamps);
+            });
+
             // The roster: who is here, ready, or spectating.
             col.spawn((
                 Text::new(String::new()),
@@ -651,6 +675,7 @@ fn pump_socket(
     socket: Option<ResMut<MatchboxSocket>>,
     mut net: ResMut<NetState>,
     mut chosen: ResMut<ChosenSeating>,
+    mut variants: ResMut<ChosenVariants>,
     mut next_state: ResMut<NextState<AppState>>,
 ) {
     let Some(mut socket) = socket else {
@@ -748,7 +773,11 @@ fn pump_socket(
                     Err(complaint) => net.status = complaint,
                 }
             }
-            NetMsg::Start { seats, players } => {
+            NetMsg::Start {
+                seats,
+                players,
+                forbid_foreign_camps,
+            } => {
                 net.seats = seats;
                 match adopt_seating(&players, chosen.0) {
                     Ok(seating) => chosen.0 = seating,
@@ -757,6 +786,7 @@ fn pump_socket(
                         net.status = complaint;
                     }
                 }
+                variants.0.forbid_foreign_camps = forbid_foreign_camps;
                 next_state.set(AppState::InGame);
             }
             // Moves cannot arrive before the game starts, but a late duplicate
@@ -853,10 +883,11 @@ fn adopt_seating(players: &[u32], current: Seating) -> Result<Seating, String> {
 /// exact bug this field was added to fix — and the whole suite still passed,
 /// because every test built its own `NetMsg::Start` and none covered the code
 /// that builds the real one.
-pub fn start_message(net: &NetState, seating: Seating) -> NetMsg {
+pub fn start_message(net: &NetState, seating: Seating, variants: Variants) -> NetMsg {
     NetMsg::Start {
         seats: net.seats.clone(),
         players: seating.indices(),
+        forbid_foreign_camps: variants.forbid_foreign_camps,
     }
 }
 
@@ -1138,11 +1169,13 @@ fn handle_buttons(
     // Read-only: `choose_seating` owns the writing. Needed here so the host's
     // `Start` can tell every peer which board to deal.
     chosen: Res<ChosenSeating>,
+    mut variants: ResMut<ChosenVariants>,
     mut next_state: ResMut<NextState<AppState>>,
 ) {
     let mut ready = keys.just_pressed(KeyCode::Space);
     let mut start = keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::NumpadEnter);
     let mut spectate = keys.just_pressed(KeyCode::KeyP);
+    let mut foreign = keys.just_pressed(KeyCode::KeyF);
     let mut back = keys.just_pressed(KeyCode::Escape);
     // Seating an engine is deliberate button work, not a key a stray finger
     // finds - the same reasoning as resignation.
@@ -1163,6 +1196,7 @@ fn handle_buttons(
             LobbyButton::Start => start = true,
             LobbyButton::Solo => solo = true,
             LobbyButton::Spectate => spectate = true,
+            LobbyButton::ForeignCamps => foreign = true,
             LobbyButton::Engine => engine = true,
             LobbyButton::Back => back = true,
             // Handled by their own systems.
@@ -1246,6 +1280,21 @@ fn handle_buttons(
         }
     }
 
+    if foreign {
+        // Only the host decides the rules, for the same reason only the host
+        // decides the seating: the shared game must play under one rule set.
+        if net.peers.is_empty() || net.sequences() {
+            variants.0.forbid_foreign_camps = !variants.0.forbid_foreign_camps;
+            net.status = if variants.0.forbid_foreign_camps {
+                "Rule on: no piece rests in a foreign triangle.".into()
+            } else {
+                "Rule off: the specification's game.".into()
+            };
+        } else {
+            net.status = "Only the host chooses the rules.".into();
+        }
+    }
+
     if engine {
         match add_engine(&mut net, chosen.0) {
             Ok(()) => {
@@ -1266,7 +1315,11 @@ fn handle_buttons(
             StartDecision::Solo => next_state.set(AppState::InGame),
             StartDecision::Multiplayer => {
                 assign_seating(&mut net, chosen.0);
-                broadcast(&mut socket, &peers, &start_message(&net, chosen.0));
+                broadcast(
+                    &mut socket,
+                    &peers,
+                    &start_message(&net, chosen.0, variants.0),
+                );
                 next_state.set(AppState::InGame);
             }
             StartDecision::Refuse(why) => net.status = why,
@@ -1418,10 +1471,11 @@ fn draw_room(
 pub fn apply_seats(
     net: Res<NetState>,
     chosen: Res<ChosenSeating>,
+    variants: Res<ChosenVariants>,
     ai_seats: Res<crate::menu::AiSeats>,
     mut session: ResMut<Session>,
 ) {
-    *session = Session::new(chosen.0);
+    *session = Session::with_variants(chosen.0, variants.0);
     // The hotseat panel's engine choice, and the host's lobby engines: two
     // ways engines reach a game, and either way they are the same field.
     let mut driven = ai_seats.0.clone();
@@ -1777,7 +1831,9 @@ mod tests {
     fn the_start_message_carries_the_chosen_seating() {
         let net = NetState::default();
         for seating in Seating::ALL {
-            let NetMsg::Start { players, .. } = start_message(&net, seating) else {
+            let NetMsg::Start { players, .. } =
+                start_message(&net, seating, Variants::default())
+            else {
                 panic!("start_message must build a Start");
             };
             assert_eq!(
@@ -1832,7 +1888,7 @@ mod tests {
             .find(|s| *s != Seating::default())
             .expect("more than one seating is offered");
 
-        let NetMsg::Start { players, .. } = start_message(&net, non_default) else {
+        let NetMsg::Start { players, .. } = start_message(&net, non_default, Variants::default()) else {
             panic!("start_message must build a Start");
         };
         assert_ne!(

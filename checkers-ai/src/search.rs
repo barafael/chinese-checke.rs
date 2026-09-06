@@ -411,6 +411,7 @@ mod tests {
             occupied: 0,
             turn,
             hash: 0,
+            forbid_foreign_camps: false,
         };
         for (player, coords) in [(0usize, p0), (3usize, p3)] {
             for c in coords {

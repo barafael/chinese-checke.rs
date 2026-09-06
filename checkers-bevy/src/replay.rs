@@ -227,10 +227,12 @@ pub fn sync_trace(
 
     // Under the pieces: the destination hole carries the opponent's piece,
     // and a dot peeking out beneath it reads as a shadow, not a claim.
+    // Sized to fill most of the hole and bright enough to read against the
+    // dark neutral holes, which is what makes the path legible at a glance.
     match *style {
         BoardStyle::Classic => {
-            let dot = meshes.add(Circle::new(HOLE_RADIUS * 0.55));
-            let mat = materials.add(Color::srgba(0.60, 0.60, 0.64, 0.45));
+            let dot = meshes.add(Circle::new(HOLE_RADIUS * 0.8));
+            let mat = materials.add(Color::srgba(0.82, 0.84, 0.88, 0.75));
             for hole in &trace.path {
                 let p = coord_to_world(*hole);
                 commands.spawn((
@@ -244,12 +246,13 @@ pub fn sync_trace(
         }
         BoardStyle::Amlah => {
             // Flat on the board, just under the staged-jump trail (0.008) and
-            // just over the connection lines (0.005). Translucent, so the
-            // trail reads as a mark on the plate rather than a hole in it.
+            // just over the connection lines (0.005). Big enough to cover the
+            // hole fill, and dark enough that the cream plate does not wash
+            // it out — a mark on the plate rather than a hole in it.
             let flat = Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2);
-            let dot = meshes.add(Circle::new(0.045));
+            let dot = meshes.add(Circle::new(0.084));
             let mat = std_materials.add(StandardMaterial {
-                base_color: Color::srgba(0.45, 0.45, 0.48, 0.5),
+                base_color: Color::srgba(0.30, 0.30, 0.34, 0.8),
                 unlit: true,
                 alpha_mode: AlphaMode::Blend,
                 ..default()

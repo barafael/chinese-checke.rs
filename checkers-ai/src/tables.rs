@@ -6,7 +6,7 @@
 //! and they are derived from the rules rather than hand-written, so a change
 //! to the geometry flows through.
 
-use checkers_core::geometry::{Coord, Dir, all_holes, in_camp, rotate_n};
+use checkers_core::geometry::{Coord, Dir, all_holes, camp_of, in_camp, rotate_n};
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
@@ -32,6 +32,9 @@ pub struct Tables {
     pub dist: [[i32; HOLES]; 6],
     /// Bitmask of the target camp's holes per player.
     pub target: [u128; 6],
+    /// Which camp each hole belongs to, per the rules' `camp_of`: 0–5 for the
+    /// triangle tips, `u8::MAX` for the central hexagon's holes.
+    pub camp: [u8; HOLES],
     /// Zobrist keys: one per (player, hole), plus one per player to move.
     pub zobrist_piece: [[u64; HOLES]; 6],
     pub zobrist_turn: [u64; 6],
@@ -95,6 +98,15 @@ fn build() -> Tables {
         target[p] = mask;
     }
 
+    // Each hole's camp under the rules' `camp_of`, stored so the engine's own
+    // move filter can fence landings without touching the geometry crate.
+    let mut camp = [u8::MAX; HOLES];
+    for (i, c) in holes.iter().enumerate() {
+        if let Some(camp_index) = camp_of(*c) {
+            camp[i] = camp_index as u8;
+        }
+    }
+
     // Zobrist keys from the workspace's own xorshift, so the crate stays
     // dependency-free and the hashes are stable across runs.
     let mut rng = checkers_core::Xorshift::new(0x2A11_C0DE);
@@ -116,6 +128,7 @@ fn build() -> Tables {
         jmp,
         dist,
         target,
+        camp,
         zobrist_piece,
         zobrist_turn,
     }

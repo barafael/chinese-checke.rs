@@ -2,8 +2,41 @@
 
 use std::collections::HashSet;
 
-use crate::geometry::{Coord, Dir, on_board};
+use crate::geometry::{Coord, Dir, camp_of, on_board};
 use crate::position::{Move, PLAYERS, Player, Position, is_legal_step};
+
+/// House-rule switches that change how a game is played.
+///
+/// The specification's game is the default; every field names a restriction a
+/// front-end may add on top. The free [`legal_moves`] function stays pure
+/// (chapter 10) — the variant filters live on [`Game`], where the toggle is
+/// actually set — so the laws, which are stated against the variables' game,
+/// are untouched by a menu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Variants {
+    /// No piece may **stay** in a triangle that is neither its own starting
+    /// camp nor its target camp. Hopping *through* another camp is still
+    /// allowed — the rule is about where a turn ends, not where a jump passes.
+    pub forbid_foreign_camps: bool,
+}
+
+impl Variants {
+    /// Whether a hole is a legal place for `mover` to rest, under this rule set.
+    ///
+    /// The central hexagon is nobody's triangle, so it is always allowed. A
+    /// camp is allowed only when it is the mover's own or its target's —
+    /// whatever the rule toggle says, a piece never rests anywhere else under
+    /// the *rules*; the toggle only switches the check on.
+    pub fn may_rest(&self, mover: Player, hole: Coord) -> bool {
+        match camp_of(hole) {
+            None => true,
+            Some(camp) if self.forbid_foreign_camps => {
+                camp == mover.index() as u32 || camp == mover.opposite().index() as u32
+            }
+            Some(_) => true,
+        }
+    }
+}
 
 /// Destinations reachable from `origin` by one or more jumps (chapter 9).
 ///
@@ -180,6 +213,9 @@ pub struct Game {
     consecutive_passes: u32,
     /// The players in this game, in turn order. Never empty.
     players: Vec<Player>,
+    /// House-rule switches in force for this game. Off by default — the
+    /// specification's game.
+    variants: Variants,
 }
 
 impl Game {
@@ -235,6 +271,7 @@ impl Game {
             outcome: None,
             consecutive_passes: 0,
             players,
+            variants: Variants::default(),
         }
     }
 
@@ -251,6 +288,22 @@ impl Game {
         &self.players
     }
 
+    /// The house-rule switches currently in force.
+    pub fn variants(&self) -> Variants {
+        self.variants
+    }
+
+    /// Replace the house-rule switches. Set before play starts.
+    pub fn set_variants(&mut self, variants: Variants) {
+        self.variants = variants;
+    }
+
+    /// Set the house-rule switches and return the game.
+    pub fn with_variants(mut self, variants: Variants) -> Self {
+        self.set_variants(variants);
+        self
+    }
+
     pub fn outcome(&self) -> Option<Outcome> {
         self.outcome
     }
@@ -261,6 +314,9 @@ impl Game {
 
     pub fn legal_moves(&self) -> Vec<Move> {
         legal_moves(&self.position, self.turn)
+            .into_iter()
+            .filter(|mv| self.variants.may_rest(self.turn, mv.destination))
+            .collect()
     }
 
     /// The next player in turn order who is actually in this game.
@@ -545,5 +601,85 @@ mod variant_tests {
         let game = Game::for_players(&[Player::ALL[0], Player::ALL[1], Player::ALL[2]]);
         crate::audit::audit_position(game.position(), game.players())
             .expect("a freshly composed game satisfies its own invariants");
+    }
+
+    /// The default game is the specification's: the variant toggle is off, and
+    /// `legal_moves` is unchanged.
+    #[test]
+    fn variants_default_off() {
+        let game = Game::new();
+        assert!(!game.variants().forbid_foreign_camps);
+        let plain = legal_moves(game.position(), game.turn());
+        assert_eq!(game.legal_moves().len(), plain.len());
+    }
+
+    /// `may_rest` names the mover's own camp and its target camp as the only
+    /// legal resting places once the toggle is on; the central hexagon stays
+    /// available to everyone.
+    #[test]
+    fn may_rest_under_forbid_foreign_camps() {
+        let v = Variants {
+            forbid_foreign_camps: true,
+        };
+        let p0 = Player::ALL[0];
+        // Own and target camps are fine.
+        assert!(v.may_rest(p0, camp_center(p0.index().into())));
+        assert!(v.may_rest(p0, camp_center(p0.opposite().index().into())));
+        // A foreign camp is not.
+        for (i, c) in camp_centers().enumerate() {
+            if i != p0.index() as usize && i != p0.opposite().index() as usize {
+                assert!(!v.may_rest(p0, c), "camp {i} is foreign to player 0");
+            }
+        }
+        // The toggle off leaves every camp legal.
+        let off = Variants::default();
+        for c in camp_centers() {
+            assert!(off.may_rest(p0, c));
+        }
+    }
+
+    /// With the toggle on, a move whose destination is a foreign camp drops
+    /// out of `Game::legal_moves`; the free `legal_moves` function (chapter
+    /// 10) is untouched.
+    #[test]
+    fn forbid_foreign_camps_filters_a_game() {
+        let mut game = Game::for_players(&[Player::ALL[0], Player::ALL[3]]);
+        game.set_variants(Variants {
+            forbid_foreign_camps: true,
+        });
+        let moves = game.legal_moves();
+        // From the starting camps, the opening moves end in or near the
+        // players' own region; none may end in a foreign triangle.
+        for mv in &moves {
+            assert!(
+                game.variants().may_rest(game.turn(), mv.destination),
+                "{mv:?} would rest in a foreign camp"
+            );
+        }
+        // And the filter really is narrower than the raw generator.
+        let raw = legal_moves(game.position(), game.turn());
+        assert!(moves.len() <= raw.len());
+    }
+
+    /// `with_variants` returns the game ready to play under the rule.
+    #[test]
+    fn with_variants_sets_the_toggle() {
+        let game = Game::for_players(&[Player::ALL[0], Player::ALL[3]])
+            .with_variants(Variants {
+                forbid_foreign_camps: true,
+            });
+        assert!(game.variants().forbid_foreign_camps);
+    }
+
+    /// The central-most hole of each camp, as a definite resting spot.
+    fn camp_centers() -> impl Iterator<Item = Coord> {
+        (0..6).map(camp_center)
+    }
+
+    /// A hole firmly inside camp `i`, so `camp_of` names it unambiguously.
+    fn camp_center(i: u32) -> Coord {
+        let p = Player::ALL[i as usize];
+        let c = p.start_camp();
+        c[c.len() / 2]
     }
 }

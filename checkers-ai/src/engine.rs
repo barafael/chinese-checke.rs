@@ -29,6 +29,9 @@ pub struct State {
     /// Seat index of the player to move.
     pub turn: u8,
     pub hash: u64,
+    /// No piece may rest in a triangle that is neither its own camp nor its
+    /// target camp. Fences the destinations `moves()` offers.
+    pub forbid_foreign_camps: bool,
 }
 
 impl State {
@@ -52,6 +55,7 @@ impl State {
             occupied,
             turn: game.turn().index(),
             hash: 0,
+            forbid_foreign_camps: game.variants().forbid_foreign_camps,
         };
         state.hash = state.zobrist();
         state
@@ -133,6 +137,11 @@ impl State {
     }
 
     /// Every move the player to move may make. Empty means the seat must pass.
+    ///
+    /// Under [`self.forbid_foreign_camps`] a landing inside a foreign triangle
+    /// is not offered (the rules' own filter: a move may rest only in the
+    /// mover's camp or its target's). Reachability is untouched, so a chain
+    /// may still pass *through* another camp to rest beyond it.
     pub fn moves(&self) -> Vec<RawMove> {
         let t = &TABLES;
         let p = self.turn as usize;
@@ -147,6 +156,7 @@ impl State {
             for d in 0..6 {
                 if let Some(n) = t.nbr[d][from as usize]
                     && self.occupied & (1u128 << n) == 0
+                    && self.may_rest(n)
                 {
                     out.push(pack(from, n));
                 }
@@ -166,13 +176,26 @@ impl State {
                         && visited & (1u128 << dest) == 0
                     {
                         visited |= 1u128 << dest;
-                        out.push(pack(from, dest));
+                        if self.may_rest(dest) {
+                            out.push(pack(from, dest));
+                        }
                         stack.push(dest);
                     }
                 }
             }
         }
         out
+    }
+
+    /// Whether a piece of the player to move may **rest** on hole `to` under
+    /// this state's variant. The central hexagon is always allowed; the only
+    /// holes ever flatly excluded are foreign camps with the toggle on.
+    fn may_rest(&self, to: u8) -> bool {
+        if !self.forbid_foreign_camps {
+            return true;
+        }
+        let camp = TABLES.camp[to as usize];
+        camp == u8::MAX || camp == self.turn || camp == self.turn.wrapping_add(3) % 6
     }
 
     /// The per-player race score: progress toward the target apex, a bonus for
@@ -215,6 +238,7 @@ mod tests {
             occupied: 0,
             turn,
             hash: 0,
+            forbid_foreign_camps: false,
         };
         for (player, coords) in [(0usize, p0), (3usize, p3)] {
             for c in coords {
@@ -291,6 +315,79 @@ mod tests {
                 player.index()
             );
         }
+    }
+
+    /// With the foreign-camp rule on, the engine's move list must still be
+    /// exactly the rules' (game-level, filtered) move list — the same parity as
+    /// `movegen_matches_the_rules`, under a variant that fences landings.
+    #[test]
+    fn movegen_matches_the_rules_under_forbid_foreign_camps() {
+        for game in random_games() {
+            let game = game.with_variants(checkers_core::rules::Variants {
+                forbid_foreign_camps: true,
+            });
+            if game.is_over() {
+                continue;
+            }
+            let state = State::of_game(&game);
+
+            let mut rules: Vec<(u8, u8)> = game
+                .legal_moves()
+                .into_iter()
+                .map(|mv| {
+                    (
+                        index_of(mv.origin).expect("legal origin") as u8,
+                        index_of(mv.destination).expect("legal destination") as u8,
+                    )
+                })
+                .collect();
+            rules.sort_unstable();
+            rules.dedup();
+
+            let mut engine: Vec<(u8, u8)> = state.moves().into_iter().map(unpack).collect();
+            engine.sort_unstable();
+            engine.dedup();
+
+            assert_eq!(
+                rules,
+                engine,
+                "filtered movegen diverged for player {}",
+                game.turn().index()
+            );
+        }
+    }
+
+    /// A jump that would land in a foreign camp drops out of the engine's move
+    /// list exactly when the rule is on; the same chain with the rule off stays
+    /// open. The setup: seat 0's piece at (0,4) can hop over the wall at (1,4)
+    /// into camp 1 — a triangle seat 0 may pass through but never rest in.
+    #[test]
+    fn a_jump_landing_in_a_foreign_camp_is_not_offered() {
+        let origin = Coord::new(0, 4);
+        let landing = Coord::new(2, 4);
+        assert_eq!(
+            TABLES.camp[index_of(landing).unwrap()],
+            1,
+            "the landing must be inside camp 1 for this test"
+        );
+
+        let open = state_with(&[origin], &[Coord::new(1, 4)], 0);
+        assert!(
+            open.moves()
+                .iter()
+                .any(|&m| unpack(m) == (index_of(origin).unwrap() as u8, index_of(landing).unwrap() as u8)),
+            "the jump into camp 1 is open with the rule off"
+        );
+
+        let mut fenced = state_with(&[origin], &[Coord::new(1, 4)], 0);
+        fenced.forbid_foreign_camps = true;
+        assert!(
+            fenced
+                .moves()
+                .iter()
+                .all(|&m| unpack(m).1 != index_of(landing).unwrap() as u8),
+            "the rule closes the foreign landing"
+        );
     }
 
     /// Apply then undo must restore the state exactly — bits, turn, and hash.

@@ -136,7 +136,14 @@ pub enum NetMsg {
     /// `players` carries which of the six players are seated, so every peer
     /// deals the same board. Indices, not a front-end type: the wire format
     /// must not depend on a crate above it.
-    Start { seats: Vec<Seat>, players: Vec<u32> },
+    ///
+    /// `forbid_foreign_camps` is the house-rule toggle the host picked in the
+    /// lobby; every peer plays under the same switch.
+    Start {
+        seats: Vec<Seat>,
+        players: Vec<u32>,
+        forbid_foreign_camps: bool,
+    },
 }
 
 pub fn encode(msg: &NetMsg) -> Option<Box<[u8]>> {
