@@ -1,35 +1,40 @@
 //! The `.cchkrs` game record: a round saved as text, resumed by replay.
 //!
-//! A record names the seating and lists the moves in play order — nothing
-//! else. The position is not stored, because it is derived: the composed
-//! game's initial position is a function of the seating, and every recorded
-//! move is re-resolved against the rules on replay (`WireMove::resolve`),
-//! so a record cannot smuggle the game into a position the specification
-//! disallows. Chapter 10 is why the moves are wire moves: the route is not
-//! part of a move's identity, so the record does not carry routes, and a
-//! resumed game's hop statistics follow the rebuilt routes rather than the
-//! originally flown ones. Move counts, jump counts, and passes reproduce
-//! exactly.
+//! A record names the players, the house-rule switches, and the moves in
+//! play order — nothing else. The position is not stored, because it is
+//! derived: the composed game's initial position is a function of the
+//! players, and every recorded move is re-resolved against the rules on
+//! replay (`WireMove::resolve`), so a record cannot smuggle the game into a
+//! position the specification disallows. Chapter 10 is why the moves are
+//! wire moves: the route is not part of a move's identity, so the record
+//! does not carry routes, and a resumed game's hop statistics follow the
+//! rebuilt routes rather than the originally flown ones. Move counts, jump
+//! counts, and passes reproduce exactly.
 //!
 //! The format is line-based text, versioned in its first line, so a record
 //! written by an older build is rejected with a readable fault rather than
-//! parsed into something wrong.
+//! parsed into something wrong. Version 2 stored the seating; version 3
+//! stores the exact players, because a table may now configure any corners.
 
-use crate::setup::Seating;
 use checkers_core::position::Player;
+use checkers_core::rules::Variants;
 use checkers_net::WireMove;
 
 /// The first line every record starts with. Bump on any incompatible change.
-const HEADER: &str = "cchkrs 1";
+const HEADER: &str = "cchkrs 3";
 
-/// A saved round: which camps sat down, which seats the computer plays, and
-/// the moves in play order.
+/// A saved round: which camps sat down, which seats the computer plays, the
+/// house-rule switches, and the moves in play order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GameRecord {
-    pub seating: Seating,
+    /// The players in the round, in turn order. Any subset of the six camps.
+    pub players: Vec<Player>,
     /// Seats the engine plays in the resumed game. Empty means every seated
     /// camp is human.
     pub ai_players: Vec<Player>,
+    /// The house-rule switches the round was played under, so a resume plays
+    /// the same game rather than a different one.
+    pub variants: Variants,
     pub moves: Vec<WireMove>,
 }
 
@@ -39,8 +44,10 @@ pub struct GameRecord {
 pub enum RecordFault {
     /// The first line is not the expected header.
     Header(String),
-    /// The `seating` line names camps that are no seating this build knows.
-    Seating(String),
+    /// The `players` line names no players this build could seat.
+    Players(String),
+    /// The `variants` line names a rule set this build does not know.
+    Rules(String),
     /// A move line does not parse.
     Move { line: usize, text: String },
     /// The declared move count disagrees with the move lines.
@@ -56,7 +63,8 @@ impl core::fmt::Display for RecordFault {
             RecordFault::Header(line) => {
                 write!(f, "not a saved game: expected \"{HEADER}\", found {line:?}")
             }
-            RecordFault::Seating(line) => write!(f, "unknown seating: {line:?}"),
+            RecordFault::Players(line) => write!(f, "unknown players: {line:?}"),
+            RecordFault::Rules(line) => write!(f, "unknown rules: {line:?}"),
             RecordFault::Move { line, text } => {
                 write!(f, "move {line} does not parse: {text:?}")
             }
@@ -77,10 +85,15 @@ impl GameRecord {
     /// The record as `.cchkrs` text.
     pub fn to_text(&self) -> String {
         let mut out = String::from(HEADER);
-        out.push_str("\nseating");
-        for i in self.seating.indices() {
-            out.push_str(&format!(" {i}"));
+        out.push_str("\nplayers");
+        for p in &self.players {
+            out.push_str(&format!(" {}", p.index()));
         }
+        out.push_str(if self.variants.forbid_foreign_camps {
+            "\nvariants foreign"
+        } else {
+            "\nvariants standard"
+        });
         out.push_str("\nai");
         if self.ai_players.is_empty() {
             out.push_str(" -");
@@ -112,7 +125,8 @@ impl GameRecord {
             return Err(RecordFault::Header(first.to_string()));
         }
 
-        let mut seating = None;
+        let mut players = None;
+        let mut variants = Variants::default();
         let mut ai_players = Vec::new();
         let mut declared = None;
         let mut moves = Vec::new();
@@ -124,15 +138,28 @@ impl GameRecord {
             }
             let (word, rest) = line.split_once(' ').unwrap_or((line, ""));
             match word {
-                "seating" => {
-                    let indices: Vec<u32> = rest
-                        .split_whitespace()
-                        .filter_map(|t| t.parse().ok())
-                        .collect();
-                    seating =
-                        Some(Seating::from_indices(&indices).ok_or_else(|| {
-                            RecordFault::Seating(format!("line {}: {line}", n + 1))
-                        })?);
+                "players" => {
+                    let mut list = Vec::new();
+                    for tok in rest.split_whitespace() {
+                        let idx = tok
+                            .parse::<u8>()
+                            .ok()
+                            .filter(|i| Player::new(*i).is_some())
+                            .ok_or_else(|| RecordFault::Players(line.to_string()))?;
+                        list.push(Player::new(idx).expect("checked above"));
+                    }
+                    players = Some(list);
+                }
+                "variants" => {
+                    variants = match rest.trim() {
+                        "standard" => Variants::default(),
+                        "foreign" => Variants {
+                            forbid_foreign_camps: true,
+                        },
+                        _ => {
+                            return Err(RecordFault::Rules(format!("line {}: {line}", n + 1)));
+                        }
+                    };
                 }
                 "ai" => {
                     ai_players = rest
@@ -165,8 +192,8 @@ impl GameRecord {
             }
         }
 
-        let seating =
-            seating.ok_or_else(|| RecordFault::Seating("the record names no seating".into()))?;
+        let players =
+            players.ok_or_else(|| RecordFault::Players("the record names no players".into()))?;
         let declared = declared.unwrap_or(moves.len());
         if declared != moves.len() {
             return Err(RecordFault::Count {
@@ -175,8 +202,9 @@ impl GameRecord {
             });
         }
         Ok(Self {
-            seating,
+            players,
             ai_players,
+            variants,
             moves,
         })
     }
@@ -199,6 +227,7 @@ fn parse_move(jump: bool, rest: &str) -> Option<WireMove> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::setup::Seating;
     use crate::Selection;
     use checkers_core::rules::legal_moves;
     use checkers_core::turn::step_destinations;
@@ -242,13 +271,14 @@ mod tests {
         let no_header = GameRecord::from_text("hello\n");
         assert!(matches!(no_header, Err(RecordFault::Header(_))));
 
-        let no_seating = GameRecord::from_text("cchkrs 1\nmoves 0\n");
-        assert!(matches!(no_seating, Err(RecordFault::Seating(_))));
+        let no_players = GameRecord::from_text("cchkrs 3\nmoves 0\n");
+        assert!(matches!(no_players, Err(RecordFault::Players(_))));
 
-        let bad_move = GameRecord::from_text("cchkrs 1\nseating 0 3\nmoves 1\nx 0,0 1,1\n");
-        assert!(matches!(bad_move, Err(RecordFault::Move { line: 4, .. })));
+        let bad_move =
+            GameRecord::from_text("cchkrs 3\nplayers 0 3\nvariants standard\nmoves 1\nx 0,0 1,1\n");
+        assert!(matches!(bad_move, Err(RecordFault::Move { line: 5, .. })));
 
-        let bad_count = GameRecord::from_text("cchkrs 1\nseating 0 3\nmoves 2\n");
+        let bad_count = GameRecord::from_text("cchkrs 3\nplayers 0 3\nvariants standard\nmoves 2\n");
         assert!(matches!(
             bad_count,
             Err(RecordFault::Count {
@@ -257,8 +287,33 @@ mod tests {
             })
         ));
 
-        let bad_seating = GameRecord::from_text("cchkrs 1\nseating 0 1\nmoves 0\n");
-        assert!(matches!(bad_seating, Err(RecordFault::Seating(_))));
+        let bad_players = GameRecord::from_text("cchkrs 3\nplayers 0 9\nvariants standard\nmoves 0\n");
+        assert!(matches!(bad_players, Err(RecordFault::Players(_))));
+
+        let bad_rules = GameRecord::from_text("cchkrs 3\nplayers 0 3\nvariants banana\nmoves 0\n");
+        assert!(matches!(bad_rules, Err(RecordFault::Rules(_))));
+    }
+
+    /// The rules a round was played under must survive the record: a text
+    /// from a foreign-camp game parses back with the toggle on, and resumes
+    /// to a game that still enforces it.
+    #[test]
+    fn the_variants_survive_the_record() {
+        let record = GameRecord {
+            players: vec![Player::ALL[0], Player::ALL[3]],
+            ai_players: Vec::new(),
+            variants: Variants {
+                forbid_foreign_camps: true,
+            },
+            moves: Vec::new(),
+        };
+        let text = record.to_text();
+        assert!(text.contains("\nvariants foreign"), "text: {text}");
+        let parsed = GameRecord::from_text(&text).expect("our own record must parse");
+        assert_eq!(parsed.variants, record.variants);
+
+        let resumed = crate::Session::resumed(&parsed).expect("must resume");
+        assert!(resumed.game.variants().forbid_foreign_camps);
     }
 
     /// A record whose moves are not legal where they occur is rejected by
@@ -266,7 +321,7 @@ mod tests {
     /// authority.
     #[test]
     fn an_illegal_recorded_move_is_rejected_on_resume() {
-        let text = "cchkrs 1\nseating 0 3\nmoves 1\nj 0,5 0,1\n";
+        let text = "cchkrs 3\nplayers 0 3\nvariants standard\nmoves 1\nj 0,5 0,1\n";
         let record = GameRecord::from_text(text).expect("the line itself parses");
         let resumed = crate::Session::resumed(&record);
         let Err(fault) = resumed else {
@@ -288,7 +343,7 @@ mod tests {
         let session = crate::Session::new(Seating::Six);
         let resumed = crate::Session::resumed(&session.to_record())
             .expect("an empty record of a real deal must resume");
-        crate::audit(resumed.game.position(), resumed.seating);
+        crate::audit(resumed.game.position(), &resumed.players);
         assert!(!legal_moves(resumed.game.position(), resumed.game.turn()).is_empty());
         assert!(matches!(resumed.selection, Selection::None));
     }

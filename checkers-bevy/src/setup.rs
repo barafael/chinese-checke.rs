@@ -160,26 +160,7 @@ impl Seating {
     /// for the empty camps. Weakening the law itself was not an option: it *is*
     /// the specification of the six-player game.
     pub fn audit(self, pos: &Position) -> Result<(), SeatingFault> {
-        let seated = self.players();
-        for player in Player::ALL {
-            let found = pos.pieces_of(player).len();
-            match (seated.contains(&player), found) {
-                (true, 10) | (false, 0) => {}
-                (true, found) => {
-                    return Err(SeatingFault::SeatedCount {
-                        player: player.index(),
-                        found,
-                    });
-                }
-                (false, found) => {
-                    return Err(SeatingFault::UnseatedHasPieces {
-                        player: player.index(),
-                        found,
-                    });
-                }
-            }
-        }
-        Ok(())
+        audit_players(&self.players(), pos)
     }
 
     /// Cycle to the next seating, for the key that steps through them.
@@ -243,6 +224,35 @@ impl Seating {
             .iter()
             .all(|p| !pos.has_won(*p) && !legal_moves(&pos, *p).is_empty())
     }
+}
+
+/// Piece conservation restricted to the seated players.
+///
+/// The invariant of chapter 14 restricted to the seated players, because the
+/// core audit demands ten pieces for all six and a partial board has none for
+/// the empty camps. Weakening the law itself was not an option: it *is* the
+/// specification of the six-player game. [`Seating::audit`] is the preset
+/// version; this one serves arbitrary corner configurations.
+pub fn audit_players(seated: &[Player], pos: &Position) -> Result<(), SeatingFault> {
+    for player in Player::ALL {
+        let found = pos.pieces_of(player).len();
+        match (seated.contains(&player), found) {
+            (true, 10) | (false, 0) => {}
+            (true, found) => {
+                return Err(SeatingFault::SeatedCount {
+                    player: player.index(),
+                    found,
+                });
+            }
+            (false, found) => {
+                return Err(SeatingFault::UnseatedHasPieces {
+                    player: player.index(),
+                    found,
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

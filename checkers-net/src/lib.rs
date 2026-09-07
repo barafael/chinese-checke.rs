@@ -95,17 +95,18 @@ pub struct Seat {
     /// Stable within a session; `PeerId`'s string form so it survives postcard.
     pub peer: String,
     pub name: String,
-    /// Which of the six players this peer commands, once the host assigns it.
-    /// `None` for spectators, and for peers beyond the seating's camps.
+    /// Which of the six players this peer commands, once the host grants the
+    /// claim the peer made. `None` until then, and for spectators and engines
+    /// that have not claimed a corner.
     pub player: Option<u32>,
     pub ready: bool,
     /// Spectators watch the game and touch nothing: no camp, no ready flag,
-    /// no voice in when it starts. A seat that joined after the camps ran out
-    /// is also a spectator in effect, but this field is the *declared* choice.
+    /// no voice in when it starts. A seat that claimed no corner is a
+    /// spectator in effect, but this field is the *declared* choice.
     #[serde(default)]
     pub spectate: bool,
-    /// A seat the host gave to an engine rather than a peer. It joins, takes a
-    /// camp, and reads as ready like anyone else; only the host's engine
+    /// A seat the host gave to an engine rather than a peer. It claims a
+    /// corner and reads as ready like anyone else; only the host's engine
     /// actually plays it, and its moves reach the table as ordinary sequenced
     /// moves — no privileged path.
     #[serde(default)]
@@ -125,17 +126,18 @@ pub enum NetMsg {
     Roster(Vec<Seat>),
     /// Guest -> host: toggle my ready flag.
     Ready(bool),
+    /// Guest -> host: claim a corner, or release the one I hold. `Some(i)` is
+    /// a claim of camp `i`; `None` relinquishes whatever the sender held. The
+    /// host grants it only if the corner is free — or held by the sender — and
+    /// the roster everybody watches reflects the result.
+    Claim(Option<u32>),
     /// Guest -> host: declare or renounce spectator status.
     Spectate(bool),
-    /// Host -> all: the seating the host has chosen, live — guests see the
-    /// table change as it is changed, not only when the game starts. Indices,
-    /// for the same reason as on [`NetMsg::Start`].
-    Seating(Vec<u32>),
     /// Host -> all: assignments are final, start playing.
     ///
-    /// `players` carries which of the six players are seated, so every peer
-    /// deals the same board. Indices, not a front-end type: the wire format
-    /// must not depend on a crate above it.
+    /// `players` carries which corners are seated — every claimed corner plus
+    /// the host's engines — so every peer deals the same board. Indices, not a
+    /// front-end type: the wire format must not depend on a crate above it.
     ///
     /// `forbid_foreign_camps` is the house-rule toggle the host picked in the
     /// lobby; every peer plays under the same switch.

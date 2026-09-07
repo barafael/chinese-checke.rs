@@ -14,6 +14,17 @@ use checkers_core::position::{Move, MoveKind};
 use checkers_core::turn::JumpTurn;
 use std::time::Duration;
 
+/// The engine strength players pick for a computer corner, 1–5. Read when the
+/// game is dealt: the engine is rebuilt at that strength for the round.
+#[derive(Resource, Debug, Clone, Copy)]
+pub struct AiStrength(pub u8);
+
+impl Default for AiStrength {
+    fn default() -> Self {
+        Self(3)
+    }
+}
+
 /// Minimum wall-clock spacing between two visible actions (a move, a commit,
 /// or a single hop). The engine's own thinking time comes on top of this.
 pub const MOVE_INTERVAL: Duration = Duration::from_secs(1);

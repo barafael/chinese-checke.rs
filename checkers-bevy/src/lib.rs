@@ -23,8 +23,6 @@ pub mod board_style;
 pub mod board_view;
 pub mod draw;
 pub mod lobby;
-pub mod menu;
-pub mod menu_bg;
 pub mod move_log;
 pub mod net;
 pub mod record;
@@ -45,19 +43,17 @@ use std::time::Duration;
 use crate::record::RecordFault;
 use crate::setup::Seating;
 
-/// The menu first, then either the lobby (networked) or the hotseat panel
-/// (one device), then the board. The board only exists in
-/// [`AppState::InGame`], so every way a screen can refuse to start must say
-/// so — a silent refusal would look like a blank screen.
+/// One setup screen, then the board. The lobby is the *only* screen before a
+/// game: it configures the corners (human, computer, or empty) and the room
+/// (solo when no peers are present, networked otherwise), and the board only
+/// exists in [`AppState::InGame`] — so every way a screen can refuse to start
+/// must say so, because a silent refusal would look like a blank screen.
 #[derive(States, Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum AppState {
-    /// Title screen: choose multiplayer or hotseat.
+    /// The single setup screen: hex star, corners, room, roster. Networked
+    /// when peers are present, local play otherwise.
     #[default]
-    Menu,
-    /// Networked play: room, roster, readiness.
     Lobby,
-    /// Offline play with every camp on this device.
-    Hotseat,
     InGame,
 }
 
@@ -231,6 +227,83 @@ mod tests {
         }
     }
 
+    /// Under the "no foreign rest" rule, a staged move whose destination is a
+    /// foreign triangle is refused at confirmation with a message, not silently
+    /// dropped when the rules re-check it. The staging comes straight from the
+    /// free `legal_moves`, so only the fence in `confirm` separates a staged
+    /// move from the board.
+    #[test]
+    fn confirm_refuses_a_move_resting_in_a_foreign_camp() {
+        let mut session = Session::with_variants(
+            Seating::Two,
+            checkers_core::rules::Variants {
+                forbid_foreign_camps: true,
+            },
+        );
+        // Player 0's piece at (0,4) in the hexagon; camp 1's hole at (1,4)
+        // holds player 3. The jump over it lands at (2,4), inside camp 1 — a
+        // triangle player 0 may pass through but never rest in.
+        let origin = checkers_core::geometry::Coord::new(0, 4);
+        let destination = checkers_core::geometry::Coord::new(2, 4);
+        let position = foreign_camp_position(origin);
+        session.game =
+            Game::compose(position, Player::ALL[0], &[Player::ALL[0], Player::ALL[3]])
+                .with_variants(checkers_core::rules::Variants {
+                    forbid_foreign_camps: true,
+                });
+
+        let jump = checkers_core::position::Move {
+            kind: checkers_core::position::MoveKind::Jump,
+            origin,
+            destination,
+            route: None,
+        };
+        session.selection = Selection::Pend {
+            mv: jump,
+            preview: session.game.position().clone(),
+        };
+
+        session.confirm();
+        assert!(session.outbox.is_empty(), "the foreign landing must not be sent");
+        assert!(
+            session.message.contains("foreign"),
+            "refusal must say why: {}",
+            session.message
+        );
+
+        // Without the rule the same staged move flows through `confirm`.
+        let mut open = Session::new(Seating::Two);
+        open.game = Game::compose(
+            foreign_camp_position(origin),
+            Player::ALL[0],
+            &[Player::ALL[0], Player::ALL[3]],
+        )
+        .with_variants(checkers_core::rules::Variants::default());
+        open.selection = Selection::Pend {
+            mv: checkers_core::position::Move {
+                kind: checkers_core::position::MoveKind::Jump,
+                origin,
+                destination,
+                route: None,
+            },
+            preview: open.game.position().clone(),
+        };
+        open.confirm();
+        assert_eq!(open.outbox.len(), 1, "the open game still commits the jump");
+    }
+
+    /// The hexagon/camp-1 fixture a few tests share: player 0 at `origin`, a
+    /// wall of player 3 at (1,4) so a jump over it can land on (2,4) in camp 1.
+    fn foreign_camp_position(origin: checkers_core::geometry::Coord) -> Position {
+        let mut position = Position::empty();
+        position.set(origin, Some(Player::ALL[0]));
+        position.set(
+            checkers_core::geometry::Coord::new(1, 4),
+            Some(Player::ALL[3]),
+        );
+        position
+    }
+
     /// Only someone else's move is replay-animated. A seated peer skips its
     /// own; an unseated one — hotseat, spectator — replays everything.
     #[test]
@@ -286,8 +359,9 @@ pub struct Session {
     pub outbox: Vec<GameMove>,
     /// The seats the computer plays. Empty means every seated camp is human.
     pub ai_players: Vec<Player>,
-    /// Who is seated. A partial board is audited against its own seating.
-    pub seating: Seating,
+    /// Who is seated, in turn order. A partial board is audited against its own
+    /// players.
+    pub players: Vec<Player>,
     /// Running totals, shown on the game-over screen.
     pub stats: GameStats,
     /// Every committed move, in play order, in the route-free wire form the
@@ -316,41 +390,42 @@ impl Default for Session {
 impl Session {
     /// A session for the given seating: every camp driven locally.
     pub fn new(seating: Seating) -> Self {
+        Self::with_variants(seating, checkers_core::rules::Variants::default())
+    }
+
+    /// A session for the given seating and house-rule switches.
+    pub fn with_variants(seating: Seating, variants: checkers_core::rules::Variants) -> Self {
+        Self::for_players(&seating.players(), variants)
+    }
+
+    /// A session over an arbitrary set of players — the corners a table
+    /// configured, human or engine — in index order, so turn order follows the
+    /// board regardless of who set up which corner. Every provided corner is
+    /// filled and driven; `ai_players` still decides which are engines.
+    pub fn for_players(players: &[Player], variants: checkers_core::rules::Variants) -> Self {
+        let game = Game::for_players(players).with_variants(variants);
         Self {
-            game: seating.game(),
+            players: game.players().to_vec(),
+            game,
             selection: Selection::None,
             message: "Click one of your pieces".into(),
             local_player: None,
             spectating: false,
             outbox: Vec::new(),
             ai_players: Vec::new(),
-            seating,
             stats: GameStats::default(),
             history: Vec::new(),
             last_move: None,
         }
     }
 
-    /// Re-seat this session as the "watch two bots" two-player deal: opposite
-    /// camps, both engines. Shared by the watched demo and the menu background
-    /// so the two can never disagree on what the race is.
-    pub fn deal_two(&mut self) {
-        self.seating = Seating::Two;
-        self.game = self.seating.game();
-        self.ai_players = vec![Player::ALL[0], Player::ALL[3]];
-        self.selection = Selection::None;
-        self.outbox.clear();
-        self.stats = GameStats::default();
-        self.history.clear();
-        self.last_move = None;
-    }
-
-    /// The round as a [`crate::record::GameRecord`]: seating, engine seats,
-    /// and every move committed so far.
+    /// The round as a [`crate::record::GameRecord`]: players, engine seats,
+    /// the house-rule switches, and every move committed so far.
     pub fn to_record(&self) -> crate::record::GameRecord {
         crate::record::GameRecord {
-            seating: self.seating,
+            players: self.players.clone(),
             ai_players: self.ai_players.clone(),
+            variants: self.game.variants(),
             moves: self.history.clone(),
         }
     }
@@ -378,7 +453,8 @@ impl Session {
         record: &crate::record::GameRecord,
         up_to: usize,
     ) -> Result<Self, RecordFault> {
-        let mut session = Self::new(record.seating);
+        let mut session = Self::for_players(&record.players, checkers_core::rules::Variants::default());
+        session.game.set_variants(record.variants);
         session.ai_players = record.ai_players.clone();
         for (ply, wire) in record.moves.iter().take(up_to).enumerate() {
             let Some(mv) = wire.resolve(&session.game.legal_moves()) else {
@@ -539,6 +615,11 @@ impl Session {
                 // away — about 150x the work for the same answer.
                 let pos = self.game.position();
                 let mut out = step_destinations(pos, *origin);
+                // A step rests where it ends, so under the foreign-camp rule a
+                // step into a forbidden triangle is not offered at all. A jump
+                // only *passes* through its first hop, so those stay unfiltered
+                // — the fence applies when the hop becomes the final destination.
+                out.retain(|&hole| self.game.variants().may_rest(self.game.turn(), hole));
                 out.extend(single_hop_destinations(pos, *origin));
                 out.sort();
                 out.dedup();
@@ -681,9 +762,33 @@ impl Session {
         crate::move_log::log(&format!("# p{} resigns", who.index()));
     }
 
-    /// Commit the staged move — a single step, or a chain of hops.
+    /// Commit the staged move — a single step, or a chain of hops. The move is
+    /// checked against the variant-filtered `legal_moves` before it is sent,
+    /// so a staging that would rest in a foreign triangle (under the toggle)
+    /// is refused here with a message instead of silently dropped when the
+    /// rules re-check it.
     pub fn confirm(&mut self) {
         let player = self.game.turn();
+        let staged = match &self.selection {
+            Selection::Pend { mv, .. } => Some(mv.clone()),
+            Selection::Jumping { turn } => match turn.to_move() {
+                Ok(mv) => Some(mv),
+                // Reachable: the piece hopped back to where it began.
+                Err(e) => {
+                    self.message = format!("Cannot confirm - {e}");
+                    return;
+                }
+            },
+            _ => None,
+        };
+        let Some(mv) = staged else {
+            return;
+        };
+        if !self.game.legal_moves().contains(&mv) {
+            self.message = "That would rest in a foreign triangle.".into();
+            return;
+        }
+
         match &self.selection {
             Selection::Pend { mv, .. } => {
                 let mv = mv.clone();
@@ -700,15 +805,7 @@ impl Session {
                 );
             }
             Selection::Jumping { turn } => {
-                let mv = match turn.to_move() {
-                    Ok(mv) => mv,
-                    Err(e) => {
-                        // Reachable: the piece hopped back to where it began.
-                        self.message = format!("Cannot confirm - {e}");
-                        return;
-                    }
-                };
-
+                let mv = turn.to_move().expect("already checked");
                 let hops = turn.hops();
                 let dest = mv.destination;
 
@@ -763,16 +860,16 @@ fn hint(remaining: usize) -> String {
 }
 
 /// Panic if the live position violates its invariants. Six players: the
-/// specification's own audit; fewer: the seating's restricted conservation
-/// check (see [`setup`] for why the law is not weakened instead).
-pub fn audit(position: &Position, seating: Seating) {
-    if seating == Seating::Six {
+/// specification's own audit; fewer: conservation restricted to the seated
+/// players (see [`setup`] for why the law is not weakened instead).
+pub fn audit(position: &Position, players: &[Player]) {
+    if players == Player::ALL.as_slice() {
         if let Err(fault) = audit_position(position, &Player::ALL) {
             panic!("specification violated while playing: {fault}");
         }
         return;
     }
-    if let Err(fault) = seating.audit(position) {
+    if let Err(fault) = setup::audit_players(players, position) {
         panic!("specification violated while playing: {fault}");
     }
 }

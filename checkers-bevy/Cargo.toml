@@ -17,6 +17,16 @@ checkers-net.workspace = true
 [dev-dependencies]
 uuid = "1"
 
+# The live multiplayer integration test (`tests/multiplayer.rs`) hosts an
+# in-process full-mesh signaling server to introduce the real peers. The repo
+# builds its own copy of bevy_matchbox from a fork of matchbox, and the fork
+# re-versions `matchbox_signaling` to 0.15.0 *without changing a line of
+# signaling or protocol source*, so the published 0.14.0 crate on crates.io is
+# byte-identical code and talks the same wire protocol. Test-only: the app
+# itself never runs a signaling server.
+matchbox_signaling = "0.14" # registry keeps the underscore name
+tokio = { version = "1", features = ["rt-multi-thread"] }
+
 [lints]
 workspace = true
 

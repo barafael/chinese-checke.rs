@@ -25,12 +25,11 @@ use checkers_bevy::board_view::{
     BOARD_FRAME, HOLE_RADIUS, HOLE_SPACING, PIECE_RADIUS, camp_triangles, coord_to_world,
     hole_edges, hole_points, player_colour, world_to_coord,
 };
-use checkers_bevy::menu::AiStrength;
+use checkers_bevy::ai::AiStrength;
 use checkers_bevy::replay;
 use checkers_bevy::setup::Seating;
 use checkers_bevy::{
-    AppState, Selection, Session, audit, format_round_duration, lobby, menu, menu_bg, net, record,
-    sound, web,
+    AppState, Selection, Session, audit, format_round_duration, lobby, net, record, sound, web,
 };
 use checkers_core::geometry::{Coord, all_holes, camp_of, on_board};
 use checkers_core::law::{LAWS, verify_all};
@@ -87,11 +86,10 @@ fn main() {
         .init_resource::<OrbitCamera>()
         .init_state::<AppState>()
         .init_resource::<AiEngine>()
+        .init_resource::<AiStrength>()
         .init_resource::<AiPace>()
         .init_resource::<replay::Replay>()
         .add_plugins(lobby::plugin)
-        .add_plugins(menu::plugin)
-        .add_plugins(menu_bg::plugin)
         .add_plugins(sound::plugin)
         .add_systems(Startup, setup)
         // Not state-scoped: the lobby is the first thing shown, and it is the
@@ -332,7 +330,7 @@ fn setup(mut commands: Commands) {
     if let Err(violation) = verify_all() {
         panic!("the specification does not hold: {violation}");
     }
-    audit(&Position::initial(), Seating::Six);
+    audit(&Position::initial(), &Seating::Six.players());
 }
 
 /// The classic camera's framing: at least [`BOARD_FRAME`] world units visible,
@@ -1390,7 +1388,7 @@ fn sync_game_over(
                     },
                     TextColor(Color::srgb(0.62, 0.62, 0.68)),
                 ));
-                for p in session.seating.players() {
+                for p in session.players.iter().copied() {
                     let i = p.index() as usize;
                     let mut line = format!(
                         "{}:  {} moves  ({} by jump)",

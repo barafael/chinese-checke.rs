@@ -12,10 +12,9 @@ use bevy::prelude::*;
 use bevy::state::app::StatesPlugin;
 use checkers_bevy::AppState;
 use checkers_bevy::lobby::{
-    ChosenSeating, EditAction, NameEdit, RoomEdit, choose_seating, edit_action, edit_room,
-    not_editing,
+    CornerEdit, EditAction, NameEdit, RoomEdit, SelectedCorner, edit_action, edit_room,
+    not_editing, select_corner,
 };
-use checkers_bevy::setup::Seating;
 use checkers_net::{NetState, RoomId, Seat};
 
 fn app() -> App {
@@ -26,9 +25,9 @@ fn app() -> App {
         .insert_state(AppState::Lobby)
         .init_resource::<RoomId>()
         .init_resource::<RoomEdit>()
-        // `not_editing` reads both editors.
+        // `not_editing` reads every editor.
         .init_resource::<NameEdit>()
-        .init_resource::<ChosenSeating>()
+        .init_resource::<CornerEdit>()
         .init_resource::<NetState>()
         .add_systems(Update, edit_room.run_if(in_state(AppState::Lobby)));
     app
@@ -255,10 +254,11 @@ fn chained_app() -> App {
         .insert_state(AppState::Lobby)
         .init_resource::<RoomId>()
         .init_resource::<RoomEdit>()
-        // `not_editing` reads both editors.
+        // `not_editing` reads every editor.
         .init_resource::<NameEdit>()
-        .init_resource::<ChosenSeating>()
+        .init_resource::<CornerEdit>()
         .init_resource::<NetState>()
+        .init_resource::<SelectedCorner>()
         .add_systems(
             Update,
             (
@@ -266,7 +266,7 @@ fn chained_app() -> App {
                 // The *real* run condition, not a copy of it. An inline
                 // duplicate here made this test pass with the guard removed
                 // from the app -- it was checking its own logic.
-                choose_seating.run_if(not_editing),
+                select_corner.run_if(not_editing),
             )
                 .chain()
                 .run_if(in_state(AppState::Lobby)),
@@ -314,9 +314,9 @@ fn the_committing_keypress_does_not_leak_downstream() {
         .insert_state(AppState::Lobby)
         .init_resource::<RoomId>()
         .init_resource::<RoomEdit>()
-        // `not_editing` reads both editors.
+        // `not_editing` reads every editor.
         .init_resource::<NameEdit>()
-        .init_resource::<ChosenSeating>()
+        .init_resource::<CornerEdit>()
         .init_resource::<NetState>()
         .init_resource::<SawEnter>()
         // `not_editing` itself, not a copy: an inline duplicate of the condition
@@ -372,9 +372,9 @@ fn the_guard_clears_on_the_next_frame() {
     );
 }
 
-/// A digit typed into the field is a character, not a seating change.
+/// A digit typed into the field is a character, not a corner selection.
 #[test]
-fn a_digit_typed_into_the_field_does_not_change_the_seating() {
+fn a_digit_typed_into_the_field_does_not_select_a_corner() {
     let mut app = chained_app();
     open(&mut app);
     // Message only, so `PreUpdate` fills the resource the way the window would.
@@ -390,8 +390,8 @@ fn a_digit_typed_into_the_field_does_not_change_the_seating() {
 
     assert_eq!(app.world().resource::<RoomEdit>().buffer, "3");
     assert_eq!(
-        app.world().resource::<ChosenSeating>().0,
-        Seating::default(),
+        app.world().resource::<SelectedCorner>().0,
+        None,
         "the digit belonged to the field"
     );
 }

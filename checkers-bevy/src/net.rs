@@ -78,7 +78,7 @@ pub fn pump(
             // A guest cannot sequence, and lobby traffic is over.
             NetMsg::Move(_)
             | NetMsg::Spectate(_)
-            | NetMsg::Seating(_)
+            | NetMsg::Claim(_)
             | NetMsg::Hello { .. }
             | NetMsg::Roster(_)
             | NetMsg::Ready(_)
@@ -142,7 +142,7 @@ pub(crate) fn apply_outbox_directly(session: &mut Session) {
 
 /// Audit the new position and pass over players with no legal move.
 pub(crate) fn after_turn(session: &mut Session) {
-    audit(session.game.position(), session.seating);
+    audit(session.game.position(), &session.players);
 
     while !session.game.is_over() && session.game.legal_moves().is_empty() {
         let stuck = session.game.turn();

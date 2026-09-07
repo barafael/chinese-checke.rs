@@ -1,16 +1,16 @@
 //! Drives the real lobby schedule with real input events.
 //!
-//! The unit tests in `lobby` cover `seating_from_keys` as a function, and the
-//! ones in `setup` cover what a seating means. Neither covers the *wiring*: that
-//! the key actually reaches the system, that the system writes the resource,
-//! that entering the game rebuilds the session from it, and that the board which
-//! results matches the choice.
+//! The unit tests in `lobby` cover `corner_effect`, `start_decision` and the
+//! deal as pure functions, and the ones in `setup` cover what a seating means.
+//! Neither covers the *wiring*: that the key reaches the system, that the
+//! system writes the resource, that entering the game rebuilds the session
+//! from it, and that the board which results matches the choice.
 //!
-//! That gap is not hypothetical. Pressing `3` against the running app produced a
-//! two-player board, and the unit tests were green throughout — because they
-//! never exercised the path from keypress to dealt board. Synthetic keystrokes
-//! through the window manager turned out to be an unreliable way to check it, so
-//! the schedule is driven directly here.
+//! That gap is not hypothetical. Pressing a corner digit against the running
+//! app produced nothing until the buttons rewrote the table, and the unit tests
+//! were green throughout — because they never exercised the path from keypress
+//! to dealt board. Synthetic keystrokes through the window manager turned out
+//! to be an unreliable way to check it, so the schedule is driven directly here.
 //!
 //! No `DefaultPlugins`: no window, no renderer, no signaling socket. Only the
 //! state machine and the lobby's own systems, which is what is under test.
@@ -19,7 +19,9 @@ use bevy::input::InputPlugin;
 use bevy::input::keyboard::KeyboardInput;
 use bevy::prelude::*;
 use bevy::state::app::StatesPlugin;
-use checkers_bevy::lobby::ChosenSeating;
+use checkers_bevy::lobby::{
+    ChosenVariants, CornerCommand, CornerState, LobbyButton, SelectedCorner, Table,
+};
 use checkers_bevy::setup::Seating;
 use checkers_bevy::{AppState, Session};
 use checkers_core::position::Player;
@@ -28,21 +30,23 @@ use checkers_core::position::Player;
 ///
 /// `lobby::plugin` is not used wholesale: it registers `open_socket`, which
 /// would reach for the network. The systems that interpret input are added
-/// directly instead.
+/// directly instead. `handle_buttons` takes the socket as an `Option` — no
+/// `MatchboxSocket` resource, so every press here is a solo press.
 fn app() -> App {
     let mut app = App::new();
     app.add_plugins((MinimalPlugins, InputPlugin, StatesPlugin))
         .init_state::<AppState>()
-        // The app boots into the main menu; these tests exercise the lobby, so
-        // they start there directly.
+        // The app boots into the lobby directly for these tests.
         .insert_state(AppState::Lobby)
         .init_resource::<Session>()
-        .init_resource::<ChosenSeating>()
-        .init_resource::<checkers_bevy::menu::AiSeats>()
+        .init_resource::<Table>()
+        .init_resource::<SelectedCorner>()
+        .init_resource::<ChosenVariants>()
         .init_resource::<checkers_net::NetState>()
         .add_systems(
             Update,
-            checkers_bevy::lobby::choose_seating.run_if(in_state(AppState::Lobby)),
+            (checkers_bevy::lobby::select_corner, checkers_bevy::lobby::handle_buttons)
+                .run_if(in_state(AppState::Lobby)),
         )
         .add_systems(OnEnter(AppState::InGame), checkers_bevy::lobby::apply_seats);
     app
@@ -76,121 +80,154 @@ fn press(app: &mut App, key: KeyCode) {
     });
 }
 
+/// A clickable button in the world. `handle_buttons` reads
+/// `(&Interaction, &LobbyButton)` with a `Changed` filter, so a press is
+/// inserting `Interaction::Pressed` for one frame and standing it down again,
+/// which both marks the change and lets the same button be pressed again.
+fn spawn_button(app: &mut App, tag: LobbyButton) -> Entity {
+    app.world_mut().spawn((Button, Interaction::None, tag)).id()
+}
+
+fn press_button(app: &mut App, button: Entity) {
+    app.world_mut().entity_mut(button).insert(Interaction::Pressed);
+    app.update();
+    app.world_mut().entity_mut(button).insert(Interaction::None);
+}
+
+/// Enter the game from the lobby and settle the state transition.
+fn enter_the_game(app: &mut App) {
+    press(app, KeyCode::Enter);
+    app.update();
+}
+
 #[test]
-fn each_digit_deals_the_board_it_names() {
-    for (key, seating) in [
-        (KeyCode::Digit2, Seating::Two),
-        (KeyCode::Digit3, Seating::Three),
-        (KeyCode::Digit6, Seating::Six),
-    ] {
+fn each_digit_selects_its_corner() {
+    for digit in 1..=6 {
         let mut app = app();
-        press(&mut app, key);
-
+        press(&mut app, key_for(digit));
         assert_eq!(
-            app.world().resource::<ChosenSeating>().0,
-            seating,
-            "{key:?} must choose {seating:?}"
-        );
-
-        // Enter the game and let `apply_seats` rebuild the session.
-        app.world_mut()
-            .resource_mut::<NextState<AppState>>()
-            .set(AppState::InGame);
-        app.update();
-        app.update();
-
-        let session = app.world().resource::<Session>();
-        assert_eq!(session.seating, seating, "{key:?}: session seating");
-
-        // The dealt board must match, which is the claim the unit tests could
-        // not make: it is the composition of choice, transition, and rebuild.
-        let position = session.game.position();
-        for player in Player::ALL {
-            let found = position.pieces_of(player).len();
-            let expected = if seating.players().contains(&player) {
-                10
-            } else {
-                0
-            };
-            assert_eq!(
-                found,
-                expected,
-                "{key:?}: player {} has {found} pieces, expected {expected}",
-                player.index()
-            );
-        }
-        assert!(
-            seating.players().contains(&session.game.turn()),
-            "{key:?}: the game must open on a seated player"
+            app.world().resource::<SelectedCorner>().0,
+            Some(digit as usize - 1),
+            "{digit} must select corner {}",
+            digit - 1
         );
     }
 }
 
-/// Tab must cycle through every seating and come back, so the whole control is
-/// reachable from one key.
+/// A preset is a shortcut that fills the whole table with a symmetric game, so
+/// what is configured and what the shortcut claims can never silently differ.
 #[test]
-fn tab_cycles_the_seating_in_the_running_app() {
+fn a_preset_fills_the_table() {
     let mut app = app();
-    let mut seen = vec![app.world().resource::<ChosenSeating>().0];
+    let two = spawn_button(&mut app, LobbyButton::Preset(Seating::Two));
+    press_button(&mut app, two);
 
-    for _ in 0..Seating::ALL.len() {
-        press(&mut app, KeyCode::Tab);
-        let now = app.world().resource::<ChosenSeating>().0;
-        if !seen.contains(&now) {
-            seen.push(now);
-        }
-    }
-
+    let table = app.world().resource::<Table>().0.clone();
+    assert_eq!(table[0], CornerState::Human("P0".into()));
+    assert_eq!(table[3], CornerState::Human("P3".into()));
     assert_eq!(
-        seen.len(),
-        Seating::ALL.len(),
-        "Tab must reach every seating, saw {seen:?}"
-    );
-    assert_eq!(
-        app.world().resource::<ChosenSeating>().0,
-        Seating::default(),
-        "cycling all the way round must return to the start"
+        table.iter().filter(|c| **c != CornerState::Empty).count(),
+        2,
+        "a preset fills exactly its camps"
     );
 }
 
-/// A key that names no seating must leave the choice alone, rather than
-/// resetting it to the default.
+/// The corner buttons rewrite the selected corner, keeping the name when a
+/// human corner is toggled off and on.
 #[test]
-fn an_unrelated_key_leaves_the_choice_alone() {
+fn corner_commands_configure_the_table() {
     let mut app = app();
-    press(&mut app, KeyCode::Digit3);
-    assert_eq!(app.world().resource::<ChosenSeating>().0, Seating::Three);
+    press(&mut app, KeyCode::Digit1);
+    let human = spawn_button(&mut app, LobbyButton::CornerAction(CornerCommand::Human));
+    press_button(&mut app, human);
+    assert_eq!(
+        app.world().resource::<Table>().0[0],
+        CornerState::Human("P0".into())
+    );
 
-    for key in [KeyCode::KeyX, KeyCode::Digit4, KeyCode::Digit5] {
-        press(&mut app, key);
-        assert_eq!(
-            app.world().resource::<ChosenSeating>().0,
-            Seating::Three,
-            "{key:?} must not change the seating"
-        );
-    }
+    let cpu = spawn_button(&mut app, LobbyButton::CornerAction(CornerCommand::Cpu));
+    press_button(&mut app, cpu);
+    assert_eq!(app.world().resource::<Table>().0[0], CornerState::Cpu);
+
+    let off = spawn_button(&mut app, LobbyButton::CornerAction(CornerCommand::Off));
+    press_button(&mut app, off);
+    assert_eq!(app.world().resource::<Table>().0[0], CornerState::Empty);
 }
 
-/// The default must be the full game, so someone who touches nothing gets the
-/// six-player board the specification describes.
+/// The whole point: Enter deals exactly the configured corners. Configure 0 by
+/// hand and 3 as an engine, start, and the session must be built for precisely
+/// those two camps — the composition of choice, transition, and rebuild.
 #[test]
-fn the_default_is_the_specified_six_player_game() {
+fn the_game_deals_exactly_the_configured_corners() {
     let mut app = app();
-    assert_eq!(app.world().resource::<ChosenSeating>().0, Seating::Six);
 
-    app.world_mut()
-        .resource_mut::<NextState<AppState>>()
-        .set(AppState::InGame);
-    app.update();
-    app.update();
+    press(&mut app, KeyCode::Digit1);
+    let human = spawn_button(&mut app, LobbyButton::CornerAction(CornerCommand::Human));
+    press_button(&mut app, human);
+    press(&mut app, KeyCode::Digit4);
+    let cpu = spawn_button(&mut app, LobbyButton::CornerAction(CornerCommand::Cpu));
+    press_button(&mut app, cpu);
+
+    enter_the_game(&mut app);
 
     let session = app.world().resource::<Session>();
     assert_eq!(
-        session.game.position(),
-        &checkers_core::position::Position::initial(),
-        "the untouched default must be the standard opening position"
+        session.players,
+        vec![Player::ALL[0], Player::ALL[3]],
+        "the deal reads the configured corners, sorted"
     );
-    // And it must satisfy the specification's own audit, unrestricted.
-    checkers_core::audit::audit_position(session.game.position(), session.game.players())
-        .expect("the six-player default must pass the specification's audit");
+    assert_eq!(session.ai_players, vec![Player::ALL[3]]);
+    assert_eq!(session.game.position().pieces_of(Player::ALL[0]).len(), 10);
+    assert_eq!(session.game.position().pieces_of(Player::ALL[5]).len(), 0);
+}
+
+/// One corner cannot be a game: the turn would visit a player's camp with
+/// nobody else to play. Enter must refuse, explain, and stay in the lobby.
+#[test]
+fn a_single_corner_refuses_to_start() {
+    let mut app = app();
+    press(&mut app, KeyCode::Digit1);
+    let cpu = spawn_button(&mut app, LobbyButton::CornerAction(CornerCommand::Cpu));
+    press_button(&mut app, cpu);
+
+    enter_the_game(&mut app);
+
+    assert_eq!(
+        app.world().resource::<State<AppState>>().get(),
+        &AppState::Lobby,
+        "a one-corner start must be refused"
+    );
+    let status = app.world().resource::<checkers_net::NetState>().status.clone();
+    assert!(status.contains("two corners"), "must explain the refusal: {status}");
+}
+
+/// Every corner an engine, and nobody is a player: the board still starts, as
+/// a watched race.
+#[test]
+fn an_all_cpu_table_starts_as_a_spectator() {
+    let mut app = app();
+    press(&mut app, KeyCode::Digit1);
+    let cpu = spawn_button(&mut app, LobbyButton::CornerAction(CornerCommand::Cpu));
+    press_button(&mut app, cpu);
+    press(&mut app, KeyCode::Digit4);
+    let cpu2 = spawn_button(&mut app, LobbyButton::CornerAction(CornerCommand::Cpu));
+    press_button(&mut app, cpu2);
+
+    enter_the_game(&mut app);
+
+    let session = app.world().resource::<Session>();
+    assert!(session.spectating, "two engines with no human is a watched race");
+    assert_eq!(session.ai_players.len(), 2);
+}
+
+/// The key that selects corner `digit` (1-based).
+fn key_for(digit: u32) -> KeyCode {
+    match digit {
+        1 => KeyCode::Digit1,
+        2 => KeyCode::Digit2,
+        3 => KeyCode::Digit3,
+        4 => KeyCode::Digit4,
+        5 => KeyCode::Digit5,
+        _ => KeyCode::Digit6,
+    }
 }

@@ -165,77 +165,87 @@ fn the_wire_form_preserves_move_identity() {
     }
 }
 
-/// The host's seating must reach every guest.
+/// The host's roster must reach every guest.
 ///
-/// Before `NetMsg::Start` carried `players`, a guest built its board from its
-/// own local default: a host starting a three-player game left the guest
-/// playing six, each peer convinced it was right. Nothing detected it, because
-/// both boards were individually valid — they simply were not the same board.
+/// Guests take `Start`'s `seats` verbatim and derive the board from the
+/// claimed corners. Before `NetMsg::Start` carried `seats`, a guest built its
+/// board from its own local default: a host starting a three-player game left
+/// the guest playing six, each peer convinced it was right. Nothing detected
+/// it, because both boards were individually valid — they simply were not the
+/// same board.
+///
+/// The `players` line is derived ([`checkers_bevy::lobby::start_message`]) and
+/// travels with the roster; the guest runs the same derivation the host did.
 #[test]
-fn the_hosts_seating_reaches_the_guest_over_the_wire() {
-    use checkers_bevy::setup::Seating;
+fn the_hosts_roster_reaches_the_guest_over_the_wire() {
     use checkers_net::{NetMsg, Seat, decode, encode};
 
-    for host_seating in Seating::ALL {
-        let sent = NetMsg::Start {
-            seats: vec![Seat {
+    let net = NetState {
+        seats: vec![
+            Seat {
                 peer: "host".into(),
                 name: "host".into(),
                 player: Some(0),
                 ready: true,
                 spectate: false,
                 engine: false,
-            }],
-            players: host_seating.indices(),
-        };
+            },
+            Seat {
+                peer: "guest".into(),
+                name: "grace".into(),
+                player: Some(3),
+                ready: true,
+                spectate: false,
+                engine: false,
+            },
+        ],
+        ..Default::default()
+    };
+    let sent = checkers_bevy::lobby::start_message(&net, Default::default());
+    let NetMsg::Start { seats, players, .. } = &sent else {
+        panic!("start_message must build a Start");
+    };
+    assert_eq!(players, &vec![0, 3], "players are the claimed corners, sorted");
 
-        let bytes = encode(&sent).expect("Start must encode");
-        let received = decode(&bytes).expect("Start must decode");
-
-        let NetMsg::Start { players, .. } = received else {
-            panic!("decoded to the wrong variant");
-        };
-
-        assert_eq!(
-            Seating::from_indices(&players),
-            Some(host_seating),
-            "{host_seating:?} did not survive the wire"
-        );
-
-        // And the board the guest deals must be the host's board, hole for hole.
-        let guest_board = Seating::from_indices(&players)
-            .expect("just checked")
-            .position();
-        assert_eq!(
-            guest_board,
-            host_seating.position(),
-            "{host_seating:?}: guest dealt a different board"
-        );
-    }
+    let bytes = encode(&sent).expect("Start must encode");
+    let NetMsg::Start { seats: back, .. } = decode(&bytes).expect("Start must decode") else {
+        panic!("decoded to the wrong variant");
+    };
+    assert_eq!(&back, seats, "the roster must arrive intact");
 }
 
-/// A guest must not deal a board it does not understand.
-///
-/// `from_indices` returns `None` rather than guessing, so the caller can say so.
-/// Rounding an unknown seating to the nearest known one would put two peers on
-/// different boards while both believed they agreed.
+/// A guest must not deal a board it does not understand, but it also must not
+/// refuse a sound one merely because it is not a preset: corners are arbitrary
+/// now, so the claimed camps are the board, whatever subset they form.
 #[test]
-fn an_unknown_seating_from_the_host_is_not_guessed() {
-    use checkers_bevy::setup::Seating;
+fn arbitrary_claimed_corners_reach_the_guests_board() {
     use checkers_net::{NetMsg, decode, encode};
 
-    // Four players: sound and playable, but not a seating this build offers.
+    // Camps 0, 1 and 4: playable, and not one of the 2/3/6 presets.
+    let players = vec![0u32, 1, 4];
     let sent = NetMsg::Start {
         seats: Vec::new(),
-        players: vec![0, 1, 2, 3],
+        players: players.clone(),
+        forbid_foreign_camps: false,
     };
     let bytes = encode(&sent).expect("must encode");
-    let NetMsg::Start { players, .. } = decode(&bytes).expect("must decode") else {
+    let NetMsg::Start { players: back, .. } = decode(&bytes).expect("must decode") else {
         panic!("wrong variant");
     };
-    assert_eq!(
-        Seating::from_indices(&players),
-        None,
-        "an unoffered seating must not be silently accepted"
-    );
+    assert_eq!(back, players);
+
+    let camps: Vec<Player> = players
+        .iter()
+        .filter_map(|&i| Player::new(i as u8))
+        .collect();
+    let game = Game::for_players(&camps);
+    for player in Player::ALL {
+        let found = game.position().pieces_of(player).len();
+        assert_eq!(
+            found,
+            if camps.contains(&player) { 10 } else { 0 },
+            "player {} must be seated iff claimed",
+            player.index()
+        );
+    }
 }
