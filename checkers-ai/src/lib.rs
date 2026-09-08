@@ -202,8 +202,7 @@ impl Ai {
 
     /// The chosen move plus, for jumps, one concrete hop route that plays it:
     /// every consecutive pair is a single legal hop, starting at the origin
-    /// and ending at the destination. Steps carry an empty route. This is what
-    /// lets a viewer animate the move hop by hop.
+    /// and ending at the destination. Steps carry an empty route.
     pub fn choose_move_route_for(
         &mut self,
         game: &Game,

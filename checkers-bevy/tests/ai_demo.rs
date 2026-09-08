@@ -1,9 +1,11 @@
 //! The paced AI-vs-AI driver, driven by an injected clock — no window.
 //!
-//! The contract under test is what makes the demo watchable: consecutive
-//! visible actions (moves, commits, individual hops) are spaced at least a
-//! second apart, every committed move is one the rules offer, every position
-//! passes the audit, and the race actually finishes.
+//! The contract under test is what makes the demo watchable: every move is
+//! committed as one whole action — no hop-by-hop staging — consecutive moves
+//! are spaced at least a second apart, every committed move is one the rules
+//! offer, every position passes the audit, and the race actually finishes.
+//! (The no-overlap rule against the replay flight lives in the driver's Bevy
+//! caller, not here: a headless harness has no flight to respect.)
 
 use checkers_ai::{Ai, AiConfig};
 use checkers_bevy::Session;
@@ -35,19 +37,7 @@ fn a_paced_demo_race_is_followable_and_legal() {
     while !session.game.is_over() && moves < 300 {
         match pace.advance(&mut session, &mut ai, now) {
             Action::Wait => now += Duration::from_millis(100),
-            Action::Hop(hole) => {
-                if let Some(t) = last_action {
-                    assert!(
-                        now - t >= spacing,
-                        "a hop came too soon after the last action"
-                    );
-                }
-                last_action = Some(now);
-                // The staged preview shows the piece sitting on the new hole.
-                assert_eq!(session.selected_hole(), Some(hole));
-                now += Duration::from_millis(1100);
-            }
-            Action::Commit(mv) | Action::Play(mv) => {
+            Action::Play(mv) => {
                 if let Some(t) = last_action {
                     assert!(
                         now - t >= spacing,

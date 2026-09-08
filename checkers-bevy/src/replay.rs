@@ -69,6 +69,14 @@ struct Trace {
 }
 
 impl Replay {
+    /// Whether a move's execution is still on screen — flying, or queued to
+    /// fly. A caller that would start the next turn's action skips a while
+    /// this reads busy, so a move's execution is always the last part of its
+    /// turn, never overlapped by the next one.
+    pub fn busy(&self) -> bool {
+        self.flight.is_some() || self.pending.is_some()
+    }
+
     /// Drop everything: a new game means nothing to replay and no old trace.
     fn clear(&mut self) {
         self.pending = None;

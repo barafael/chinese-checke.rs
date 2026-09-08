@@ -1,17 +1,18 @@
 //! The paced turn driver for computer seats: bevy-independent, driven by an
 //! injected clock.
 //!
-//! Two rules give a human eyes the game: a move happens **at most once per
-//! second**, and each hop of a jump is staged through the rules' own
-//! [`JumpTurn`] — one hop per second, with the preview showing exactly where
-//! the piece is mid-flight. The driver decides; the Bevy system performs.
+//! A move happens **at most once per second**, and each move — a step or a
+//! whole jump — is committed at once. The single visible result is the move's
+//! flight, animated by the replay systems as the execution: no hop-by-hop
+//! staging for the eyes. The Bevy system holds the driver off while that
+//! flight is on screen, so a move's execution is always the last part of its
+//! turn, never overlapped by the next one. The driver decides; the Bevy
+//! system performs.
 
-use crate::{Selection, Session};
+use crate::Session;
 use bevy::ecs::resource::Resource;
 use checkers_ai::Ai;
-use checkers_core::geometry::Coord;
 use checkers_core::position::{Move, MoveKind};
-use checkers_core::turn::JumpTurn;
 use std::time::Duration;
 
 /// The engine strength players pick for a computer corner, 1–5. Read when the
@@ -25,8 +26,10 @@ impl Default for AiStrength {
     }
 }
 
-/// Minimum wall-clock spacing between two visible actions (a move, a commit,
-/// or a single hop). The engine's own thinking time comes on top of this.
+/// Minimum wall-clock spacing between two committed moves. A flight longer
+/// than this holds the driver off on its own wall clock (the Bevy system
+/// skips driving while the previous execution is on screen), so the engine's
+/// pace never outstrips what the eyes can follow.
 pub const MOVE_INTERVAL: Duration = Duration::from_secs(1);
 
 /// What the driver wants done this frame.
@@ -34,13 +37,8 @@ pub const MOVE_INTERVAL: Duration = Duration::from_secs(1);
 pub enum Action {
     /// Throttled, or nothing to do.
     Wait,
-    /// Animate one hop of a staged jump. The preview position already shows
-    /// the piece on the new hole.
-    Hop(Coord),
-    /// A staged jump finished: commit this move through the outbox.
-    Commit(Move),
-    /// A plain move (a step, or the game passed): commit through the outbox —
-    /// or, for a pass, apply the rules' pass directly.
+    /// A move to play — a step or a whole jump, committed at once. A jump's
+    /// full route flies as one execution; there is no hop-by-hop staging.
     Play(Move),
     /// The seat has no legal move: forfeit the turn.
     Pass,
@@ -54,9 +52,6 @@ pub enum Action {
 #[derive(Resource)]
 pub struct AiPace {
     next_allowed: Option<Duration>,
-    /// Remaining hops of the staged jump, excluding the hop just taken. Empty
-    /// while no jump is staged.
-    route: Vec<Coord>,
     /// Set once the end-of-game line has been logged.
     pub result_logged: bool,
     /// The best progress (sum of remaining distance, negated) any single
@@ -90,7 +85,6 @@ impl AiPace {
     fn new() -> Self {
         Self {
             next_allowed: None,
-            route: Vec::new(),
             result_logged: false,
             best_progress: i32::MIN,
             plies_stalled: 0,
@@ -99,7 +93,6 @@ impl AiPace {
     }
     pub fn reset(&mut self) {
         self.next_allowed = None;
-        self.route.clear();
         self.result_logged = false;
         self.best_progress = i32::MIN;
         self.plies_stalled = 0;
@@ -167,8 +160,10 @@ impl AiPace {
     }
 
     /// Advance the demo by one frame. `now` is injected so tests control the
-    /// clock; every returned action is spaced at least [`MOVE_INTERVAL`]
-    /// after the previous one.
+    /// clock; every returned move is spaced at least [`MOVE_INTERVAL`] after
+    /// the previous one. The caller holds the driver off while the previous
+    /// move's flight is still on screen, so a move's execution is the last
+    /// thing its turn shows.
     pub fn advance(&mut self, session: &mut Session, ai: &mut Ai, now: Duration) -> Action {
         if session.game.is_over() {
             return Action::Wait;
@@ -177,38 +172,11 @@ impl AiPace {
         if !session.ai_players.contains(&seat) {
             return Action::Wait;
         }
-
-        // 1. A staged jump in flight: commit it when the hops are done.
-        if let Selection::Jumping { turn } = &mut session.selection
-            && self.route.is_empty()
-        {
-            if !self.ready(now) {
-                return Action::Wait;
-            }
-            let mv = turn.to_move().expect("a fully played route is committable");
-            session.selection = Selection::None;
-            self.schedule(now);
-            return self.after_move(session).unwrap_or(Action::Commit(mv));
-        }
-
-        // 2. Mid-flight: take the next hop.
-        if let Selection::Jumping { turn } = &mut session.selection {
-            if !self.ready(now) {
-                return Action::Wait;
-            }
-            let hop = self.route.remove(0);
-            let taken = turn.hop(hop);
-            debug_assert!(taken, "a precomputed route hop must be legal");
-            self.schedule(now);
-            return Action::Hop(hop);
-        }
-
-        // 3. Fresh move, throttled.
         if !self.ready(now) {
             return Action::Wait;
         }
 
-        let Some((mv, route)) = ai.choose_move_route_for(&session.game, seat) else {
+        let Some(mv) = ai.choose_move_for(&session.game, seat) else {
             // No legal move: forfeit the turn, at the same measured pace.
             if session.game.legal_moves().is_empty() {
                 self.schedule(now);
@@ -217,28 +185,8 @@ impl AiPace {
             return Action::Wait;
         };
 
-        match mv.kind {
-            MoveKind::Step => {
-                self.schedule(now);
-                self.after_move(session).unwrap_or(Action::Play(mv))
-            }
-            MoveKind::Jump => {
-                // Stage the jump and fly the first hop now; the rest follow at
-                // one hop per second, then the commit lands.
-                let Some(mut turn) = JumpTurn::begin(session.game.position(), seat, mv.origin)
-                else {
-                    return Action::Wait;
-                };
-                let mut route = route;
-                let first = route.remove(0);
-                let taken = turn.hop(first);
-                debug_assert!(taken, "the route's first hop must be legal");
-                self.route = route;
-                session.selection = Selection::Jumping { turn };
-                self.schedule(now);
-                Action::Hop(first)
-            }
-        }
+        self.schedule(now);
+        self.after_move(session).unwrap_or(Action::Play(mv))
     }
 }
 
@@ -269,7 +217,30 @@ mod tests {
     use super::*;
     use crate::Session;
     use crate::setup::Seating;
+    use checkers_ai::AiConfig;
     use checkers_core::position::Player;
+
+    /// The engine's whole move — a step, or a jump's full route — is committed
+    /// in one `Play`: nothing is staged hop by hop, and the throttle means the
+    /// next move cannot leave while the previous execution is still on screen.
+    #[test]
+    fn a_move_is_committed_whole_and_throttled() {
+        let mut session = Session::new(Seating::Two);
+        session.ai_players = vec![Player::ALL[0], Player::ALL[3]];
+        let mut pace = AiPace::default();
+        let mut ai = Ai::new(AiConfig::strength(1));
+
+        let out = pace.advance(&mut session, &mut ai, Duration::ZERO);
+        assert!(
+            matches!(out, Action::Play(_) | Action::Pass | Action::Abandon(_)),
+            "the opening move is committed at once, not staged: got {out:?}"
+        );
+        // No throttle has elapsed on the same instant: the driver stands down.
+        assert!(
+            matches!(pace.advance(&mut session, &mut ai, Duration::ZERO), Action::Wait),
+            "two moves cannot leave in the same breath"
+        );
+    }
 
     /// Progress is positive from the start of a two-player race and grows as
     /// pieces advance, so the stall detector has a sound baseline.

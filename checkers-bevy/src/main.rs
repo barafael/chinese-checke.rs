@@ -1527,34 +1527,33 @@ impl Default for AiEngine {
 /// Runs after input and before the network pump: the engine's move enters the
 /// outbox like any human's, so multiplayer sequencing applies to it verbatim.
 /// The call is synchronous and thinks for the configured budget, so the frame
-/// it moves in takes as long as the engine thinks.
+/// it moves in takes as long as the engine thinks. While the previous move's
+/// flight is still on screen, the driver is held off — the execution is the
+/// last part of its turn, and the next turn waits for it.
 fn ai_take_turn(
     mut session: ResMut<Session>,
     mut engine: ResMut<AiEngine>,
     mut pace: ResMut<AiPace>,
     time: Res<Time>,
+    replay_state: Res<replay::Replay>,
     viewer: Option<Res<replay::ReplayView>>,
 ) {
     // The viewer's session is a derived copy; the engine must not advance it.
     if viewer.is_some() {
         return;
     }
-    // The driver owns the staged-jump selection while its hops fly, so the
-    // human-selection gate lives inside it. The pacing clock is Bevy's, which
-    // is available on wasm where std's wall clock is not.
-    let now = time.elapsed();
+    // The driver only has opinions about a move once the previous execution
+    // has finished flying — see `Replay::busy`.
+    let action = if replay_state.busy() {
+        Action::Wait
+    } else {
+        let now = time.elapsed();
+        pace.advance(&mut session, &mut engine.0, now)
+    };
     let move_no = session.stats.total_moves() + 1;
-    match pace.advance(&mut session, &mut engine.0, now) {
+    match action {
         Action::Wait => {}
-        Action::Hop(hole) => {
-            session.message = format!(
-                "Player {} hops to ({},{})",
-                session.game.turn().index(),
-                hole.q,
-                hole.r
-            );
-        }
-        Action::Commit(mv) | Action::Play(mv) => {
+        Action::Play(mv) => {
             let seat = session.game.turn().index();
             let line = format!(
                 "{}. p{} {}",
