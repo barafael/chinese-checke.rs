@@ -294,6 +294,45 @@ mod tests {
         assert_eq!(open.outbox.len(), 1, "the open game still commits the jump");
     }
 
+    /// A staged move that is not the fence's doing — the destination is illegal
+    /// outright — must be refused with that reason, not the foreign camp.
+    #[test]
+    fn confirm_says_the_board_moved_on_for_a_stale_staging() {
+        let mut session = Session::new(Seating::Two);
+        let turn = session.game.turn();
+        let origin = session
+            .game
+            .position()
+            .pieces_of(turn)
+            .first()
+            .copied()
+            .expect("the initial board offers pieces");
+        // A step that stays put is never legal: no fence involved.
+        let mv = checkers_core::position::Move {
+            kind: checkers_core::position::MoveKind::Step,
+            origin,
+            destination: origin,
+            route: None,
+        };
+        session.selection = Selection::Pend {
+            mv,
+            preview: session.game.position().clone(),
+        };
+
+        session.confirm();
+        assert!(session.outbox.is_empty(), "the stale move must not be sent");
+        assert!(
+            session.message.contains("no longer legal"),
+            "refusal must say the staging went stale, got: {}",
+            session.message
+        );
+        assert!(
+            !session.message.contains("foreign"),
+            "a stale move is not a fence refusal: {}",
+            session.message
+        );
+    }
+
     /// The hexagon/camp-1 fixture a few tests share: player 0 at `origin`, a
     /// wall of player 3 at (1,4) so a jump over it can land on (2,4) in camp 1.
     fn foreign_camp_position(origin: checkers_core::geometry::Coord) -> Position {
@@ -788,7 +827,17 @@ impl Session {
             return;
         };
         if !self.game.legal_moves().contains(&mv) {
-            self.message = "That would rest in a foreign triangle.".into();
+            // The foreign-camp fence is the only filter between the raw move
+            // list and the playable one, so a move the base rules still enjoy
+            // was refused by the fence. Anything else — the turn or the board
+            // moved on while the staging sat — is not a fence, and the message
+            // must say that instead of inventing one.
+            self.message =
+                if checkers_core::rules::legal_moves(self.game.position(), player).contains(&mv) {
+                    "That would rest in a foreign triangle.".into()
+                } else {
+                    "The staged move is no longer legal - the board moved on.".into()
+                };
             return;
         }
 

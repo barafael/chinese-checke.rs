@@ -16,6 +16,7 @@
 
 use bevy::prelude::*;
 use checkers_core::geometry::Coord;
+use std::collections::VecDeque;
 use std::time::Duration;
 
 use crate::LastMove;
@@ -36,9 +37,11 @@ const SECONDS_PER_HOP: f32 = 0.32;
 /// The opponent's last move: waiting to animate, animating, or left as a trace.
 #[derive(Resource, Default)]
 pub struct Replay {
-    /// A fresh opponent move, taken by [`advance`] once its current flight is
-    /// done.
-    pending: Option<Flight>,
+    /// Opponent moves waiting to fly, taken one at a time by [`advance`] once
+    /// the current flight is done. A queue, not a single slot: a move can land
+    /// while its predecessor is still airborne, and finishing that flight must
+    /// not drop the move that arrived meanwhile.
+    pending: VecDeque<Flight>,
     /// The animation in flight, if any.
     flight: Option<Flight>,
     /// The last completed flight, shown as a static gray trace.
@@ -74,12 +77,12 @@ impl Replay {
     /// this reads busy, so a move's execution is always the last part of its
     /// turn, never overlapped by the next one.
     pub fn busy(&self) -> bool {
-        self.flight.is_some() || self.pending.is_some()
+        self.flight.is_some() || !self.pending.is_empty()
     }
 
     /// Drop everything: a new game means nothing to replay and no old trace.
     fn clear(&mut self) {
-        self.pending = None;
+        self.pending.clear();
         self.flight = None;
         self.last_queued = None;
         if self.trace.is_some() {
@@ -113,7 +116,7 @@ pub fn watch(session: Res<Session>, mut replay: ResMut<Replay>) {
                 // flight finishes, producing an infinite loop.
                 && replay.last_queued.as_ref() != Some(last) =>
         {
-            replay.pending = Some(Flight {
+            replay.pending.push_back(Flight {
                 path: last.path.clone(),
                 points: last.path.iter().map(|c| coord_to_world(*c)).collect(),
                 elapsed: 0.0,
@@ -136,7 +139,7 @@ pub fn advance(
     mut pieces: Query<(&PieceCoord, &mut Transform)>,
 ) {
     if replay.flight.is_none() {
-        replay.flight = replay.pending.take();
+        replay.flight = replay.pending.pop_front();
     }
     let Some(mut flight) = replay.flight.take() else {
         return;
@@ -154,6 +157,11 @@ pub fn advance(
     };
     let Some((_, mut transform)) = pieces.iter_mut().find(|(coord, _)| coord.0 == destination)
     else {
+        // A rebuild can leave the destination briefly piece-less (the next
+        // selection preview dismantles the board and redraws it). Stash the
+        // flight and let a later frame carry on rather than dropping the rest
+        // of the animation and the trace it would have left.
+        replay.flight = Some(flight);
         return;
     };
 
@@ -165,7 +173,6 @@ pub fn advance(
         replay.flight = Some(flight);
         return;
     }
-    replay.pending = None;
     replay.trace = Some(Trace { path: flight.path });
     replay.trace_version += 1;
 }
@@ -435,6 +442,7 @@ mod view_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use checkers_core::position::Player;
 
     /// The flight starts on the origin hole, ends exactly on the destination,
     /// and stays inside the path in between.
@@ -471,5 +479,102 @@ mod tests {
         let rest = flight_transform(&points, 0.0, BoardStyle::Amlah);
         let peak = flight_transform(&points, 0.5, BoardStyle::Amlah);
         assert!(peak.translation.y > rest.translation.y + 0.1);
+    }
+
+    // The queue behaviour is exercised through the real systems, so the
+    // presentation-level bugs (dropping a move, dropping a flight) cannot
+    // creep back in. `MainSchedulePlugin` only: no `TimePlugin`, so each
+    // `advance_by` is the delta the systems see and the timing is exact.
+
+    fn app() -> App {
+        let mut app = App::new();
+        app.insert_resource(Time::<()>::default())
+            .insert_resource(BoardStyle::Classic)
+            .insert_resource(Replay::default())
+            .add_systems(Update, (watch, advance).chain());
+        app.world_mut()
+            .insert_resource(crate::Session::new(crate::setup::Seating::Two));
+        app
+    }
+
+    fn piece(world: &mut World, hole: Coord) -> Entity {
+        world.spawn((PieceCoord(hole), Transform::default())).id()
+    }
+
+    fn run(app: &mut App, delta: Duration) {
+        app.world_mut().resource_mut::<Time>().advance_by(delta);
+        app.update();
+    }
+
+    fn announce(app: &mut App, mover: Player, path: Vec<Coord>) {
+        app.world_mut().resource_mut::<crate::Session>().last_move = Some(LastMove { mover, path });
+    }
+
+    /// A move that lands while its predecessor is still airborne is replayed
+    /// after it: completing a flight must not wipe the move that queued up
+    /// behind it. Before the queue, `advance` cleared `pending` on landing and
+    /// `last_queued` blocked the loss being re-noticed.
+    #[test]
+    fn a_move_landing_during_a_flight_is_still_replayed_after_it() {
+        let mut app = app();
+        let dest_a = Coord::new(0, 0);
+        let dest_b = Coord::new(0, 1);
+        piece(app.world_mut(), dest_a);
+        piece(app.world_mut(), dest_b);
+
+        announce(&mut app, Player::ALL[3], vec![Coord::new(-1, 1), dest_a]);
+        run(&mut app, Duration::from_millis(100)); // A takes to the air
+
+        announce(&mut app, Player::ALL[1], vec![Coord::new(1, 0), dest_b]);
+        run(&mut app, Duration::from_millis(100)); // B lands while A is airborne
+        run(&mut app, Duration::from_millis(300)); // A lands; B must survive
+
+        assert!(
+            !app.world().resource::<Replay>().pending.is_empty()
+                || app.world().resource::<Replay>().flight.is_some(),
+            "B is queued or flying, never discarded"
+        );
+        run(&mut app, Duration::from_millis(300)); // B lands
+        run(&mut app, Duration::from_millis(300)); // B finishes airtime
+
+        let trace = app
+            .world()
+            .resource::<Replay>()
+            .trace
+            .as_ref()
+            .expect("B's flight completed");
+        assert_eq!(trace.path, vec![Coord::new(1, 0), dest_b]);
+    }
+
+    /// A destination missing on one frame (a rebuild between the piece sync
+    /// and the flight) stashes the flight for the next frame instead of
+    /// cancelling it — the rest of the animation and its trace survive.
+    #[test]
+    fn a_flight_tolerates_a_frame_without_its_piece() {
+        let mut app = app();
+        let dest_a = Coord::new(0, 0);
+        let d_a = piece(app.world_mut(), dest_a);
+
+        announce(&mut app, Player::ALL[3], vec![Coord::new(-1, 1), dest_a]);
+        run(&mut app, Duration::from_millis(100)); // A takes to the air
+
+        app.world_mut().despawn(d_a);
+        run(&mut app, Duration::from_millis(100)); // piece gone mid-flight
+
+        assert!(
+            app.world().resource::<Replay>().flight.is_some(),
+            "the flight waited for its piece rather than giving up"
+        );
+
+        piece(app.world_mut(), dest_a);
+        run(&mut app, Duration::from_millis(300)); // piece back, flight completes
+
+        let trace = app
+            .world()
+            .resource::<Replay>()
+            .trace
+            .as_ref()
+            .expect("A's flight completed");
+        assert_eq!(trace.path, vec![Coord::new(-1, 1), dest_a]);
     }
 }
