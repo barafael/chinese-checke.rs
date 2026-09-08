@@ -205,7 +205,11 @@ fn the_hosts_roster_reaches_the_guest_over_the_wire() {
     let NetMsg::Start { seats, players, .. } = &sent else {
         panic!("start_message must build a Start");
     };
-    assert_eq!(players, &vec![0, 3], "players are the claimed corners, sorted");
+    assert_eq!(
+        players,
+        &vec![0, 3],
+        "players are the claimed corners, sorted"
+    );
 
     let bytes = encode(&sent).expect("Start must encode");
     let NetMsg::Start { seats: back, .. } = decode(&bytes).expect("Start must decode") else {

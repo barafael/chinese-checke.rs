@@ -664,10 +664,9 @@ mod variant_tests {
     /// `with_variants` returns the game ready to play under the rule.
     #[test]
     fn with_variants_sets_the_toggle() {
-        let game = Game::for_players(&[Player::ALL[0], Player::ALL[3]])
-            .with_variants(Variants {
-                forbid_foreign_camps: true,
-            });
+        let game = Game::for_players(&[Player::ALL[0], Player::ALL[3]]).with_variants(Variants {
+            forbid_foreign_camps: true,
+        });
         assert!(game.variants().forbid_foreign_camps);
     }
 

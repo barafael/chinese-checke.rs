@@ -227,8 +227,8 @@ fn parse_move(jump: bool, rest: &str) -> Option<WireMove> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::setup::Seating;
     use crate::Selection;
+    use crate::setup::Seating;
     use checkers_core::rules::legal_moves;
     use checkers_core::turn::step_destinations;
 
@@ -278,7 +278,8 @@ mod tests {
             GameRecord::from_text("cchkrs 3\nplayers 0 3\nvariants standard\nmoves 1\nx 0,0 1,1\n");
         assert!(matches!(bad_move, Err(RecordFault::Move { line: 5, .. })));
 
-        let bad_count = GameRecord::from_text("cchkrs 3\nplayers 0 3\nvariants standard\nmoves 2\n");
+        let bad_count =
+            GameRecord::from_text("cchkrs 3\nplayers 0 3\nvariants standard\nmoves 2\n");
         assert!(matches!(
             bad_count,
             Err(RecordFault::Count {
@@ -287,7 +288,8 @@ mod tests {
             })
         ));
 
-        let bad_players = GameRecord::from_text("cchkrs 3\nplayers 0 9\nvariants standard\nmoves 0\n");
+        let bad_players =
+            GameRecord::from_text("cchkrs 3\nplayers 0 9\nvariants standard\nmoves 0\n");
         assert!(matches!(bad_players, Err(RecordFault::Players(_))));
 
         let bad_rules = GameRecord::from_text("cchkrs 3\nplayers 0 3\nvariants banana\nmoves 0\n");

@@ -246,11 +246,10 @@ mod tests {
         let origin = checkers_core::geometry::Coord::new(0, 4);
         let destination = checkers_core::geometry::Coord::new(2, 4);
         let position = foreign_camp_position(origin);
-        session.game =
-            Game::compose(position, Player::ALL[0], &[Player::ALL[0], Player::ALL[3]])
-                .with_variants(checkers_core::rules::Variants {
-                    forbid_foreign_camps: true,
-                });
+        session.game = Game::compose(position, Player::ALL[0], &[Player::ALL[0], Player::ALL[3]])
+            .with_variants(checkers_core::rules::Variants {
+                forbid_foreign_camps: true,
+            });
 
         let jump = checkers_core::position::Move {
             kind: checkers_core::position::MoveKind::Jump,
@@ -264,7 +263,10 @@ mod tests {
         };
 
         session.confirm();
-        assert!(session.outbox.is_empty(), "the foreign landing must not be sent");
+        assert!(
+            session.outbox.is_empty(),
+            "the foreign landing must not be sent"
+        );
         assert!(
             session.message.contains("foreign"),
             "refusal must say why: {}",
@@ -453,7 +455,8 @@ impl Session {
         record: &crate::record::GameRecord,
         up_to: usize,
     ) -> Result<Self, RecordFault> {
-        let mut session = Self::for_players(&record.players, checkers_core::rules::Variants::default());
+        let mut session =
+            Self::for_players(&record.players, checkers_core::rules::Variants::default());
         session.game.set_variants(record.variants);
         session.ai_players = record.ai_players.clone();
         for (ply, wire) in record.moves.iter().take(up_to).enumerate() {

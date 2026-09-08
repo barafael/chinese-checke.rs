@@ -16,6 +16,7 @@ use bevy::ecs::system::SystemParam;
 use bevy::input::touch::{TouchInput, TouchPhase};
 use bevy::window::{Monitor, PrimaryMonitor};
 use checkers_ai::{Ai, AiConfig};
+use checkers_bevy::ai::AiStrength;
 use checkers_bevy::ai::{Action, AiPace};
 use checkers_bevy::board_amlah;
 use checkers_bevy::board_style::{
@@ -25,7 +26,6 @@ use checkers_bevy::board_view::{
     BOARD_FRAME, HOLE_RADIUS, HOLE_SPACING, PIECE_RADIUS, camp_triangles, coord_to_world,
     hole_edges, hole_points, player_colour, world_to_coord,
 };
-use checkers_bevy::ai::AiStrength;
 use checkers_bevy::replay;
 use checkers_bevy::setup::Seating;
 use checkers_bevy::{

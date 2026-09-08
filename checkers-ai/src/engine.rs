@@ -373,9 +373,11 @@ mod tests {
 
         let open = state_with(&[origin], &[Coord::new(1, 4)], 0);
         assert!(
-            open.moves()
-                .iter()
-                .any(|&m| unpack(m) == (index_of(origin).unwrap() as u8, index_of(landing).unwrap() as u8)),
+            open.moves().iter().any(|&m| unpack(m)
+                == (
+                    index_of(origin).unwrap() as u8,
+                    index_of(landing).unwrap() as u8
+                )),
             "the jump into camp 1 is open with the rule off"
         );
 

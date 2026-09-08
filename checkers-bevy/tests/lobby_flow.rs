@@ -45,7 +45,10 @@ fn app() -> App {
         .init_resource::<checkers_net::NetState>()
         .add_systems(
             Update,
-            (checkers_bevy::lobby::select_corner, checkers_bevy::lobby::handle_buttons)
+            (
+                checkers_bevy::lobby::select_corner,
+                checkers_bevy::lobby::handle_buttons,
+            )
                 .run_if(in_state(AppState::Lobby)),
         )
         .add_systems(OnEnter(AppState::InGame), checkers_bevy::lobby::apply_seats);
@@ -89,7 +92,9 @@ fn spawn_button(app: &mut App, tag: LobbyButton) -> Entity {
 }
 
 fn press_button(app: &mut App, button: Entity) {
-    app.world_mut().entity_mut(button).insert(Interaction::Pressed);
+    app.world_mut()
+        .entity_mut(button)
+        .insert(Interaction::Pressed);
     app.update();
     app.world_mut().entity_mut(button).insert(Interaction::None);
 }
@@ -197,8 +202,15 @@ fn a_single_corner_refuses_to_start() {
         &AppState::Lobby,
         "a one-corner start must be refused"
     );
-    let status = app.world().resource::<checkers_net::NetState>().status.clone();
-    assert!(status.contains("two corners"), "must explain the refusal: {status}");
+    let status = app
+        .world()
+        .resource::<checkers_net::NetState>()
+        .status
+        .clone();
+    assert!(
+        status.contains("two corners"),
+        "must explain the refusal: {status}"
+    );
 }
 
 /// Every corner an engine, and nobody is a player: the board still starts, as
@@ -216,7 +228,10 @@ fn an_all_cpu_table_starts_as_a_spectator() {
     enter_the_game(&mut app);
 
     let session = app.world().resource::<Session>();
-    assert!(session.spectating, "two engines with no human is a watched race");
+    assert!(
+        session.spectating,
+        "two engines with no human is a watched race"
+    );
     assert_eq!(session.ai_players.len(), 2);
 }
 

@@ -237,7 +237,10 @@ mod tests {
         );
         // No throttle has elapsed on the same instant: the driver stands down.
         assert!(
-            matches!(pace.advance(&mut session, &mut ai, Duration::ZERO), Action::Wait),
+            matches!(
+                pace.advance(&mut session, &mut ai, Duration::ZERO),
+                Action::Wait
+            ),
             "two moves cannot leave in the same breath"
         );
     }

@@ -491,7 +491,11 @@ fn spawn(mut commands: Commands) {
             })
             .with_children(|row| {
                 for seating in Seating::ALL {
-                    button(row, &format!("Preset {}", seating.label()), LobbyButton::Preset(seating));
+                    button(
+                        row,
+                        &format!("Preset {}", seating.label()),
+                        LobbyButton::Preset(seating),
+                    );
                 }
             });
 
@@ -921,8 +925,10 @@ pub fn pump_socket(
                     let claims = match claim {
                         Some(c) if c < 6 => {
                             let free = !net.seats.iter().any(|s| s.player == Some(c));
-                            let mine =
-                                net.seats.iter().any(|s| s.peer == key && s.player == Some(c));
+                            let mine = net
+                                .seats
+                                .iter()
+                                .any(|s| s.peer == key && s.player == Some(c));
                             Some((c, free, mine))
                         }
                         _ => None,
@@ -938,8 +944,7 @@ pub fn pump_socket(
                                         seat.player = None;
                                     }
                                     seat.player = Some(corner);
-                                    net.status =
-                                        format!("{} claimed corner {corner}.", seat.name);
+                                    net.status = format!("{} claimed corner {corner}.", seat.name);
                                 }
                             }
                         }
@@ -967,9 +972,7 @@ pub fn pump_socket(
             // Moves cannot arrive before the game starts, but a late duplicate
             // from a previous game in the same room could. Ignore rather than
             // mis-apply.
-            NetMsg::Move(_)
-            | NetMsg::Sequenced { .. }
-            | NetMsg::Spectate(_) => {}
+            NetMsg::Move(_) | NetMsg::Sequenced { .. } | NetMsg::Spectate(_) => {}
         }
     }
 }
@@ -1007,7 +1010,8 @@ fn seat_engine_at(net: &mut NetState, corner: usize) {
 
 /// Remove the engine from a corner, if one sits there.
 fn remove_engine_at(net: &mut NetState, corner: usize) {
-    net.seats.retain(|s| !(s.engine && s.player == Some(corner as u32)));
+    net.seats
+        .retain(|s| !(s.engine && s.player == Some(corner as u32)));
 }
 
 /// The camps this peer's own engine should drive, from the roster's engine
@@ -1117,9 +1121,9 @@ pub fn corner_effect(
                 return match cmd {
                     CornerCommand::Off => Ok(CornerEffect::Claim(None)),
                     CornerCommand::Human => Err("You already hold this corner.".into()),
-                    CornerCommand::Cpu => Err(
-                        "Only the host can seat an engine, and only on an empty corner.".into(),
-                    ),
+                    CornerCommand::Cpu => {
+                        Err("Only the host can seat an engine, and only on an empty corner.".into())
+                    }
                 };
             }
             return Err(format!("Corner {corner} is held by {}.", owner.name));
@@ -1334,16 +1338,20 @@ fn draw_roster(
     if net.peers.is_empty() {
         let filled = table.0.iter().filter(|c| **c != CornerState::Empty).count();
         let cpu = table.0.iter().filter(|c| **c == CornerState::Cpu).count();
-        out = format!(
-            "local setup  |  {filled} corner(s) filled, {cpu} by computer\n\n"
-        );
+        out = format!("local setup  |  {filled} corner(s) filled, {cpu} by computer\n\n");
         if filled == 0 {
-            out.push_str("The star is empty. Click a petal (or 1-6), then choose Human / Computer.\n");
+            out.push_str(
+                "The star is empty. Click a petal (or 1-6), then choose Human / Computer.\n",
+            );
         } else if cpu == filled {
             out.push_str("Every corner is an engine - Enter starts as a spectator.\n");
         }
     } else {
-        out = format!("{}  |  {} peer(s) here\n\n", if net.sequences() { "host" } else { "guest" }, net.peers.len());
+        out = format!(
+            "{}  |  {} peer(s) here\n\n",
+            if net.sequences() { "host" } else { "guest" },
+            net.peers.len()
+        );
         if net.seats.is_empty() {
             out.push_str("No one here yet - share the room name.\n");
         }
@@ -1507,11 +1515,7 @@ fn sync_corner_styles(
         } else {
             net.seats.iter().any(|s| s.player == Some(petal.0 as u32))
         };
-        let base = if filled {
-            player_colour(p)
-        } else {
-            IDLE
-        };
+        let base = if filled { player_colour(p) } else { IDLE };
         let factor = match interaction {
             Interaction::Pressed => 0.72,
             Interaction::Hovered => 1.18,
@@ -1989,7 +1993,10 @@ mod tests {
         match start_decision(&net, &Table::default()) {
             StartDecision::Refuse(why) => {
                 assert!(why.contains("grace"), "should name who is not ready: {why}");
-                assert!(!why.contains("ada"), "should not name a ready player: {why}");
+                assert!(
+                    !why.contains("ada"),
+                    "should not name a ready player: {why}"
+                );
             }
             other => panic!("expected a refusal, got {other:?}"),
         }
@@ -2003,7 +2010,10 @@ mod tests {
         net.is_host = true;
         net.seats = vec![seat("ada", Some(0), true)];
         assert!(
-            matches!(start_decision(&net, &Table::default()), StartDecision::Refuse(_)),
+            matches!(
+                start_decision(&net, &Table::default()),
+                StartDecision::Refuse(_)
+            ),
             "one claim cannot be a game"
         );
     }
@@ -2014,7 +2024,10 @@ mod tests {
         net.peers.push(fake_peer());
         net.is_host = true;
         net.seats = vec![seat("ada", Some(0), true), seat("grace", Some(3), true)];
-        assert_eq!(start_decision(&net, &Table::default()), StartDecision::Multiplayer);
+        assert_eq!(
+            start_decision(&net, &Table::default()),
+            StartDecision::Multiplayer
+        );
     }
 
     /// A claimed corner, a seat that needs no readiness: engines read as
@@ -2040,10 +2053,7 @@ mod tests {
     #[test]
     fn the_start_message_carries_the_claimed_corners() {
         let net = NetState {
-            seats: vec![
-                seat("ada", Some(3), true),
-                seat("grace", Some(0), true),
-            ],
+            seats: vec![seat("ada", Some(3), true), seat("grace", Some(0), true)],
             ..Default::default()
         };
         let NetMsg::Start { players, .. } = start_message(&net, Variants::default()) else {
@@ -2135,9 +2145,7 @@ mod tests {
             corner_effect(&net, &Table::default(), "ada", 2, CornerCommand::Off),
             Ok(CornerEffect::Claim(None))
         );
-        assert!(
-            corner_effect(&net, &Table::default(), "ada", 2, CornerCommand::Human).is_err()
-        );
+        assert!(corner_effect(&net, &Table::default(), "ada", 2, CornerCommand::Human).is_err());
     }
 
     /// A guest cannot place an engine; that is the host's call.
@@ -2147,9 +2155,7 @@ mod tests {
             peers: vec![fake_peer()],
             ..Default::default()
         };
-        assert!(
-            corner_effect(&net, &Table::default(), "grace", 1, CornerCommand::Cpu).is_err()
-        );
+        assert!(corner_effect(&net, &Table::default(), "grace", 1, CornerCommand::Cpu).is_err());
         let host = NetState {
             is_host: true,
             peers: vec![fake_peer()],
@@ -2200,7 +2206,11 @@ mod tests {
         for digit in 1..=6 {
             let mut keys = ButtonInput::default();
             keys.press(key_for(digit));
-            assert_eq!(corner_from_keys(&keys, None), Some(digit as usize - 1), "{digit}");
+            assert_eq!(
+                corner_from_keys(&keys, None),
+                Some(digit as usize - 1),
+                "{digit}"
+            );
         }
         let mut keys = ButtonInput::default();
         keys.press(KeyCode::KeyX);
@@ -2240,7 +2250,10 @@ mod tests {
         table.0[2] = CornerState::Cpu;
         table.0[4] = CornerState::Human("Lee".into());
         let (players, ai, local, spectating) = deal_for(&net, &table);
-        assert_eq!(players, vec![Player::ALL[0], Player::ALL[2], Player::ALL[4]]);
+        assert_eq!(
+            players,
+            vec![Player::ALL[0], Player::ALL[2], Player::ALL[4]]
+        );
         assert_eq!(ai, vec![Player::ALL[2]]);
         assert_eq!(local, None);
         assert!(!spectating);
