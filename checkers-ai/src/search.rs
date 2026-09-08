@@ -231,10 +231,10 @@ fn negamax(
     let mover = state.turn as usize;
     let other = if mover == ctx.me { ctx.rival } else { ctx.me };
     if state.pieces[mover] & TABLES.target[mover] == TABLES.target[mover] {
-        return (WIN - (24 - depth) as i32, None);
+        return (WIN - (24i32 - depth as i32), None);
     }
     if state.pieces[other] & TABLES.target[other] == TABLES.target[other] {
-        return (-(WIN - (24 - depth) as i32), None);
+        return (-(WIN - (24i32 - depth as i32)), None);
     }
     // Twelve seats in a row without a move: two full rounds of passes, the
     // draw the rules describe.
@@ -547,10 +547,10 @@ mod brute_force_check {
         let mover = state.turn as usize;
         let other = if mover == me { rival } else { me };
         if state.pieces[mover] & TABLES.target[mover] == TABLES.target[mover] {
-            return WIN - (24 - depth) as i32;
+            return WIN - (24i32 - depth as i32);
         }
         if state.pieces[other] & TABLES.target[other] == TABLES.target[other] {
-            return -(WIN - (24 - depth) as i32);
+            return -(WIN - (24i32 - depth as i32));
         }
         if passes >= 12 {
             return DRAW;

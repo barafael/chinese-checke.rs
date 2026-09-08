@@ -141,7 +141,7 @@ pub(crate) fn apply_outbox_directly(session: &mut Session) {
 }
 
 /// Audit the new position and pass over players with no legal move.
-pub(crate) fn after_turn(session: &mut Session) {
+pub fn after_turn(session: &mut Session) {
     audit(session.game.position(), &session.players);
 
     while !session.game.is_over() && session.game.legal_moves().is_empty() {

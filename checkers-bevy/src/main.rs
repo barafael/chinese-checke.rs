@@ -1201,6 +1201,7 @@ fn sync_turn_indicator(
         Some(Outcome::Winner(p)) => (player_colour(p), "Game over".into()),
         Some(Outcome::Resigned(p)) => (player_colour(p), "Game over - resignation".into()),
         Some(Outcome::Draw) => (Color::srgb(0.6, 0.6, 0.66), "Game over - draw".into()),
+        Some(Outcome::Abandoned) => (Color::srgb(0.7, 0.62, 0.42), "Game over - abandoned".into()),
         None => {
             let active = session.game.turn();
             let colour = player_colour(active);
@@ -1339,6 +1340,10 @@ fn sync_game_over(
             (title, player_colour(p))
         }
         Some(Outcome::Draw) | None => ("Draw: every player is blocked.".to_string(), Color::WHITE),
+        Some(Outcome::Abandoned) => (
+            "Game over: the race stalled without result.".to_string(),
+            Color::srgb(0.7, 0.62, 0.42),
+        ),
     };
 
     // A resignation falls; any other ending rings.
@@ -1479,6 +1484,7 @@ fn sync_status(
         Some(Outcome::Winner(p)) => format!("Player {} wins!", p.index()),
         Some(Outcome::Resigned(p)) => format!("Player {} resigns.", p.index()),
         Some(Outcome::Draw) => "Draw: every player is blocked.".to_string(),
+        Some(Outcome::Abandoned) => "Game abandoned: the race stalled.".to_string(),
         None => format!("Player {}'s turn", session.game.turn().index()),
     };
 
@@ -1572,10 +1578,11 @@ fn ai_take_turn(
         Action::Pass => {
             let seat = session.game.turn().index();
             checkers_bevy::move_log::log(&format!("{}. p{} passes", move_no, seat));
-            session.game.pass();
+            session.selection = Selection::None;
+            checkers_bevy::net::after_turn(&mut session);
         }
-        // A headless stall neither side can resolve: log it honestly and stop
-        // advancing — the log is the whole point of watching the race.
+        // A headless stall neither side can resolve: log it honestly and end
+        // the game — the stalled race is what the watcher tuned in for.
         Action::Abandon(reason) => {
             checkers_bevy::move_log::log(&format!(
                 "# game abandoned: {reason} after {} moves",
@@ -1583,6 +1590,7 @@ fn ai_take_turn(
             ));
             session.message = "Game abandoned: mutual deadlock".to_string();
             pace.result_logged = true;
+            session.game.abandon();
         }
     }
 

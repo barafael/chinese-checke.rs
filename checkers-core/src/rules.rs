@@ -189,6 +189,10 @@ pub enum Outcome {
     /// stop — so the engine offers it to the front-end instead of deriving
     /// it from the position.
     Resigned(Player),
+    /// The controller gave up on this specific position — an engine race
+    /// stalled rather than finished. Not a player's decision, so it is not a
+    /// resignation and says nothing about who would have won.
+    Abandoned,
 }
 
 /// A game in progress.
@@ -381,6 +385,17 @@ impl Game {
         self.outcome = Some(Outcome::Resigned(p));
     }
 
+    /// The controller abandons this exact position, ending the game at once.
+    ///
+    /// The engine bounds its race by plies; if the race exhausts that budget
+    /// nobody lost — the loop simply never converged. `run` can hit the same
+    /// wall, so the wall is surfaced as a first-class ending rather than a
+    /// silent `None`.
+    pub fn abandon(&mut self) {
+        assert!(!self.is_over(), "the game is already over");
+        self.outcome = Some(Outcome::Abandoned);
+    }
+
     /// Advance until the game ends or `max_plies` is exhausted.
     pub fn run<F>(&mut self, max_plies: usize, mut choose: F) -> Option<Outcome>
     where
@@ -537,6 +552,25 @@ mod variant_tests {
         game.resign(Player::ALL[3]);
         assert!(game.is_over());
         assert_eq!(game.outcome(), Some(Outcome::Resigned(Player::ALL[3])));
+    }
+
+    /// Abandoning an unresolved race ends the game with no winner claimed.
+    #[test]
+    fn an_abandonment_ends_the_game_without_a_winner() {
+        let mut game = Game::for_players(&[Player::ALL[0], Player::ALL[3]]);
+        game.abandon();
+        assert!(game.is_over());
+        assert_eq!(game.outcome(), Some(Outcome::Abandoned));
+    }
+
+    /// An abandoned game accepts no further move.
+    #[test]
+    #[should_panic(expected = "already over")]
+    fn an_abandoned_game_takes_no_further_move() {
+        let mut game = Game::for_players(&[Player::ALL[0], Player::ALL[3]]);
+        game.abandon();
+        let mv = game.legal_moves().first().cloned().unwrap();
+        game.play(&mv);
     }
 
     /// A resigned game accepts no further move.
