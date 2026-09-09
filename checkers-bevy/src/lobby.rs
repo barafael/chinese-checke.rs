@@ -429,142 +429,165 @@ pub fn edit_action(key: KeyCode, text: Option<&str>) -> EditAction {
     }
 }
 
-/// The lobby is one **flex column filling the window**.
+/// The lobby is a **two-column flex row filling the window**: the star and
+/// its caption on the left, every control on the right.
 ///
-/// The previous layout anchored the buttons at `bottom: 40px`, which put them
-/// off-screen entirely on a display whose work area is shorter than the window.
-/// A window-filling column with centred content cannot place anything outside
-/// the window, whatever the window's size — so the failure mode is gone by
-/// construction.
+/// Two earlier layouts failed the same way. Anchoring the buttons at
+/// `bottom: 40px` put them off-screen entirely on a display whose work area is
+/// shorter than the window. A single centred column cannot place anything
+/// outside the window, but its content stacks to roughly a thousand pixels —
+/// star, three button rows, three labelled fields and their error lines, the
+/// rules, the roster, and the start row — so on any ordinary window it
+/// overflowed both ends and the edges clipped. Side by side, the column
+/// heights are the star's ~430px and the controls' ~500px, and the layout fits
+/// a 600px-tall window by construction.
 fn spawn(mut commands: Commands) {
     commands
         .spawn((
             Node {
                 width: Val::Percent(100.0),
                 height: Val::Percent(100.0),
-                flex_direction: FlexDirection::Column,
+                flex_direction: FlexDirection::Row,
                 align_items: AlignItems::Center,
                 justify_content: JustifyContent::Center,
-                row_gap: Val::Px(12.0),
+                column_gap: Val::Px(32.0),
                 padding: UiRect::all(Val::Px(24.0)),
                 ..default()
             },
             LobbyUi,
         ))
-        .with_children(|col| {
-            header(col, "Lobby");
-            col.spawn((
-                Text::new("The star is the setup: click a corner, then set who sits there."),
-                TextFont {
-                    font_size: FontSize::Px(14.0),
-                    ..default()
-                },
-                TextColor(Color::srgb(0.62, 0.62, 0.68)),
-            ));
-
-            // The hex star. Petals are absolutely positioned on a fixed
-            // container; digits 1..6 select the same corners.
-            star(col);
-
-            // What to do with the selected corner.
-            col.spawn(Node {
-                column_gap: Val::Px(10.0),
+        .with_children(|root| {
+            // Left: the setup itself.
+            root.spawn(Node {
+                flex_direction: FlexDirection::Column,
                 align_items: AlignItems::Center,
+                row_gap: Val::Px(12.0),
                 ..default()
             })
-            .with_children(|row| {
-                for (label, cmd) in [
-                    ("Human", CornerCommand::Human),
-                    ("Computer", CornerCommand::Cpu),
-                    ("Empty", CornerCommand::Off),
-                ] {
-                    button(row, label, LobbyButton::CornerAction(cmd));
-                }
+            .with_children(|col| {
+                header(col, "Lobby");
+                col.spawn((
+                    Text::new("The star is the setup: click a corner, then set who sits there."),
+                    TextFont {
+                        font_size: FontSize::Px(14.0),
+                        ..default()
+                    },
+                    TextColor(Color::srgb(0.62, 0.62, 0.68)),
+                ));
+
+                // The hex star. Petals are absolutely positioned on a fixed
+                // container; digits 1..6 select the same corners.
+                star(col);
             });
-            // Presets are shortcuts for the symmetric setups; they fill the
-            // whole table, so what is configured and what the shortcut leaves
-            // can never silently disagree.
-            col.spawn(Node {
-                column_gap: Val::Px(10.0),
+
+            // Right: what to do with it.
+            root.spawn(Node {
+                flex_direction: FlexDirection::Column,
                 align_items: AlignItems::Center,
+                row_gap: Val::Px(10.0),
                 ..default()
             })
-            .with_children(|row| {
-                for seating in Seating::ALL {
-                    button(
-                        row,
-                        &format!("Preset {}", seating.label()),
-                        LobbyButton::Preset(seating),
-                    );
-                }
-            });
-
-            // The selected corner's name, on solo setups. Spawned always; the
-            // focus and draw systems stand it down in shared rooms.
-            corner_name_row(col);
-            col.spawn((
-                Text::new(String::new()),
-                TextFont {
-                    font_size: FontSize::Px(14.0),
+            .with_children(|col| {
+                // What to do with the selected corner.
+                col.spawn(Node {
+                    column_gap: Val::Px(10.0),
+                    align_items: AlignItems::Center,
                     ..default()
-                },
-                TextColor(Color::srgb(0.85, 0.35, 0.35)),
-                InputError(FieldKind::Corner),
-            ));
-
-            // The room field: a real text input, click or `R` to focus.
-            field_row(col, "Room", FieldKind::Room, "R");
-            col.spawn((
-                Text::new(String::new()),
-                TextFont {
-                    font_size: FontSize::Px(14.0),
+                })
+                .with_children(|row| {
+                    for (label, cmd) in [
+                        ("Human", CornerCommand::Human),
+                        ("Computer", CornerCommand::Cpu),
+                        ("Empty", CornerCommand::Off),
+                    ] {
+                        button(row, label, LobbyButton::CornerAction(cmd));
+                    }
+                });
+                // Presets are shortcuts for the symmetric setups; they fill the
+                // whole table, so what is configured and what the shortcut
+                // leaves can never silently disagree.
+                col.spawn(Node {
+                    column_gap: Val::Px(10.0),
+                    align_items: AlignItems::Center,
                     ..default()
-                },
-                TextColor(Color::srgb(0.85, 0.35, 0.35)),
-                InputError(FieldKind::Room),
-            ));
+                })
+                .with_children(|row| {
+                    for seating in Seating::ALL {
+                        button(
+                            row,
+                            &format!("Preset {}", seating.label()),
+                            LobbyButton::Preset(seating),
+                        );
+                    }
+                });
 
-            // The player-name field, same pattern.
-            field_row(col, "Name", FieldKind::Name, "N");
-            col.spawn((
-                Text::new(String::new()),
-                TextFont {
-                    font_size: FontSize::Px(14.0),
+                // The selected corner's name, on solo setups. Spawned always;
+                // the focus and draw systems stand it down in shared rooms.
+                corner_name_row(col);
+                col.spawn((
+                    Text::new(String::new()),
+                    TextFont {
+                        font_size: FontSize::Px(14.0),
+                        ..default()
+                    },
+                    TextColor(Color::srgb(0.85, 0.35, 0.35)),
+                    InputError(FieldKind::Corner),
+                ));
+
+                // The room field: a real text input, click or `R` to focus.
+                field_row(col, "Room", FieldKind::Room, "R");
+                col.spawn((
+                    Text::new(String::new()),
+                    TextFont {
+                        font_size: FontSize::Px(14.0),
+                        ..default()
+                    },
+                    TextColor(Color::srgb(0.85, 0.35, 0.35)),
+                    InputError(FieldKind::Room),
+                ));
+
+                // The player-name field, same pattern.
+                field_row(col, "Name", FieldKind::Name, "N");
+                col.spawn((
+                    Text::new(String::new()),
+                    TextFont {
+                        font_size: FontSize::Px(14.0),
+                        ..default()
+                    },
+                    TextColor(Color::srgb(0.85, 0.35, 0.35)),
+                    InputError(FieldKind::Name),
+                ));
+
+                // House rules, one toggle per switch.
+                header(col, "Rules");
+                col.spawn(Node {
+                    column_gap: Val::Px(10.0),
                     ..default()
-                },
-                TextColor(Color::srgb(0.85, 0.35, 0.35)),
-                InputError(FieldKind::Name),
-            ));
+                })
+                .with_children(|row| {
+                    button(row, "No foreign rest", LobbyButton::ForeignCamps);
+                });
 
-            // House rules, one toggle per switch.
-            header(col, "Rules");
-            col.spawn(Node {
-                column_gap: Val::Px(10.0),
-                ..default()
-            })
-            .with_children(|row| {
-                button(row, "No foreign rest", LobbyButton::ForeignCamps);
-            });
+                // The roster: who is here, ready, or waiting for a corner.
+                col.spawn((
+                    Text::new(String::new()),
+                    TextFont {
+                        font_size: FontSize::Px(14.0),
+                        ..default()
+                    },
+                    TextColor(Color::srgb(0.88, 0.88, 0.9)),
+                    RosterText,
+                ));
 
-            // The roster: who is here, ready, or waiting for a corner.
-            col.spawn((
-                Text::new(String::new()),
-                TextFont {
-                    font_size: FontSize::Px(14.0),
+                col.spawn(Node {
+                    column_gap: Val::Px(10.0),
+                    margin: UiRect::top(Val::Px(4.0)),
                     ..default()
-                },
-                TextColor(Color::srgb(0.88, 0.88, 0.9)),
-                RosterText,
-            ));
-
-            col.spawn(Node {
-                column_gap: Val::Px(10.0),
-                margin: UiRect::top(Val::Px(4.0)),
-                ..default()
-            })
-            .with_children(|row| {
-                button(row, "Ready (Space)", LobbyButton::Ready);
-                button(row, "Start (Enter)", LobbyButton::Start);
+                })
+                .with_children(|row| {
+                    button(row, "Ready (Space)", LobbyButton::Ready);
+                    button(row, "Start (Enter)", LobbyButton::Start);
+                });
             });
         });
 }
