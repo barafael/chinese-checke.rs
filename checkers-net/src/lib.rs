@@ -33,8 +33,9 @@ pub const SIGNALING_SERVER: &str = match option_env!("MATCHBOX_SERVER") {
     None => "wss://omdurman-matchbox.fly.dev",
 };
 
-/// Reliable, ordered channel. Everything here is game-mutating, so there is no
-/// unreliable channel — unlike omdurman, this game has no cursors to stream.
+/// Reliable, ordered channel. Everything here is game-mutating, and the one
+/// stream that is not — lobby cursors — is a few dozen bytes at ~10 Hz, well
+/// within what ordering costs. One channel keeps the negotiation simple.
 pub const CH_RELIABLE: usize = 0;
 
 /// A move as it travels on the wire.
@@ -133,6 +134,14 @@ pub enum NetMsg {
     Claim(Option<u32>),
     /// Guest -> host: declare or renounce spectator status.
     Spectate(bool),
+    /// Any -> all: where my pointer is, in lobby logical pixels, origin
+    /// top-left. A few dozen bytes at ~10 Hz on the reliable channel — small
+    /// enough that ordering it behind lobby traffic costs nothing, and the
+    /// channel count stays at one.
+    Cursor { pos: [f32; 2] },
+    /// Host -> all: the house-rule switch, live, so every lobby shows one
+    /// game long before the `Start` carries it again.
+    Variants { forbid_foreign_camps: bool },
     /// Host -> all: assignments are final, start playing.
     ///
     /// `players` carries which corners are seated — every claimed corner plus
@@ -430,6 +439,28 @@ mod tests {
     #[test]
     fn decoding_garbage_yields_none() {
         assert!(decode(&[0xff, 0xff, 0xff, 0xff]).is_none());
+    }
+
+    #[test]
+    fn cursor_and_variants_round_trip() {
+        let cursor = NetMsg::Cursor {
+            pos: [120.5, -4.25],
+        };
+        let Some(NetMsg::Cursor { pos }) = decode(&encode(&cursor).expect("encodes")) else {
+            panic!("decoded to the wrong variant");
+        };
+        assert_eq!(pos, [120.5, -4.25]);
+
+        let variants = NetMsg::Variants {
+            forbid_foreign_camps: true,
+        };
+        let Some(NetMsg::Variants {
+            forbid_foreign_camps,
+        }) = decode(&encode(&variants).expect("encodes"))
+        else {
+            panic!("decoded to the wrong variant");
+        };
+        assert!(forbid_foreign_camps);
     }
 
     #[test]

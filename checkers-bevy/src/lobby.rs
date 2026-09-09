@@ -45,9 +45,13 @@
 //! never has to reconcile two sources of truth about which player it commands.
 //! Peers who claimed nothing watch as spectators.
 
+use bevy::asset::RenderAssetUsages;
+use bevy::image::Image;
 use bevy::input::ButtonState;
 use bevy::input::keyboard::KeyboardInput;
 use bevy::prelude::*;
+use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+use bevy::ui::RelativeCursorPosition;
 use bevy_matchbox::prelude::*;
 use checkers_net::{CH_RELIABLE, NetMsg, NetState, RoomId, Seat, broadcast, decode};
 
@@ -67,7 +71,7 @@ fn publish_roster(socket: &mut MatchboxSocket, net: &NetState, peers: &[PeerId])
 #[derive(Component)]
 pub struct LobbyUi;
 
-/// Every clickable control on the screen bar the star's own petals.
+/// Every clickable control on the screen bar the star's own hit area.
 #[derive(Component, Clone, Copy, PartialEq, Eq)]
 pub enum LobbyButton {
     Ready,
@@ -79,9 +83,6 @@ pub enum LobbyButton {
     ForeignCamps,
     /// Perform [`CornerCommand`] on the currently selected corner.
     CornerAction(CornerCommand),
-    /// The star's petals are handled by their own system ([`select_corner`]);
-    /// this arm exists only so the sync systems can enumerate every button.
-    Corner(usize),
 }
 
 /// What a [`LobbyButton::CornerAction`] press asks for, against the selected
@@ -168,11 +169,17 @@ pub fn plugin(app: &mut App) {
         .init_resource::<RoomId>()
         .init_resource::<Table>()
         .init_resource::<SelectedCorner>()
+        .init_resource::<HoveredCorner>()
+        .init_resource::<SectorArt>()
         .init_resource::<ChosenVariants>()
         .init_resource::<RoomEdit>()
         .init_resource::<NameEdit>()
         .init_resource::<CornerEdit>()
-        .add_systems(OnEnter(AppState::Lobby), (checkers_net::open_socket, spawn))
+        .add_systems(
+            OnEnter(AppState::Lobby),
+            // The wedge art must exist before the star can reference it.
+            (checkers_net::open_socket, ensure_sector_art, spawn).chain(),
+        )
         .add_systems(OnExit(AppState::Lobby), despawn)
         .add_systems(
             Update,
@@ -185,17 +192,28 @@ pub fn plugin(app: &mut App) {
                 (edit_room, edit_name, edit_corner),
                 focus_input_fields.run_if(not_editing),
                 (select_corner, handle_buttons).run_if(not_editing),
-                sync_button_styles,
-                sync_input_styles,
-                sync_corner_styles,
-                draw_corner_labels,
-                draw_roster,
-                draw_room,
-                draw_name,
-                draw_corner,
-            )
-                .chain()
-                .run_if(in_state(AppState::Lobby)),
+                broadcast_cursor.run_if(in_state(AppState::Lobby)),
+                (
+                    sync_button_styles,
+                    sync_input_styles,
+                    sync_corner_settings,
+                    hover_corner,
+                    // The wedge tint follows the state, and the labels follow
+                    // the roster; both after the hover is settled this frame.
+                    (
+                        sync_corner_styles,
+                        draw_corner_labels,
+                        draw_roster,
+                        draw_room,
+                        draw_name,
+                        draw_corner,
+                        sync_remote_cursors,
+                    )
+                        .chain(),
+                )
+                    .chain()
+                    .run_if(in_state(AppState::Lobby)),
+            ),
         );
 }
 
@@ -251,7 +269,7 @@ fn sync_button_styles(
             LobbyButton::Ready => net.my_seat().is_some_and(|s| s.ready),
             LobbyButton::ForeignCamps => variants.0.forbid_foreign_camps,
             LobbyButton::CornerAction(cmd) => active.is_some_and(|(_, a)| a == *cmd),
-            LobbyButton::Start | LobbyButton::Preset(_) | LobbyButton::Corner(_) => false,
+            LobbyButton::Start | LobbyButton::Preset(_) => false,
         };
         let colour = match interaction {
             Interaction::Pressed if selected => CHOSEN_DOWN,
@@ -441,7 +459,7 @@ pub fn edit_action(key: KeyCode, text: Option<&str>) -> EditAction {
 /// overflowed both ends and the edges clipped. Side by side, the column
 /// heights are the star's ~430px and the controls' ~500px, and the layout fits
 /// a 600px-tall window by construction.
-fn spawn(mut commands: Commands) {
+fn spawn(mut commands: Commands, art: Res<SectorArt>) {
     commands
         .spawn((
             Node {
@@ -475,9 +493,9 @@ fn spawn(mut commands: Commands) {
                     TextColor(Color::srgb(0.62, 0.62, 0.68)),
                 ));
 
-                // The hex star. Petals are absolutely positioned on a fixed
-                // container; digits 1..6 select the same corners.
-                star(col);
+                // The hex star. Wedges are out-facing triangle sectors over a
+                // single hit area; digits 1..6 select the same corners.
+                star(col, &art);
             });
 
             // Right: what to do with it.
@@ -488,51 +506,10 @@ fn spawn(mut commands: Commands) {
                 ..default()
             })
             .with_children(|col| {
-                // What to do with the selected corner.
-                col.spawn(Node {
-                    column_gap: Val::Px(10.0),
-                    align_items: AlignItems::Center,
-                    ..default()
-                })
-                .with_children(|row| {
-                    for (label, cmd) in [
-                        ("Human", CornerCommand::Human),
-                        ("Computer", CornerCommand::Cpu),
-                        ("Empty", CornerCommand::Off),
-                    ] {
-                        button(row, label, LobbyButton::CornerAction(cmd));
-                    }
-                });
-                // Presets are shortcuts for the symmetric setups; they fill the
-                // whole table, so what is configured and what the shortcut
-                // leaves can never silently disagree.
-                col.spawn(Node {
-                    column_gap: Val::Px(10.0),
-                    align_items: AlignItems::Center,
-                    ..default()
-                })
-                .with_children(|row| {
-                    for seating in Seating::ALL {
-                        button(
-                            row,
-                            &format!("Preset {}", seating.label()),
-                            LobbyButton::Preset(seating),
-                        );
-                    }
-                });
-
-                // The selected corner's name, on solo setups. Spawned always;
-                // the focus and draw systems stand it down in shared rooms.
-                corner_name_row(col);
-                col.spawn((
-                    Text::new(String::new()),
-                    TextFont {
-                        font_size: FontSize::Px(14.0),
-                        ..default()
-                    },
-                    TextColor(Color::srgb(0.85, 0.35, 0.35)),
-                    InputError(FieldKind::Corner),
-                ));
+                // General settings: who I am and where I am. These travel with
+                // the Hello and the share link, so they come first — everything
+                // below them is about the table, not the player.
+                header(col, "General");
 
                 // The room field: a real text input, click or `R` to focus.
                 field_row(col, "Room", FieldKind::Room, "R");
@@ -557,6 +534,71 @@ fn spawn(mut commands: Commands) {
                     TextColor(Color::srgb(0.85, 0.35, 0.35)),
                     InputError(FieldKind::Name),
                 ));
+
+                header(col, "Table");
+                // Presets are shortcuts for the symmetric setups; they fill the
+                // whole table, so what is configured and what the shortcut
+                // leaves can never silently disagree.
+                col.spawn(Node {
+                    column_gap: Val::Px(10.0),
+                    align_items: AlignItems::Center,
+                    ..default()
+                })
+                .with_children(|row| {
+                    for seating in Seating::ALL {
+                        button(
+                            row,
+                            &format!("Preset {}", seating.label()),
+                            LobbyButton::Preset(seating),
+                        );
+                    }
+                });
+
+                // The claimed corner's settings. In a shared room these exist
+                // only once a corner is claimed — clicking an empty wedge is
+                // the claim — so [`sync_corner_settings`] folds them away
+                // until then.
+                col.spawn((
+                    Node {
+                        flex_direction: FlexDirection::Column,
+                        align_items: AlignItems::Center,
+                        row_gap: Val::Px(10.0),
+                        ..default()
+                    },
+                    CornerSettings,
+                ))
+                .with_children(|corner| {
+                    // What to do with the selected corner.
+                    corner
+                        .spawn(Node {
+                            column_gap: Val::Px(10.0),
+                            align_items: AlignItems::Center,
+                            ..default()
+                        })
+                        .with_children(|row| {
+                            for (label, cmd) in [
+                                ("Human", CornerCommand::Human),
+                                ("Computer", CornerCommand::Cpu),
+                                ("Empty", CornerCommand::Off),
+                            ] {
+                                button(row, label, LobbyButton::CornerAction(cmd));
+                            }
+                        });
+
+                    // The selected corner's name, on solo setups. Spawned
+                    // always; the focus and draw systems stand it down in
+                    // shared rooms.
+                    corner_name_row(corner);
+                    corner.spawn((
+                        Text::new(String::new()),
+                        TextFont {
+                            font_size: FontSize::Px(14.0),
+                            ..default()
+                        },
+                        TextColor(Color::srgb(0.85, 0.35, 0.35)),
+                        InputError(FieldKind::Corner),
+                    ));
+                });
 
                 // House rules, one toggle per switch.
                 header(col, "Rules");
@@ -590,6 +632,139 @@ fn spawn(mut commands: Commands) {
                 });
             });
         });
+}
+
+/// Marker on the corner-settings group that only makes sense once this peer
+/// holds a corner of its own.
+#[derive(Component)]
+struct CornerSettings;
+
+/// Fold the corner settings away until they can do something: in a shared
+/// room, a peer that claims nothing only watches, so its corner controls would
+/// be a row of refusals. `Display::None` rather than hidden visibility, so no
+/// dead gap is left behind.
+fn sync_corner_settings(net: Res<NetState>, mut groups: Query<&mut Node, With<CornerSettings>>) {
+    let wanted = if net.peers.is_empty() || net.my_seat().is_some_and(|s| s.player.is_some()) {
+        Display::Flex
+    } else {
+        Display::None
+    };
+    for mut node in groups.iter_mut() {
+        if node.display != wanted {
+            node.display = wanted;
+        }
+    }
+}
+
+/// Seconds between cursor broadcasts, and how long a silent cursor stays on
+/// screen before it is hidden as gone.
+const CURSOR_INTERVAL: f32 = 0.1;
+const CURSOR_LINGER_SECS: f64 = 3.0;
+
+/// A remote peer's pointer drawn over the lobby: where it was last reported,
+/// where it is drawn (eased toward the report so it glides rather than jumps),
+/// and when it was last heard from.
+#[derive(Component)]
+pub struct RemoteCursor {
+    peer: String,
+    target: Vec2,
+    display: Vec2,
+    last_seen: f64,
+}
+
+/// Broadcast this pointer at a lazy 10 Hz while the lobby is up. Positions are
+/// window-logical, origin top-left — the same space bevy_ui lays out in — so
+/// the receiver draws it where the sender saw it. Matchbox connects every peer
+/// to every peer, so a plain broadcast reaches the whole room; the sender is
+/// the `from` on arrival and no origin field is needed.
+fn broadcast_cursor(
+    time: Res<Time>,
+    windows: Query<&Window>,
+    net: Res<NetState>,
+    socket: Option<ResMut<MatchboxSocket>>,
+    mut next_at: Local<f32>,
+) {
+    let Some(mut socket) = socket else {
+        return;
+    };
+    if net.peers.is_empty() || time.elapsed_secs() < *next_at {
+        return;
+    }
+    *next_at = time.elapsed_secs() + CURSOR_INTERVAL;
+    let Some(pos) = windows.single().ok().and_then(|w| w.cursor_position()) else {
+        return;
+    };
+    broadcast(
+        &mut socket,
+        &net.peers,
+        &NetMsg::Cursor {
+            pos: [pos.x, pos.y],
+        },
+    );
+}
+
+/// A cursor's colour is the corner its peer claimed — the same colour the
+/// wedge wears — and its label the roster name.
+fn cursor_identity(net: &NetState, peer: &str) -> (Color, String) {
+    match net.seats.iter().find(|s| s.peer == peer) {
+        Some(seat) => {
+            let colour = seat
+                .player
+                .and_then(|i| Player::new(i as u8))
+                .map(player_colour)
+                .unwrap_or(IDLE);
+            (colour, seat.name.clone())
+        }
+        None => (IDLE, format!("peer {}", &peer[..peer.len().min(4)])),
+    }
+}
+
+/// Draw every remote cursor where its peer's pointer is, and keep the label
+/// and colour following the roster.
+#[allow(clippy::type_complexity)]
+fn sync_remote_cursors(
+    time: Res<Time>,
+    net: Res<NetState>,
+    mut cursors: Query<(
+        &mut RemoteCursor,
+        &mut Node,
+        &mut BackgroundColor,
+        &mut Visibility,
+        &Children,
+    )>,
+    mut labels: Query<(&mut Text, &mut TextColor), Without<RemoteCursor>>,
+) {
+    // The easing constant from omdurman's overlay: fast enough to follow,
+    // slow enough to hide the 10 Hz steps.
+    let alpha = 1.0 - (-6.0 * time.delta_secs()).exp();
+    let now = time.elapsed_secs_f64();
+    for (mut cursor, mut node, mut bg, mut vis, kids) in cursors.iter_mut() {
+        cursor.display = cursor.display.lerp(cursor.target, alpha);
+        node.left = Val::Px(cursor.display.x);
+        node.top = Val::Px(cursor.display.y);
+        let want = if now - cursor.last_seen > CURSOR_LINGER_SECS {
+            Visibility::Hidden
+        } else {
+            Visibility::Visible
+        };
+        if *vis != want {
+            *vis = want;
+        }
+        let (colour, label) = cursor_identity(&net, &cursor.peer);
+        if bg.0 != colour {
+            bg.0 = colour;
+        }
+        for kid in kids.iter() {
+            if let Ok((mut text, mut text_colour)) = labels.get_mut(kid) {
+                if **text != label {
+                    **text = label.clone();
+                }
+                if text_colour.0 != colour {
+                    text_colour.0 = colour;
+                }
+            }
+        }
+    }
 }
 
 /// A section heading in the lobby.
@@ -683,26 +858,126 @@ fn input_box(parent: &mut ChildSpawnerCommands, kind: FieldKind) {
         ));
 }
 
-/// Star geometry. Length is the *centre* distance of each petal from the mid.
+/// Star geometry: the container the wedges and their labels live in.
 const STAR_W: f32 = 420.0;
 const STAR_H: f32 = 360.0;
-const PETAL_W: f32 = 118.0;
-const PETAL_H: f32 = 94.0;
-const PETAL_R: f32 = 118.0;
 
-/// The top-left pixel position of corner `i`'s petal inside the star node.
-fn petal_pos(i: usize) -> (f32, f32) {
-    let angle = (60.0 * i as f32 - 90.0).to_radians();
-    let cx = STAR_W / 2.0;
-    let cy = STAR_H / 2.0;
-    let x = cx + PETAL_R * angle.cos() - PETAL_W / 2.0;
-    let y = cy + PETAL_R * angle.sin() - PETAL_H / 2.0;
-    (x, y)
+/// Wedge geometry: each corner is an out-facing triangle sector, apex at
+/// [`WEDGE_INNER`] from the centre, base at [`WEDGE_OUTER`], spread
+/// [`WEDGE_HALF_ANGLE_DEG`] either side of its camp's direction. The inner
+/// radius is what leaves the middle of the star empty and readable instead of
+/// covered by six overlapping rectangles.
+const WEDGE_INNER: f32 = 64.0;
+const WEDGE_OUTER: f32 = 170.0;
+const WEDGE_HALF_ANGLE_DEG: f32 = 22.0;
+
+/// Corner `i`'s direction, in container coordinates (y down), so the angle
+/// arithmetic matches [`Window::cursor_position`] directly.
+fn wedge_angle(i: usize) -> f32 {
+    (60.0 * i as f32 - 90.0).to_radians()
 }
 
-/// The star itself: a fixed container with six corner petals and a centre
-/// disc, so the board shape reads at a glance.
-fn star(parent: &mut ChildSpawnerCommands) {
+/// The three corners of corner `i`'s wedge, in container-local pixels.
+fn wedge_vertices(i: usize) -> [Vec2; 3] {
+    let t = wedge_angle(i);
+    let beta = WEDGE_HALF_ANGLE_DEG.to_radians();
+    let centre = Vec2::new(STAR_W / 2.0, STAR_H / 2.0);
+    let dir = Vec2::new(t.cos(), t.sin());
+    let left = Vec2::new((t + beta).cos(), (t + beta).sin());
+    let right = Vec2::new((t - beta).cos(), (t - beta).sin());
+    [
+        centre + WEDGE_INNER * dir,
+        centre + WEDGE_OUTER * left,
+        centre + WEDGE_OUTER * right,
+    ]
+}
+
+/// Which side of the line `a -> b` the point `p` is on, as a signed area.
+fn cross(a: Vec2, b: Vec2, p: Vec2) -> f32 {
+    (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x)
+}
+
+/// Is `p` inside the triangle `v`? Sign tests, so an exact wedge hit needs no
+/// rounding: the click area is the triangle, not its bounding box.
+fn point_in_triangle(p: Vec2, v: [Vec2; 3]) -> bool {
+    let (s1, s2, s3) = (
+        cross(v[0], v[1], p),
+        cross(v[1], v[2], p),
+        cross(v[2], v[0], p),
+    );
+    (s1 >= 0.0 && s2 >= 0.0 && s3 >= 0.0) || (s1 <= 0.0 && s2 <= 0.0 && s3 <= 0.0)
+}
+
+/// Is container-local `p` inside corner `i`'s wedge?
+fn wedge_contains(i: usize, p: Vec2) -> bool {
+    point_in_triangle(p, wedge_vertices(i))
+}
+
+/// Which corner the cursor is over. `normalized` is [`RelativeCursorPosition`]'s
+/// centre-relative position (`-0.5 .. 0.5`, y down); it is mapped back into
+/// container coordinates so the wedges' own geometry can answer. `None` over
+/// the empty middle — the middle is the star, not a button.
+fn sector_at(normalized: Vec2) -> Option<usize> {
+    let local = normalized * vec2(STAR_W, STAR_H) + vec2(STAR_W / 2.0, STAR_H / 2.0);
+    (0..6).find(|&i| wedge_contains(i, local))
+}
+
+/// Where corner `i`'s two label lines sit: the wedge's centroid.
+fn label_pos(i: usize) -> Vec2 {
+    let v = wedge_vertices(i);
+    (v[0] + v[1] + v[2]) / 3.0
+}
+
+/// The six wedge textures, rasterized once on first lobby entry: white where
+/// the wedge is, transparent elsewhere, so the [`ImageNode`] tint paints the
+/// colour and the hover and selection shading stay a colour write.
+#[derive(Resource, Default)]
+struct SectorArt(Option<[Handle<Image>; 6]>);
+
+/// Rasterize corner `i`'s wedge into a full-star-size RGBA texture.
+fn sector_image(i: usize) -> Image {
+    let (w, h) = (STAR_W as u32, STAR_H as u32);
+    let mut data = vec![0u8; (w * h * 4) as usize];
+    let v = wedge_vertices(i);
+    for y in 0..h {
+        for x in 0..w {
+            if point_in_triangle(Vec2::new(x as f32 + 0.5, y as f32 + 0.5), v) {
+                let o = ((y * w + x) * 4) as usize;
+                data[o..o + 4].copy_from_slice(&[255, 255, 255, 255]);
+            }
+        }
+    }
+    Image::new(
+        Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        data,
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::RENDER_WORLD,
+    )
+}
+
+/// Build [`SectorArt`] once; a no-op on every lobby re-entry.
+fn ensure_sector_art(mut art: ResMut<SectorArt>, mut images: ResMut<Assets<Image>>) {
+    if art.0.is_some() {
+        return;
+    }
+    let handles = std::array::from_fn(|i| images.add(sector_image(i)));
+    art.0 = Some(handles);
+}
+
+/// The star: a fixed container holding one out-facing wedge per corner and its
+/// two label lines. The container itself is the only button — hit-testing is
+/// angular, against [`sector_at`] — and the middle stays empty, which is what
+/// makes the star read as a star.
+fn star(parent: &mut ChildSpawnerCommands, art: &SectorArt) {
+    let handles = art
+        .0
+        .as_ref()
+        .expect("sector art is built before the lobby spawns");
     parent
         .spawn(Node {
             width: Val::Px(STAR_W),
@@ -710,42 +985,64 @@ fn star(parent: &mut ChildSpawnerCommands) {
             ..default()
         })
         .with_children(|node| {
-            for i in 0..6 {
-                let (x, y) = petal_pos(i);
+            node.spawn((
+                Button,
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: Val::Px(0.0),
+                    top: Val::Px(0.0),
+                    width: Val::Px(STAR_W),
+                    height: Val::Px(STAR_H),
+                    ..default()
+                },
+                StarHit,
+                RelativeCursorPosition::default(),
+            ));
+            for (i, handle) in handles.iter().enumerate() {
                 node.spawn((
-                    Button,
                     Node {
                         position_type: PositionType::Absolute,
-                        left: Val::Px(x),
-                        top: Val::Px(y),
-                        width: Val::Px(PETAL_W),
-                        height: Val::Px(PETAL_H),
-                        flex_direction: FlexDirection::Column,
-                        align_items: AlignItems::Center,
-                        justify_content: JustifyContent::Center,
-                        row_gap: Val::Px(2.0),
-                        border: UiRect::all(Val::Px(3.0)),
-                        border_radius: BorderRadius::all(Val::Px(10.0)),
+                        left: Val::Px(0.0),
+                        top: Val::Px(0.0),
+                        width: Val::Px(STAR_W),
+                        height: Val::Px(STAR_H),
                         ..default()
                     },
-                    BackgroundColor(IDLE),
-                    BorderColor::all(Color::srgb(0.28, 0.28, 0.33)),
+                    ImageNode {
+                        image: handle.clone(),
+                        ..default()
+                    },
                     CornerPetal(i),
-                ))
-                .with_children(|petal| {
-                    petal.spawn((
+                ));
+            }
+            for i in 0..6 {
+                let mid = label_pos(i);
+                node.spawn(Node {
+                    position_type: PositionType::Absolute,
+                    left: Val::Px(mid.x - 55.0),
+                    top: Val::Px(mid.y - 17.0),
+                    width: Val::Px(110.0),
+                    height: Val::Px(36.0),
+                    flex_direction: FlexDirection::Column,
+                    align_items: AlignItems::Center,
+                    justify_content: JustifyContent::Center,
+                    row_gap: Val::Px(1.0),
+                    ..default()
+                })
+                .with_children(|label| {
+                    label.spawn((
                         Text::new("Empty"),
                         TextFont {
-                            font_size: FontSize::Px(16.0),
+                            font_size: FontSize::Px(14.0),
                             ..default()
                         },
                         TextColor(Color::srgb(0.9, 0.9, 0.92)),
                         CornerText(i * 2),
                     ));
-                    petal.spawn((
+                    label.spawn((
                         Text::new("click to select"),
                         TextFont {
-                            font_size: FontSize::Px(12.0),
+                            font_size: FontSize::Px(11.0),
                             ..default()
                         },
                         TextColor(Color::srgb(0.62, 0.62, 0.68)),
@@ -753,32 +1050,17 @@ fn star(parent: &mut ChildSpawnerCommands) {
                     ));
                 });
             }
-            // The centre reads as the point of the star.
-            node.spawn((
-                Node {
-                    position_type: PositionType::Absolute,
-                    left: Val::Px(STAR_W / 2.0 - 52.0),
-                    top: Val::Px(STAR_H / 2.0 - 52.0),
-                    width: Val::Px(104.0),
-                    height: Val::Px(104.0),
-                    flex_direction: FlexDirection::Column,
-                    align_items: AlignItems::Center,
-                    justify_content: JustifyContent::Center,
-                    border_radius: BorderRadius::all(Val::Px(52.0)),
-                    ..default()
-                },
-                BackgroundColor(Color::srgb(0.15, 0.15, 0.19)),
-            ))
-            .with_child((
-                Text::new("6\ncorners"),
-                TextFont {
-                    font_size: FontSize::Px(15.0),
-                    ..default()
-                },
-                TextColor(Color::srgb(0.62, 0.62, 0.68)),
-            ));
         });
 }
+
+/// Marker on the star's single hit area: the whole container is one button,
+/// and clicks are resolved to a corner by angle, not by rectangles.
+#[derive(Component)]
+pub struct StarHit;
+
+/// Which corner the cursor currently rests on, for wedge shading.
+#[derive(Resource, Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct HoveredCorner(Option<usize>);
 
 fn despawn(mut commands: Commands, ui: Query<Entity, With<LobbyUi>>) {
     for e in ui.iter() {
@@ -874,11 +1156,16 @@ pub fn elect_host(socket: Option<ResMut<MatchboxSocket>>, mut net: ResMut<NetSta
 ///
 /// `pub` so the multiplayer integration test can run the real pump in a
 /// headless instance, exactly as the app schedules it.
+#[allow(clippy::too_many_arguments)]
 pub fn pump_socket(
     socket: Option<ResMut<MatchboxSocket>>,
     mut net: ResMut<NetState>,
     mut variants: ResMut<ChosenVariants>,
     mut next_state: ResMut<NextState<AppState>>,
+    state: Res<State<AppState>>,
+    mut commands: Commands,
+    time: Res<Time>,
+    mut cursors: Query<(Entity, &mut RemoteCursor)>,
 ) {
     let Some(mut socket) = socket else {
         return;
@@ -983,6 +1270,67 @@ pub fn pump_socket(
             }
             // Guests take the host's roster verbatim; it is the only authority.
             NetMsg::Roster(seats) => net.seats = seats,
+            // The host's rule switch, live. The host is the only authority, so
+            // a sequencing peer ignores its own echo; guests take it verbatim.
+            NetMsg::Variants {
+                forbid_foreign_camps,
+            } => {
+                if !net.sequences() {
+                    variants.0.forbid_foreign_camps = forbid_foreign_camps;
+                }
+            }
+            // A peer's pointer, drawn over the lobby only — the game has its
+            // own presentation, and leftover dots must not haunt it.
+            NetMsg::Cursor { pos } => {
+                if *state.get() != AppState::Lobby {
+                    continue;
+                }
+                let pos = Vec2::new(pos[0], pos[1]);
+                let key = from.to_string();
+                let now = time.elapsed_secs_f64();
+                if let Some((_, mut cursor)) = cursors.iter_mut().find(|(_, c)| c.peer == key) {
+                    cursor.target = pos;
+                    cursor.last_seen = now;
+                } else {
+                    let (colour, label) = cursor_identity(&net, &key);
+                    commands
+                        .spawn((
+                            Node {
+                                position_type: PositionType::Absolute,
+                                left: Val::Px(pos.x),
+                                top: Val::Px(pos.y),
+                                width: Val::Px(10.0),
+                                height: Val::Px(10.0),
+                                border_radius: BorderRadius::all(Val::Px(5.0)),
+                                ..default()
+                            },
+                            BackgroundColor(colour),
+                            LobbyUi,
+                            RemoteCursor {
+                                peer: key,
+                                target: pos,
+                                display: pos,
+                                last_seen: now,
+                            },
+                        ))
+                        .with_children(|dot| {
+                            dot.spawn((
+                                Node {
+                                    position_type: PositionType::Absolute,
+                                    left: Val::Px(12.0),
+                                    top: Val::Px(-4.0),
+                                    ..default()
+                                },
+                                Text::new(label),
+                                TextFont {
+                                    font_size: FontSize::Px(12.0),
+                                    ..default()
+                                },
+                                TextColor(colour),
+                            ));
+                        });
+                }
+            }
             NetMsg::Start {
                 seats,
                 forbid_foreign_camps,
@@ -1087,23 +1435,104 @@ fn key_for(digit: u32) -> KeyCode {
     }
 }
 
-/// Select the corner a petal click or digit key names.
+/// What clicking corner `sector` does, given the room.
+///
+/// Solo setups select the corner for the sidebar buttons. Shared rooms claim
+/// an empty corner on the spot — clicking the triangle *is* the claim — and
+/// selecting your own corner hands it to the sidebar to configure or release.
+#[derive(Debug, PartialEq, Eq)]
+pub enum SectorClick {
+    Select(usize),
+    Claim(u32),
+    Status(String),
+}
+
+pub fn sector_click(net: &NetState, me: &str, sector: usize) -> SectorClick {
+    if net.peers.is_empty() {
+        return SectorClick::Select(sector);
+    }
+    match net.seats.iter().find(|s| s.player == Some(sector as u32)) {
+        None => SectorClick::Claim(sector as u32),
+        Some(seat) if seat.peer == me => SectorClick::Select(sector),
+        Some(seat) if seat.engine => {
+            SectorClick::Status(format!("An engine plays corner {sector}."))
+        }
+        Some(seat) => SectorClick::Status(format!("Corner {sector} is held by {}.", seat.name)),
+    }
+}
+
+/// Apply a claim: the host edits its own roster and republishes; a guest asks
+/// the host and waits for the roster. Returns the status line.
+fn send_claim(
+    socket: &mut MatchboxSocket,
+    net: &mut NetState,
+    claim: Option<u32>,
+    me: &str,
+) -> String {
+    if net.sequences() {
+        if let Some(seat) = net.seats.iter_mut().find(|s| s.peer == me) {
+            seat.player = claim;
+        }
+        publish_roster(socket, net, &net.peers);
+        return match claim {
+            Some(c) => format!("You hold corner {c}."),
+            None => "Corner released.".into(),
+        };
+    }
+    broadcast(socket, &net.peers, &NetMsg::Claim(claim));
+    match claim {
+        Some(c) => format!("Claiming corner {c}..."),
+        None => "Releasing my corner...".into(),
+    }
+}
+
+/// Select the corner a wedge click or digit key names.
 ///
 /// A system of its own rather than a branch of [`handle_buttons`] so a headless
-/// test can drive corner selection without a socket.
+/// test can drive corner selection without a socket. The star has one button;
+/// the wedge under the cursor is resolved by angle in [`sector_at`].
+#[allow(clippy::type_complexity)]
 pub fn select_corner(
-    petals: Query<(&Interaction, &CornerPetal), Changed<Interaction>>,
+    mut hit: Query<(&Interaction, &RelativeCursorPosition), (With<StarHit>, Changed<Interaction>)>,
     keys: Res<ButtonInput<KeyCode>>,
+    mut socket: Option<ResMut<MatchboxSocket>>,
+    mut net: ResMut<NetState>,
     mut selected: ResMut<SelectedCorner>,
 ) {
-    for (interaction, petal) in petals.iter() {
-        if *interaction == Interaction::Pressed {
-            selected.0 = Some(petal.0);
-            return;
+    for (interaction, rel) in hit.iter_mut() {
+        if *interaction != Interaction::Pressed {
+            continue;
+        }
+        let Some(sector) = rel.normalized.and_then(sector_at) else {
+            continue;
+        };
+        let me = net.my_seat().map(|s| s.peer.clone()).unwrap_or_default();
+        match sector_click(&net, &me, sector) {
+            SectorClick::Select(i) => selected.0 = Some(i),
+            SectorClick::Claim(c) => {
+                if let Some(s) = socket.as_mut() {
+                    net.status = send_claim(s, &mut net, Some(c), &me);
+                }
+            }
+            SectorClick::Status(why) => net.status = why,
         }
     }
     if let Some(next) = corner_from_keys(&keys, selected.0) {
         selected.0 = Some(next);
+    }
+}
+
+/// Track which wedge the cursor rests on, for the hover shading.
+fn hover_corner(
+    hit: Query<&RelativeCursorPosition, With<StarHit>>,
+    mut hovered: ResMut<HoveredCorner>,
+) {
+    let over = hit
+        .iter()
+        .next()
+        .and_then(|rel| rel.normalized.and_then(sector_at));
+    if hovered.0 != over {
+        hovered.0 = over;
     }
 }
 
@@ -1220,7 +1649,6 @@ pub fn handle_buttons(
             LobbyButton::ForeignCamps => foreign = true,
             LobbyButton::Preset(s) => preset = Some(*s),
             LobbyButton::CornerAction(cmd) => command = Some(*cmd),
-            LobbyButton::Corner(_) => {}
         }
     }
 
@@ -1252,23 +1680,8 @@ pub fn handle_buttons(
                 };
             }
             Ok(CornerEffect::Claim(claim)) => {
-                if net.sequences() {
-                    if let Some(seat) = net.seats.iter_mut().find(|s| s.peer == me) {
-                        seat.player = claim;
-                    }
-                    if let Some(s) = socket.as_mut() {
-                        publish_roster(s, &net, &net.peers);
-                    }
-                    net.status = match claim {
-                        Some(c) => format!("You hold corner {c}."),
-                        None => "Corner released.".into(),
-                    };
-                } else if let Some(s) = socket.as_mut() {
-                    broadcast(s, &net.peers, &NetMsg::Claim(claim));
-                    net.status = match claim {
-                        Some(c) => format!("Claiming corner {c}..."),
-                        None => "Releasing my corner...".into(),
-                    };
+                if let Some(s) = socket.as_mut() {
+                    net.status = send_claim(s, &mut net, claim, &me);
                 }
             }
             Ok(CornerEffect::AddEngine(c)) => {
@@ -1294,6 +1707,17 @@ pub fn handle_buttons(
         // decides the table: the shared game must play under one rule set.
         if solo || net.sequences() {
             variants.0.forbid_foreign_camps = !variants.0.forbid_foreign_camps;
+            // The switch is a setting like any other: broadcast it live, so
+            // every lobby shows one game before the Start repeats it.
+            if !solo && let Some(s) = socket.as_mut() {
+                broadcast(
+                    s,
+                    &net.peers,
+                    &NetMsg::Variants {
+                        forbid_foreign_camps: variants.0.forbid_foreign_camps,
+                    },
+                );
+            }
             net.status = if variants.0.forbid_foreign_camps {
                 "Rule on: no piece rests in a foreign triangle.".into()
             } else {
@@ -1523,15 +1947,11 @@ fn sync_corner_styles(
     net: Res<NetState>,
     table: Res<Table>,
     selected: Res<SelectedCorner>,
-    mut petals: Query<(
-        &Interaction,
-        &CornerPetal,
-        &mut BackgroundColor,
-        &mut BorderColor,
-    )>,
+    hovered: Res<HoveredCorner>,
+    mut petals: Query<(&CornerPetal, &mut ImageNode)>,
 ) {
     let solo = net.peers.is_empty();
-    for (interaction, petal, mut bg, mut border) in petals.iter_mut() {
+    for (petal, mut img) in petals.iter_mut() {
         let p = Player::new(petal.0 as u8).expect("corner indices are below six");
         let filled = if solo {
             table.0[petal.0] != CornerState::Empty
@@ -1539,22 +1959,17 @@ fn sync_corner_styles(
             net.seats.iter().any(|s| s.player == Some(petal.0 as u32))
         };
         let base = if filled { player_colour(p) } else { IDLE };
-        let factor = match interaction {
-            Interaction::Pressed => 0.72,
-            Interaction::Hovered => 1.18,
-            Interaction::None => 1.0,
+        // Selection lights the wedge strongly, the cursor resting on it mildly.
+        let factor = if selected.0 == Some(petal.0) {
+            1.25
+        } else if hovered.0 == Some(petal.0) {
+            1.15
+        } else {
+            1.0
         };
         let colour = shade(base, factor);
-        if bg.0 != colour {
-            bg.0 = colour;
-        }
-        let ring = if selected.0 == Some(petal.0) {
-            CHOSEN_HOVER
-        } else {
-            Color::srgb(0.28, 0.28, 0.33)
-        };
-        if border.bottom != ring {
-            *border = BorderColor::all(ring);
+        if img.color != colour {
+            img.color = colour;
         }
     }
 }
@@ -2313,5 +2728,105 @@ mod tests {
 
     fn fake_peer() -> PeerId {
         PeerId(uuid::Uuid::from_u128(2))
+    }
+
+    /// The wedges leave the middle of the star clear — that is the point of
+    /// them — and each points at its own camp's direction.
+    #[test]
+    fn the_centre_is_not_a_corner_and_each_wedge_is_its_own() {
+        let centre = Vec2::new(STAR_W / 2.0, STAR_H / 2.0);
+        let size = vec2(STAR_W, STAR_H);
+        let normalized_of = |p: Vec2| (p - centre) / size;
+        assert_eq!(
+            sector_at(Vec2::ZERO),
+            None,
+            "the middle of the star selects nothing"
+        );
+        for i in 0..6 {
+            let v = wedge_vertices(i);
+            let mid = (v[0] + v[1] + v[2]) / 3.0;
+            // The centroid, as a normalized container position, hits corner i.
+            assert_eq!(
+                sector_at(normalized_of(mid)),
+                Some(i),
+                "wedge {i}'s own centroid must resolve to corner {i}"
+            );
+        }
+        // A point between two wedges — straight out from the centre between
+        // corners 0 and 1 — belongs to neither.
+        let angle = (-60.0f32).to_radians();
+        let between = centre + 120.0 * Vec2::new(angle.cos(), angle.sin());
+        assert_eq!(sector_at(normalized_of(between)), None);
+    }
+
+    /// The rasterized wedge is opaque inside the triangle and transparent at
+    /// the centre, so the tint paints a sector and the star stays visible.
+    #[test]
+    fn the_wedge_texture_paints_the_triangle_only() {
+        let image = sector_image(0);
+        let centre = Vec2::new(STAR_W / 2.0, STAR_H / 2.0);
+        let v = wedge_vertices(0);
+        let mid = (v[0] + v[1] + v[2]) / 3.0;
+        let Some(data) = &image.data else {
+            panic!("the wedge texture keeps its pixel data");
+        };
+        let alpha_at = |p: Vec2| -> u8 {
+            let (x, y) = (
+                (p.x as u32).min(STAR_W as u32 - 1),
+                (p.y as u32).min(STAR_H as u32 - 1),
+            );
+            data[((y * STAR_W as u32 + x) * 4 + 3) as usize]
+        };
+        assert_eq!(alpha_at(mid), 255);
+        assert_eq!(alpha_at(centre), 0);
+    }
+
+    /// Solo: a wedge click only selects; the sidebar buttons configure.
+    #[test]
+    fn a_solo_wedge_click_selects() {
+        let net = NetState::default();
+        assert_eq!(sector_click(&net, "", 3), SectorClick::Select(3));
+    }
+
+    /// Shared: an empty wedge is claimed on the spot — the click is the claim.
+    #[test]
+    fn a_shared_click_on_an_empty_corner_claims_it() {
+        let mut net = NetState::default();
+        let me = PeerId(uuid::Uuid::from_u128(1));
+        net.my_id = Some(me);
+        net.peers = vec![me, fake_peer()];
+        net.seats = vec![seat(&me.to_string(), None, false)];
+        assert_eq!(
+            sector_click(&net, &me.to_string(), 5),
+            SectorClick::Claim(5)
+        );
+    }
+
+    /// Shared: clicking your own corner selects it for the sidebar; someone
+    /// else's corner is refused by name, and an engine corner is not touchable.
+    #[test]
+    fn a_shared_click_on_an_owned_corner_selects_or_refuses() {
+        let mut net = NetState::default();
+        let me = PeerId(uuid::Uuid::from_u128(1));
+        let other = fake_peer();
+        net.my_id = Some(me);
+        net.peers = vec![me, other];
+        net.seats = vec![
+            seat(&me.to_string(), Some(2), false),
+            Seat {
+                engine: true,
+                ..seat("bot", Some(4), true)
+            },
+        ];
+        let me = me.to_string();
+        assert_eq!(sector_click(&net, &me, 2), SectorClick::Select(2));
+        match sector_click(&net, &me, 4) {
+            SectorClick::Status(why) => assert!(why.contains("engine"), "{why}"),
+            other => panic!("an engine corner is not clickable, got {other:?}"),
+        }
+        match sector_click(&net, &me, 1) {
+            SectorClick::Claim(1) => {}
+            other => panic!("corner 1 is free, got {other:?}"),
+        }
     }
 }
