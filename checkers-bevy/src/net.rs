@@ -77,7 +77,6 @@ pub fn pump(
             NetMsg::Sequenced { seq, mv } => apply(&mut net, &mut session, seq, mv),
             // A guest cannot sequence, and lobby traffic is over.
             NetMsg::Move(_)
-            | NetMsg::Spectate(_)
             | NetMsg::Claim(_)
             | NetMsg::Hello { .. }
             | NetMsg::Roster(_)

@@ -97,6 +97,7 @@ fn instance(name: &str, room: &RoomId, port: u16) -> App {
         .init_resource::<SelectedCorner>()
         .init_resource::<ChosenVariants>()
         .init_resource::<NetState>()
+        .init_resource::<checkers_bevy::lobby::LobbyStatus>()
         .add_systems(Startup, move |mut commands: Commands| {
             let socket: MatchboxSocket = WebRtcSocketBuilder::new(url.clone())
                 .reconnect_attempts(None)
@@ -189,15 +190,15 @@ fn describe(apps: &[App]) -> String {
         .map(|a| {
             let n = net(a);
             let state = app_state(a);
+            let status = &a.world().resource::<checkers_bevy::lobby::LobbyStatus>().0;
             format!(
-                "{}: peers={} host={} seats={} players={:?} state={} status={}",
+                "{}: peers={} host={} seats={} players={:?} state={} status={status}",
                 n.name,
                 n.peers.len(),
                 n.is_host,
                 fmt_roster(n),
                 roster_players(n),
                 state,
-                n.status
             )
         })
         .collect::<Vec<_>>()

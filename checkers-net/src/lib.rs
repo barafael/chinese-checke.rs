@@ -97,14 +97,9 @@ pub struct Seat {
     pub peer: String,
     pub name: String,
     /// Which of the six players this peer commands, once the host grants the
-    /// claim the peer made. `None` until then, and for spectators and engines
-    /// that have not claimed a corner.
+    /// claim the peer made. `None` for a peer that claimed nothing — a
+    /// spectator — and for engine seats.
     pub player: Option<u32>,
-    /// Spectators watch the game and touch nothing: no camp and no voice in
-    /// when it starts. A seat that claimed no corner is a spectator in
-    /// effect, but this field is the *declared* choice.
-    #[serde(default)]
-    pub spectate: bool,
     /// A seat the host gave to an engine rather than a peer. Only the host's
     /// engine actually plays it, and its moves reach the table as ordinary
     /// sequenced moves — no privileged path.
@@ -128,8 +123,6 @@ pub enum NetMsg {
     /// host grants it only if the corner is free — or held by the sender — and
     /// the roster everybody watches reflects the result.
     Claim(Option<u32>),
-    /// Guest -> host: declare or renounce spectator status.
-    Spectate(bool),
     /// Any -> all: where my pointer is, as fractions of the window's width
     /// and height (0..1, origin top-left). Windows differ in size, so each
     /// receiver scales the fractions into its own pixels. A few dozen bytes
@@ -190,9 +183,6 @@ pub struct NetState {
     /// Highest applied sequence number, for dropping duplicate deliveries.
     pub last_applied_seq: Option<u32>,
     pub name: String,
-    /// Human-readable explanation of the last refused action, shown in the
-    /// lobby. Empty when there is nothing to explain.
-    pub status: String,
     /// Peers we have already sent our [`NetMsg::Hello`] to. Without this a
     /// per-frame greet loop would flood the channel; disconnected peers may
     /// stay listed here — a reconnect arrives with a fresh id anyway.
@@ -558,12 +548,10 @@ mod room_tests {
             next_seq: 12,
             last_applied_seq: Some(11),
             name: "ada".into(),
-            status: "stale".into(),
             seats: vec![Seat {
                 peer: "p".into(),
                 name: "p".into(),
                 player: Some(0),
-                spectate: false,
                 engine: false,
             }],
             ..NetState::default()
@@ -579,6 +567,5 @@ mod room_tests {
         assert_eq!(net.next_seq, 0);
         assert_eq!(net.last_applied_seq, None, "or the first move looks stale");
         assert!(net.greeted.is_empty());
-        assert!(net.status.is_empty());
     }
 }

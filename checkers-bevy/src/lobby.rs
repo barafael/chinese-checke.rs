@@ -1,48 +1,23 @@
-//! Lobby screen: the hex star and the corners on it.
+//! The lobby: one setup screen for every way a game can be played.
 //!
-//! This is the *only* setup screen, for every way a game can be played. The
-//! star is drawn with six petals, one per camp. Each petal is configured —
-//! human, computer, or empty — and a game is whatever corners got filled:
+//! The star's six wedges are the six camps; a game is whatever corners got
+//! filled:
 //!
-//! * with no peers in the room, the configuration is local, and a filled
-//!   corner is either played by hand or by the engine on this device;
-//! * with peers, every guest claims its own corner (and `Name` says who it
-//!   is), the host may seat an engine on a free corner, and the table starts
-//!   once two or more corners are claimed and everyone is ready.
+//! * **Solo** (no peers in the room): the local [`Table`] says which corners
+//!   a human plays and which this device's engine drives. Presets fill the
+//!   symmetric seatings.
+//! * **Shared room**: a click on a free wedge *is* the claim; the host may
+//!   seat engines on free corners, un-seat players, and remove engines. The
+//!   host starts once two or more corners are claimed. Peers who claimed
+//!   nothing watch.
 //!
-//! Spectators are simply peers who claimed nothing. "Watch two bots" is now
-//! just a corner configuration — two adjacent... / any two engines — set up
-//! in this one screen. There is no separate menu, hotseat panel, or player
-//! count: 2/3/6 presets exist as shortcuts that fill the symmetric camps.
-//!
-//! Built with plain Bevy UI rather than egui, to match the in-game buttons and
-//! to avoid a dependency for a handful of widgets.
-//!
-//! Every control has a key *and* a button where a key is natural, and the keys
-//! are what the hints name. Buttons exist because a lobby whose only
-//! affordances are typed is indistinguishable from an empty screen.
-//!
-//! # Choosing the room
-//!
-//! The room is not chosen in the app: it lives in the page's URL, and the
-//! lobby shows it so the link can be shared. A bare page is redirected to a
-//! fresh generated room before the lobby ever opens.
-//!
-//! # Host election
-//!
-//! The peer with the lexicographically smallest `PeerId` hosts, recomputed
-//! every frame so host loss self-heals. That is not elegant, but it is
-//! *deterministic without negotiation*: every peer computes the same answer
-//! from the same peer list.
-//!
-//! # Seats
-//!
-//! The host owns the roster. Guests announce themselves with
-//! [`NetMsg::Hello`] and claim a corner with [`NetMsg::Claim`]; everything else
-//! is the host broadcasting [`NetMsg::Roster`]. A corner is granted to the
-//! first claimant because the host is the only peer that decides, so a guest
-//! never has to reconcile two sources of truth about which player it commands.
-//! Peers who claimed nothing watch as spectators.
+//! The room lives in the page's URL ([`crate::web`]); the lobby only shows
+//! it. The host is the peer with the lexicographically smallest `PeerId`,
+//! recomputed every frame so host loss self-heals. The host owns the roster:
+//! guests announce themselves with [`NetMsg::Hello`] and claim with
+//! [`NetMsg::Claim`]; everything else is the host broadcasting
+//! [`NetMsg::Roster`]. One authority, so no guest ever reconciles two
+//! sources of truth about which player it commands.
 
 use bevy::asset::RenderAssetUsages;
 use bevy::image::Image;
@@ -110,10 +85,6 @@ pub struct CornerPetal(pub usize);
 #[derive(Component)]
 pub struct CornerText(pub usize);
 
-/// The lobby's read-only room line: the room to share, and who you are here.
-#[derive(Component)]
-struct RoomText;
-
 #[derive(Component)]
 struct RosterText;
 
@@ -146,6 +117,12 @@ pub struct SelectedCorner(pub Option<usize>);
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ChosenVariants(pub Variants);
 
+/// The one-line status message under the roster: why a press was refused,
+/// what a press did. Lobby UI state, deliberately not part of [`NetState`] —
+/// the wire state describes the room, not this screen.
+#[derive(Resource, Debug, Clone, Default)]
+pub struct LobbyStatus(pub String);
+
 pub fn plugin(app: &mut App) {
     // The room comes from the URL — a share link lands you in the sender's
     // lobby, and a bare page is redirected to a fresh generated room so the
@@ -164,6 +141,7 @@ pub fn plugin(app: &mut App) {
         .init_resource::<HoveredCorner>()
         .init_resource::<SectorArt>()
         .init_resource::<ChosenVariants>()
+        .init_resource::<LobbyStatus>()
         .add_systems(
             OnEnter(AppState::Lobby),
             // The wedge art must exist before the star can reference it.
@@ -315,18 +293,10 @@ pub(crate) const CHOSEN: Color = Color::srgb(0.20, 0.45, 0.28);
 pub(crate) const CHOSEN_HOVER: Color = Color::srgb(0.25, 0.53, 0.34);
 pub(crate) const CHOSEN_DOWN: Color = Color::srgb(0.16, 0.37, 0.23);
 
-/// The lobby is a **two-column flex row filling the window**: the star and
-/// its caption on the left, every control on the right.
-///
-/// Two earlier layouts failed the same way. Anchoring the buttons at
-/// `bottom: 40px` put them off-screen entirely on a display whose work area is
-/// shorter than the window. A single centred column cannot place anything
-/// outside the window, but its content stacks to roughly a thousand pixels —
-/// star, three button rows, three labelled fields and their error lines, the
-/// rules, the roster, and the start row — so on any ordinary window it
-/// overflowed both ends and the edges clipped. Side by side, the column
-/// heights are the star's ~430px and the controls' ~500px, and the layout fits
-/// a 600px-tall window by construction.
+/// The lobby is a two-column flex row filling the window: the star on the
+/// left, every control on the right. Side by side the columns stay short
+/// enough to fit a 600px-tall window by construction, which a single stacked
+/// column never could.
 fn spawn(mut commands: Commands, art: Res<SectorArt>, net: Res<NetState>, room: Res<RoomId>) {
     commands
         .spawn((
@@ -386,7 +356,6 @@ fn spawn(mut commands: Commands, art: Res<SectorArt>, net: Res<NetState>, room: 
                         ..default()
                     },
                     TextColor(Color::srgb(0.88, 0.88, 0.9)),
-                    RoomText,
                 ));
                 col.spawn(Node {
                     column_gap: Val::Px(10.0),
@@ -554,6 +523,16 @@ fn spawn(mut commands: Commands, art: Res<SectorArt>, net: Res<NetState>, room: 
         });
 }
 
+/// Is corner `i` claimed? Solo tables read the local [`Table`]; shared rooms
+/// read the roster. The one occupancy rule every view and button row asks.
+fn corner_is_filled(net: &NetState, table: &Table, i: usize) -> bool {
+    if net.peers.is_empty() {
+        table.0[i] != CornerState::Empty
+    } else {
+        net.seats.iter().any(|s| s.player == Some(i as u32))
+    }
+}
+
 /// Marker on the Human / Computer row: shown while the selected corner is
 /// free, so it offers seating.
 #[derive(Component)]
@@ -574,14 +553,9 @@ fn sync_corner_actions(
     mut seat_rows: Query<&mut Visibility, (With<SeatButtons>, Without<CancelSeat>)>,
     mut cancel_rows: Query<&mut Visibility, (With<CancelSeat>, Without<SeatButtons>)>,
 ) {
-    let solo = net.peers.is_empty();
-    let claimed = selected.0.is_some_and(|i| {
-        if solo {
-            table.0[i] != CornerState::Empty
-        } else {
-            net.seats.iter().any(|s| s.player == Some(i as u32))
-        }
-    });
+    let claimed = selected
+        .0
+        .is_some_and(|i| corner_is_filled(&net, &table, i));
     let seat_wanted = selected.0.is_some() && !claimed;
     for mut visibility in &mut seat_rows {
         let wanted = if seat_wanted {
@@ -694,8 +668,8 @@ fn sync_remote_cursors(
     )>,
     mut labels: Query<(&mut Text, &mut TextColor), Without<RemoteCursor>>,
 ) {
-    // The easing constant from omdurman's overlay: fast enough to follow,
-    // slow enough to hide the 10 Hz steps.
+    // Exponential smoothing: fast enough to follow, slow enough to hide
+    // the 10 Hz steps.
     let alpha = 1.0 - (-6.0 * time.delta_secs()).exp();
     let now = time.elapsed_secs_f64();
     for (mut cursor, mut node, mut bg, mut vis, kids) in cursors.iter_mut() {
@@ -1074,8 +1048,8 @@ pub fn elect_host(socket: Option<ResMut<MatchboxSocket>>, mut net: ResMut<NetSta
 }
 
 /// The whole lobby conversation, one message at a time: greetings, corner
-/// claims, readiness, the host's roster broadcasts, and the `Start` that moves
-/// everyone into the game. Runs on the socket every frame.
+/// claims, the host's roster broadcasts, and the `Start` that moves everyone
+/// into the game. Runs on the socket every frame.
 ///
 /// `pub` so the multiplayer integration test can run the real pump in a
 /// headless instance, exactly as the app schedules it.
@@ -1083,6 +1057,7 @@ pub fn elect_host(socket: Option<ResMut<MatchboxSocket>>, mut net: ResMut<NetSta
 pub fn pump_socket(
     socket: Option<ResMut<MatchboxSocket>>,
     mut net: ResMut<NetState>,
+    mut status: ResMut<LobbyStatus>,
     mut variants: ResMut<ChosenVariants>,
     mut next_state: ResMut<NextState<AppState>>,
     state: Res<State<AppState>>,
@@ -1182,7 +1157,7 @@ pub fn pump_socket(
                                         seat.player = None;
                                     }
                                     seat.player = Some(corner);
-                                    net.status = format!("{} claimed corner {corner}.", seat.name);
+                                    status.0 = format!("{} claimed corner {corner}.", seat.name);
                                 }
                             }
                         }
@@ -1276,7 +1251,7 @@ pub fn pump_socket(
             // Moves cannot arrive before the game starts, but a late duplicate
             // from a previous game in the same room could. Ignore rather than
             // mis-apply.
-            NetMsg::Move(_) | NetMsg::Sequenced { .. } | NetMsg::Spectate(_) => {}
+            NetMsg::Move(_) | NetMsg::Sequenced { .. } => {}
         }
     }
 }
@@ -1308,7 +1283,6 @@ fn seat_for(net: &mut NetState, peer: &str, name: &str) {
         peer: peer.to_string(),
         name: name.to_string(),
         player: None,
-        spectate: false,
         engine: false,
     });
 }
@@ -1322,7 +1296,6 @@ fn seat_engine_at(net: &mut NetState, corner: usize) {
         peer: format!("engine-{n}"),
         name: "Engine".into(),
         player: Some(corner as u32),
-        spectate: false,
         engine: true,
     });
 }
@@ -1442,6 +1415,7 @@ pub fn select_corner(
     mut socket: Option<ResMut<MatchboxSocket>>,
     mut net: ResMut<NetState>,
     mut selected: ResMut<SelectedCorner>,
+    mut status: ResMut<LobbyStatus>,
 ) {
     for (interaction, rel) in hit.iter_mut() {
         if *interaction != Interaction::Pressed {
@@ -1455,7 +1429,7 @@ pub fn select_corner(
             SectorClick::Select(i) => selected.0 = Some(i),
             SectorClick::Claim(c) => {
                 if let Some(s) = socket.as_mut() {
-                    net.status = send_claim(s, &mut net, Some(c), &me);
+                    status.0 = send_claim(s, &mut net, Some(c), &me);
                 }
                 // The claimed corner is the selected one: the very next
                 // Computer / Cancel Seat press acts on it without a second
@@ -1500,10 +1474,6 @@ pub enum CornerEffect {
     RemoveEngine(u32),
     /// The host un-seats the player holding this corner.
     Unseat(u32),
-    /// The host gives up this corner to an engine: the host is un-seated and
-    /// an engine takes the corner in the same stroke, leaving the host free
-    /// to claim another.
-    SwapSelfForEngine(u32),
 }
 
 pub fn corner_effect(
@@ -1526,14 +1496,8 @@ pub fn corner_effect(
                 return match cmd {
                     CornerCommand::Off => Ok(CornerEffect::Claim(None)),
                     CornerCommand::Human => Err("You already hold this corner.".into()),
-                    // The host trading their own seat for an engine: un-seat
-                    // and seat the engine in one stroke. A guest never sees
-                    // the Computer button, and could not sequence anyway.
-                    CornerCommand::Cpu if net.sequences() => {
-                        Ok(CornerEffect::SwapSelfForEngine(corner))
-                    }
                     CornerCommand::Cpu => {
-                        Err("Only the host can seat an engine, and only on an empty corner.".into())
+                        Err("Seat an engine on a free corner: cancel this seat first.".into())
                     }
                 };
             }
@@ -1591,6 +1555,7 @@ pub fn handle_buttons(
     mut table: ResMut<Table>,
     mut selected: ResMut<SelectedCorner>,
     mut variants: ResMut<ChosenVariants>,
+    mut status: ResMut<LobbyStatus>,
     mut next_state: ResMut<NextState<AppState>>,
 ) {
     let mut start = keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::NumpadEnter);
@@ -1618,13 +1583,13 @@ pub fn handle_buttons(
     let solo = net.peers.is_empty();
     let me = net.my_seat().map(|s| s.peer.clone()).unwrap_or_default();
 
-    if let Some(seating) = preset {
-        if solo {
-            apply_preset(&mut table, seating);
-            net.status = format!("Table filled: {}.", seating.label());
-        } else {
-            net.status = "In a shared room, claim corners on the star instead.".into();
-        }
+    // Presets are solo-only furniture ([`SoloOnly`] hides the row once the
+    // room is shared, and no key names them).
+    if let Some(seating) = preset
+        && solo
+    {
+        apply_preset(&mut table, seating);
+        status.0 = format!("Table filled: {}.", seating.label());
     }
 
     if let (Some(corner), Some(cmd)) = (selected.0, command) {
@@ -1632,7 +1597,7 @@ pub fn handle_buttons(
         match corner_effect(&net, &me, corner, cmd) {
             Ok(CornerEffect::Local(state)) => {
                 table.0[corner as usize] = state;
-                net.status = match cmd {
+                status.0 = match cmd {
                     CornerCommand::Human => format!("Corner {corner}: human."),
                     CornerCommand::Cpu => format!("Corner {corner}: computer."),
                     CornerCommand::Off => format!("Corner {corner}: empty."),
@@ -1640,7 +1605,7 @@ pub fn handle_buttons(
             }
             Ok(CornerEffect::Claim(claim)) => {
                 if let Some(s) = socket.as_mut() {
-                    net.status = send_claim(s, &mut net, claim, &me);
+                    status.0 = send_claim(s, &mut net, claim, &me);
                 }
             }
             Ok(CornerEffect::AddEngine(c)) => {
@@ -1648,14 +1613,14 @@ pub fn handle_buttons(
                 if let Some(s) = socket.as_mut() {
                     publish_roster(s, &net, &net.peers);
                 }
-                net.status = format!("Engine seated at corner {c}.");
+                status.0 = format!("Engine seated at corner {c}.");
             }
             Ok(CornerEffect::RemoveEngine(c)) => {
                 remove_engine_at(&mut net, c as usize);
                 if let Some(s) = socket.as_mut() {
                     publish_roster(s, &net, &net.peers);
                 }
-                net.status = format!("Corner {c}: engine removed.");
+                status.0 = format!("Corner {c}: engine removed.");
             }
             Ok(CornerEffect::Unseat(c)) => {
                 if let Some(seat) = net
@@ -1668,33 +1633,21 @@ pub fn handle_buttons(
                     if let Some(s) = socket.as_mut() {
                         publish_roster(s, &net, &net.peers);
                     }
-                    net.status = format!("{} was un-seated from corner {c}.", name);
+                    status.0 = format!("{} was un-seated from corner {c}.", name);
                 }
             }
-            Ok(CornerEffect::SwapSelfForEngine(c)) => {
-                // Free the host's own seat first; only then does the engine's
-                // corner look unclaimed to the roster it joins.
-                if let Some(seat) = net.seats.iter_mut().find(|s| s.peer == me) {
-                    seat.player = None;
-                }
-                seat_engine_at(&mut net, c as usize);
-                if let Some(s) = socket.as_mut() {
-                    publish_roster(s, &net, &net.peers);
-                }
-                net.status = format!("Corner {c}: engine seated. Claim another corner.");
-            }
-            Err(why) => net.status = why,
+            Err(why) => status.0 = why,
         }
     }
 
     if foreign {
         // Only the host decides the rules, for the same reason only the host
         // decides the table: the shared game must play under one rule set.
-        if solo || net.sequences() {
+        if net.sequences() {
             variants.0.forbid_foreign_camps = !variants.0.forbid_foreign_camps;
-            // The switch is a setting like any other: broadcast it live, so
-            // every lobby shows one game before the Start repeats it.
-            if !solo && let Some(s) = socket.as_mut() {
+            // Broadcast live, so every lobby shows one game before the Start
+            // repeats it; with no peers this is a no-op.
+            if let Some(s) = socket.as_mut() {
                 broadcast(
                     s,
                     &net.peers,
@@ -1703,13 +1656,13 @@ pub fn handle_buttons(
                     },
                 );
             }
-            net.status = if variants.0.forbid_foreign_camps {
+            status.0 = if variants.0.forbid_foreign_camps {
                 "Rule on: no piece rests in a foreign triangle.".into()
             } else {
                 "Rule off: the specification's game.".into()
             };
         } else {
-            net.status = "Only the host chooses the rules.".into();
+            status.0 = "Only the host chooses the rules.".into();
         }
     }
 
@@ -1722,7 +1675,7 @@ pub fn handle_buttons(
                 }
                 next_state.set(AppState::InGame);
             }
-            StartDecision::Refuse(why) => net.status = why,
+            StartDecision::Refuse(why) => status.0 = why,
         }
     }
 }
@@ -1731,9 +1684,10 @@ pub fn handle_buttons(
 fn draw_roster(
     net: Res<NetState>,
     table: Res<Table>,
+    status: Res<LobbyStatus>,
     mut text: Query<&mut Text, With<RosterText>>,
 ) {
-    if !net.is_changed() && !table.is_changed() {
+    if !net.is_changed() && !table.is_changed() && !status.is_changed() {
         return;
     }
     let Ok(mut text) = text.single_mut() else {
@@ -1782,8 +1736,8 @@ fn draw_roster(
     } else {
         "\nClaim a corner on the star; the host starts the game with Enter."
     });
-    if !net.status.is_empty() {
-        out.push_str(&format!("\n\n{}", net.status));
+    if !status.0.is_empty() {
+        out.push_str(&format!("\n\n{}", status.0));
     }
     **text = out;
 }
@@ -1797,15 +1751,13 @@ fn sync_corner_styles(
     hovered: Res<HoveredCorner>,
     mut petals: Query<(&CornerPetal, &mut ImageNode)>,
 ) {
-    let solo = net.peers.is_empty();
     for (petal, mut img) in petals.iter_mut() {
         let p = Player::new(petal.0 as u8).expect("corner indices are below six");
-        let filled = if solo {
-            table.0[petal.0] != CornerState::Empty
+        let base = if corner_is_filled(&net, &table, petal.0) {
+            player_colour(p)
         } else {
-            net.seats.iter().any(|s| s.player == Some(petal.0 as u32))
+            IDLE
         };
-        let base = if filled { player_colour(p) } else { IDLE };
         // Selection lights the wedge strongly, the cursor resting on it mildly.
         let factor = if selected.0 == Some(petal.0) {
             1.25
@@ -1961,7 +1913,6 @@ mod tests {
             peer: name.into(),
             name: name.into(),
             player,
-            spectate: false,
             engine: false,
         }
     }
@@ -2002,7 +1953,7 @@ mod tests {
         }
     }
 
-    /// Fewer than two claimed corners cannot start, whatever the readiness.
+    /// Fewer than two claimed corners cannot start.
     #[test]
     fn a_shared_start_needs_two_claimed_corners() {
         let mut net = NetState::default();
@@ -2144,54 +2095,6 @@ mod tests {
         assert!(corner_effect(&net, "ada", 2, CornerCommand::Human).is_err());
     }
 
-    /// The host trading their own corner for an engine: the swap effect, not
-    /// a refusal. The host owns the corner and presses Computer — the host is
-    /// un-seated and an engine takes the corner in one stroke.
-    #[test]
-    fn the_host_swaps_their_corner_for_an_engine() {
-        let mut net = NetState::default();
-        net.peers.push(fake_peer());
-        net.is_host = true;
-        let host = "host";
-        net.seats = vec![seat(host, Some(2))];
-
-        assert_eq!(
-            corner_effect(&net, host, 2, CornerCommand::Cpu),
-            Ok(CornerEffect::SwapSelfForEngine(2)),
-            "a host-owned corner may become an engine"
-        );
-
-        // The performer: the host's seat frees, the engine takes the corner,
-        // and the host may claim again.
-        let me = host.to_string();
-        if let Some(seat) = net.seats.iter_mut().find(|s| s.peer == me) {
-            seat.player = None;
-        }
-        seat_engine_at(&mut net, 2);
-        assert!(
-            net.seats
-                .iter()
-                .any(|s| s.peer == host && s.player.is_none())
-        );
-        assert_eq!(
-            corner_effect(&net, host, 3, CornerCommand::Human),
-            Ok(CornerEffect::Claim(Some(3))),
-            "the host can claim another corner afterwards"
-        );
-        assert_eq!(
-            corner_effect(&net, host, 2, CornerCommand::Human),
-            Err("An engine plays corner 2.".to_string()),
-            "the engine's corner is not claimable"
-        );
-
-        // A guest with a corner still cannot: the Computer button is
-        // host-only and the swap is sequencing work.
-        let mut net = NetState::default();
-        net.peers.push(fake_peer());
-        net.seats = vec![seat("grace", Some(2))];
-        assert!(corner_effect(&net, "grace", 2, CornerCommand::Cpu).is_err());
-    }
-
     /// A guest cannot place an engine; that is the host's call.
     #[test]
     fn only_the_host_seats_engines() {
@@ -2327,6 +2230,7 @@ mod tests {
         net.seats = vec![seat(&me.to_string(), None)];
         world.insert_resource(net);
         world.insert_resource(SelectedCorner(None));
+        world.init_resource::<LobbyStatus>();
         world.init_resource::<ButtonInput<KeyCode>>();
 
         // A press on corner 1's centroid — free, so a claim.
