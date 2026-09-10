@@ -47,8 +47,6 @@
 
 use bevy::asset::RenderAssetUsages;
 use bevy::image::Image;
-use bevy::input::ButtonState;
-use bevy::input::keyboard::KeyboardInput;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::ui::RelativeCursorPosition;
@@ -74,16 +72,26 @@ pub struct LobbyUi;
 /// Every clickable control on the screen bar the star's own hit area.
 #[derive(Component, Clone, Copy, PartialEq, Eq)]
 pub enum LobbyButton {
-    Ready,
     Start,
-    /// Change the selected corner: active only on solo setups, where the table
-    /// is this device's own configuration.
+    /// Fill the table with a symmetric setup. Solo-only: a shared table is
+    /// claimed corner by corner, never overwritten by one peer's shortcut.
     Preset(Seating),
     /// Declare or switch off the "no piece may rest in a foreign camp" rule.
     ForeignCamps,
     /// Perform [`CornerCommand`] on the currently selected corner.
     CornerAction(CornerCommand),
 }
+
+/// Rows only the sequencing authority (the host, or any solo table) may use:
+/// starting the game, the house rules, seating engines. Hidden from guests,
+/// who could only press them to be refused.
+#[derive(Component)]
+pub struct HostOnly;
+
+/// Rows that only make sense before the room is shared: the seating presets.
+/// In a shared room every corner is claimed on the star instead.
+#[derive(Component)]
+pub struct SoloOnly;
 
 /// What a [`LobbyButton::CornerAction`] press asks for, against the selected
 /// corner.
@@ -103,26 +111,9 @@ pub struct CornerPetal(pub usize);
 #[derive(Component)]
 pub struct CornerText(pub usize);
 
-/// Which editor an on-screen text input drives.
-#[derive(Component, Clone, Copy, PartialEq, Eq)]
-pub enum FieldKind {
-    Room,
-    Name,
-}
-
-/// An always-visible text input box: click to focus (or its key), Enter
-/// commits, Esc leaves. The value shown is driven by [`draw_room`] and
-/// [`draw_name`].
+/// The lobby's read-only room line: the room to share, and who you are here.
 #[derive(Component)]
-pub struct TextInput(pub FieldKind);
-
-/// The value text inside an input box.
-#[derive(Component)]
-struct InputText(FieldKind);
-
-/// The error line under an input box.
-#[derive(Component)]
-struct InputError(FieldKind);
+struct RoomText;
 
 #[derive(Component)]
 struct RosterText;
@@ -157,21 +148,23 @@ pub struct SelectedCorner(pub Option<usize>);
 pub struct ChosenVariants(pub Variants);
 
 pub fn plugin(app: &mut App) {
-    // A share link carries the room in the URL fragment; honour it over the
-    // default so a link lands you in the sender's lobby. Native builds have no
-    // URL, and this is a no-op there.
-    if let Some(room) = crate::web::room_from_url() {
-        app.insert_resource(room);
-    }
-    app.init_resource::<NetState>()
-        .init_resource::<RoomId>()
+    // The room comes from the URL — a share link lands you in the sender's
+    // lobby, and a bare page is redirected to a fresh generated room so the
+    // address bar is always shareable. Native builds read `CCHKRS_ROOM` and
+    // simply generate when it is unset. The room is never edited afterwards.
+    let room = crate::web::room_from_url().unwrap_or_else(crate::web::random_room);
+    crate::web::share_room(&room);
+    app.insert_resource(room)
+        // The session's pet name is drawn at boot and never changed.
+        .insert_resource(NetState {
+            name: crate::web::petname(),
+            ..NetState::default()
+        })
         .init_resource::<Table>()
         .init_resource::<SelectedCorner>()
         .init_resource::<HoveredCorner>()
         .init_resource::<SectorArt>()
         .init_resource::<ChosenVariants>()
-        .init_resource::<RoomEdit>()
-        .init_resource::<NameEdit>()
         .add_systems(
             OnEnter(AppState::Lobby),
             // The wedge art must exist before the star can reference it.
@@ -182,29 +175,22 @@ pub fn plugin(app: &mut App) {
             Update,
             (
                 // Lobby machinery stays out of the game: ungated, `pump_socket`
-                // raced `net::pump` for the same socket and a stray key in a
-                // game opened an invisible text field. Everything here is
+                // raced `net::pump` for the same socket. Everything here is
                 // lobby furniture.
                 (
                     elect_host,
                     pump_socket,
-                    // First, and the rest are suppressed while a field holds
-                    // the keyboard: typing a name must not also start a game
-                    // on the Enter that commits it.
-                    (edit_room, edit_name),
-                    focus_input_fields.run_if(not_editing),
-                    (select_corner, handle_buttons).run_if(not_editing),
-                    // The modal's exit: an elsewhere-click closes the focused
-                    // field, while `not_editing` keeps this frame's click from
-                    // also acting on whatever was clicked.
-                    blur_on_elsewhere_click,
+                    select_corner,
+                    handle_buttons,
                     broadcast_cursor,
                 )
                     .chain()
                     .run_if(in_state(AppState::Lobby)),
                 (
                     sync_button_styles,
-                    sync_input_styles,
+                    // Host-only and solo-only rows fold away for the players
+                    // who could not use them.
+                    sync_host_rows,
                     sync_corner_settings,
                     hover_corner,
                     // The wedge tint follows the state, and the labels follow
@@ -213,8 +199,6 @@ pub fn plugin(app: &mut App) {
                         sync_corner_styles,
                         draw_corner_labels,
                         draw_roster,
-                        draw_room,
-                        draw_name,
                         sync_remote_cursors,
                     )
                         .chain(),
@@ -223,16 +207,6 @@ pub fn plugin(app: &mut App) {
                     .run_if(in_state(AppState::Lobby)),
             ),
         );
-}
-
-/// Whether a field has the keyboard.
-///
-/// Every other lobby key is gated on this. Without it each character typed is
-/// also a command — Space readies, Enter starts, a digit selects a corner — so
-/// a field would be unusable for any name containing them, which is nearly all
-/// of them.
-pub fn not_editing(room: Res<RoomEdit>, name: Res<NameEdit>) -> bool {
-    !room.active && !room.consumed_input && !name.active && !name.consumed_input
 }
 
 /// Paint every non-petal button: selected mode, hover, press.
@@ -269,7 +243,6 @@ fn sync_button_styles(
 
     for (interaction, button, mut bg) in buttons.iter_mut() {
         let selected = match button {
-            LobbyButton::Ready => net.my_seat().is_some_and(|s| s.ready),
             LobbyButton::ForeignCamps => variants.0.forbid_foreign_camps,
             LobbyButton::CornerAction(cmd) => active.is_some_and(|(_, a)| a == *cmd),
             LobbyButton::Start | LobbyButton::Preset(_) => false,
@@ -288,42 +261,23 @@ fn sync_button_styles(
     }
 }
 
-/// Paint the text inputs: a focused field gets a green border and a darker
-/// well so it is obvious the keyboard is captured; an unfocused one brightens
-/// its border on hover, so the box reads as clickable.
-fn sync_input_styles(
-    room: Res<RoomEdit>,
-    name: Res<NameEdit>,
-    mut inputs: Query<(
-        &Interaction,
-        &TextInput,
-        &mut BackgroundColor,
-        &mut BorderColor,
-    )>,
+/// Fold rows away for the players who could only press them to be refused:
+/// host-only rows (Start, the house rules, seating an engine) vanish for
+/// guests, and the solo presets vanish once the room is shared.
+fn sync_host_rows(
+    net: Res<NetState>,
+    mut rows: Query<(&mut Visibility, AnyOf<(&HostOnly, &SoloOnly)>)>,
 ) {
-    for (interaction, input, mut bg, mut border) in inputs.iter_mut() {
-        let focused = match input.0 {
-            FieldKind::Room => room.active,
-            FieldKind::Name => name.active,
-        };
-        let border_colour = if focused {
-            CHOSEN
+    let host = net.sequences();
+    let solo = net.peers.is_empty();
+    for (mut visibility, (host_only, solo_only)) in &mut rows {
+        let wanted = if host_only.is_some() && host || solo_only.is_some() && solo {
+            Visibility::Inherited
         } else {
-            match interaction {
-                Interaction::Hovered => HOVER,
-                _ => Color::srgb(0.35, 0.35, 0.40),
-            }
+            Visibility::Hidden
         };
-        let well = if focused {
-            Color::srgb(0.15, 0.15, 0.19)
-        } else {
-            IDLE
-        };
-        if bg.0 != well {
-            bg.0 = well;
-        }
-        if border.top != border_colour {
-            *border = BorderColor::all(border_colour);
+        if *visibility != wanted {
+            *visibility = wanted;
         }
     }
 }
@@ -361,83 +315,6 @@ pub(crate) const CHOSEN: Color = Color::srgb(0.20, 0.45, 0.28);
 pub(crate) const CHOSEN_HOVER: Color = Color::srgb(0.25, 0.53, 0.34);
 pub(crate) const CHOSEN_DOWN: Color = Color::srgb(0.16, 0.37, 0.23);
 
-/// The room-name editor.
-///
-/// Editing is *modal*: while any editor holds the keyboard every other key is
-/// suppressed, because the alternative is that typing a room named "solo"
-/// starts a game on the `s`. A mode is the smaller evil here, and `Esc` always
-/// leaves it.
-#[derive(Resource, Default)]
-pub struct RoomEdit {
-    pub active: bool,
-    /// What has been typed so far. Only committed to [`RoomId`] on Enter, so an
-    /// abandoned edit cannot leave the socket pointing somewhere unintended.
-    pub buffer: String,
-    /// Why the last commit was refused, shown beneath the field.
-    pub error: String,
-    /// Set for the rest of the frame in which the field handled a keypress.
-    ///
-    /// Closing the field is not enough on its own. The lobby systems are
-    /// `.chain()`ed, so `handle_buttons` runs *after* `edit_room` in the same
-    /// frame: committing with Enter cleared `active`, and the very same Enter
-    /// then fell through and started the game.
-    ///
-    /// A run condition cannot see "this frame's input was already used", so the
-    /// editor records it. Cleared at the top of each `edit_*` run.
-    pub consumed_input: bool,
-}
-
-/// The player-name editor. Same modal pattern as [`RoomEdit`] — including the
-/// input-consumption flag — but committing writes the display name and
-/// re-greets peers rather than reopening a socket.
-#[derive(Resource, Default)]
-pub struct NameEdit {
-    pub active: bool,
-    pub buffer: String,
-    pub error: String,
-    pub consumed_input: bool,
-}
-
-/// What a keypress does to an editor.
-///
-/// Returned rather than applied so the decision is testable without a window;
-/// the `edit_*` systems are the thin performers.
-#[derive(Debug, PartialEq, Eq)]
-pub enum EditAction {
-    /// Add to the buffer.
-    Insert(char),
-    Backspace,
-    /// Commit the buffer.
-    Commit,
-    /// Abandon the edit.
-    Cancel,
-    /// Not for the editor.
-    Ignore,
-}
-
-/// Classify one keypress during editing.
-///
-/// `text` is [`bevy::input::keyboard::KeyboardInput::text`], which respects the
-/// keyboard layout — reading `key_code` instead would give a US-layout guess.
-pub fn edit_action(key: KeyCode, text: Option<&str>) -> EditAction {
-    match key {
-        KeyCode::Enter | KeyCode::NumpadEnter => return EditAction::Commit,
-        KeyCode::Escape => return EditAction::Cancel,
-        KeyCode::Backspace => return EditAction::Backspace,
-        _ => {}
-    }
-    // A single character only: `text` can hold two when a dead key did not
-    // combine.
-    match text.and_then(|t| {
-        let mut chars = t.chars();
-        chars.next().filter(|_| chars.next().is_none())
-    }) {
-        // Control characters arrive here as text on some platforms.
-        Some(c) if !c.is_control() => EditAction::Insert(c),
-        _ => EditAction::Ignore,
-    }
-}
-
 /// The lobby is a **two-column flex row filling the window**: the star and
 /// its caption on the left, every control on the right.
 ///
@@ -450,7 +327,7 @@ pub fn edit_action(key: KeyCode, text: Option<&str>) -> EditAction {
 /// overflowed both ends and the edges clipped. Side by side, the column
 /// heights are the star's ~430px and the controls' ~500px, and the layout fits
 /// a 600px-tall window by construction.
-fn spawn(mut commands: Commands, art: Res<SectorArt>) {
+fn spawn(mut commands: Commands, art: Res<SectorArt>, net: Res<NetState>, room: Res<RoomId>) {
     commands
         .spawn((
             Node {
@@ -497,44 +374,48 @@ fn spawn(mut commands: Commands, art: Res<SectorArt>) {
                 ..default()
             })
             .with_children(|col| {
-                // General settings: who I am and where I am. These travel with
-                // the Hello and the share link, so they come first — everything
-                // below them is about the table, not the player.
-                header(col, "General");
-
-                // The room field: a real text input, click or `R` to focus.
-                field_row(col, "Room", FieldKind::Room, "R");
+                // The room you are in and the name you go by — both fixed for
+                // the session, so they are baked in at spawn: the room because
+                // the page's link is the invitation, the name because the
+                // roster shows it.
+                header(col, "Room");
                 col.spawn((
-                    Text::new(String::new()),
+                    Text::new(format!("{} - you are {}", room.0, net.name)),
                     TextFont {
                         font_size: FontSize::Px(14.0),
                         ..default()
                     },
-                    TextColor(Color::srgb(0.85, 0.35, 0.35)),
-                    InputError(FieldKind::Room),
+                    TextColor(Color::srgb(0.88, 0.88, 0.9)),
+                    RoomText,
                 ));
-
-                // The player-name field, same pattern.
-                field_row(col, "Name", FieldKind::Name, "N");
-                col.spawn((
-                    Text::new(String::new()),
-                    TextFont {
-                        font_size: FontSize::Px(14.0),
-                        ..default()
-                    },
-                    TextColor(Color::srgb(0.85, 0.35, 0.35)),
-                    InputError(FieldKind::Name),
-                ));
+                col.spawn(Node {
+                    column_gap: Val::Px(10.0),
+                    ..default()
+                })
+                .with_children(|hint| {
+                    hint.spawn((
+                        Text::new("Share this page's link to invite players."),
+                        TextFont {
+                            font_size: FontSize::Px(13.0),
+                            ..default()
+                        },
+                        TextColor(Color::srgb(0.62, 0.62, 0.68)),
+                    ));
+                });
 
                 header(col, "Table");
                 // Presets are shortcuts for the symmetric setups; they fill the
                 // whole table, so what is configured and what the shortcut
-                // leaves can never silently disagree.
-                col.spawn(Node {
-                    column_gap: Val::Px(10.0),
-                    align_items: AlignItems::Center,
-                    ..default()
-                })
+                // leaves can never silently disagree. Solo-only: a shared
+                // table is claimed corner by corner on the star.
+                col.spawn((
+                    Node {
+                        column_gap: Val::Px(10.0),
+                        align_items: AlignItems::Center,
+                        ..default()
+                    },
+                    SoloOnly,
+                ))
                 .with_children(|row| {
                     for seating in Seating::ALL {
                         button(
@@ -559,7 +440,9 @@ fn spawn(mut commands: Commands, art: Res<SectorArt>) {
                     CornerSettings,
                 ))
                 .with_children(|corner| {
-                    // What to do with the selected corner.
+                    // What to do with the selected corner. Seating an engine
+                    // is the host's call alone — the engine runs in the
+                    // host's process — so guests never see the button.
                     corner
                         .spawn(Node {
                             column_gap: Val::Px(10.0),
@@ -567,44 +450,65 @@ fn spawn(mut commands: Commands, art: Res<SectorArt>) {
                             ..default()
                         })
                         .with_children(|row| {
-                            for (label, cmd) in [
-                                ("Human", CornerCommand::Human),
-                                ("Computer", CornerCommand::Cpu),
-                                ("Empty", CornerCommand::Off),
-                            ] {
-                                button(row, label, LobbyButton::CornerAction(cmd));
-                            }
-                        });
-
-                    // What to do with the selected corner.
-                    corner
-                        .spawn(Node {
-                            column_gap: Val::Px(10.0),
-                            align_items: AlignItems::Center,
-                            ..default()
-                        })
-                        .with_children(|row| {
-                            for (label, cmd) in [
-                                ("Human", CornerCommand::Human),
-                                ("Computer", CornerCommand::Cpu),
-                                ("Empty", CornerCommand::Off),
-                            ] {
-                                button(row, label, LobbyButton::CornerAction(cmd));
-                            }
+                            button(
+                                row,
+                                "Human",
+                                LobbyButton::CornerAction(CornerCommand::Human),
+                            );
+                            row.spawn((
+                                Button,
+                                Node {
+                                    padding: UiRect::axes(Val::Px(10.0), Val::Px(6.0)),
+                                    border_radius: BorderRadius::all(Val::Px(5.0)),
+                                    ..default()
+                                },
+                                BackgroundColor(IDLE),
+                                LobbyButton::CornerAction(CornerCommand::Cpu),
+                                HostOnly,
+                            ))
+                            .with_child((
+                                Text::new("Computer"),
+                                TextFont {
+                                    font_size: FontSize::Px(14.0),
+                                    ..default()
+                                },
+                                TextColor(Color::srgb(0.9, 0.9, 0.92)),
+                            ));
+                            button(row, "Empty", LobbyButton::CornerAction(CornerCommand::Off));
                         });
                 });
 
-                // House rules, one toggle per switch.
-                header(col, "Rules");
-                col.spawn(Node {
-                    column_gap: Val::Px(10.0),
-                    ..default()
-                })
+                // House rules, one toggle per switch. Only the host decides
+                // them, so only the host even sees them.
+                col.spawn((
+                    Node {
+                        margin: UiRect::top(Val::Px(6.0)),
+                        ..default()
+                    },
+                    HostOnly,
+                ))
+                .with_children(|row| {
+                    row.spawn((
+                        Text::new("Rules"),
+                        TextFont {
+                            font_size: FontSize::Px(16.0),
+                            ..default()
+                        },
+                        TextColor(Color::srgb(0.7, 0.7, 0.76)),
+                    ));
+                });
+                col.spawn((
+                    Node {
+                        column_gap: Val::Px(10.0),
+                        ..default()
+                    },
+                    HostOnly,
+                ))
                 .with_children(|row| {
                     button(row, "No foreign rest", LobbyButton::ForeignCamps);
                 });
 
-                // The roster: who is here, ready, or waiting for a corner.
+                // The roster: who is here and where they sit.
                 col.spawn((
                     Text::new(String::new()),
                     TextFont {
@@ -615,13 +519,17 @@ fn spawn(mut commands: Commands, art: Res<SectorArt>) {
                     RosterText,
                 ));
 
-                col.spawn(Node {
-                    column_gap: Val::Px(10.0),
-                    margin: UiRect::top(Val::Px(4.0)),
-                    ..default()
-                })
+                // The host starts the game — the one button guests must not
+                // even see, since a shared start belongs to the host alone.
+                col.spawn((
+                    Node {
+                        column_gap: Val::Px(10.0),
+                        margin: UiRect::top(Val::Px(4.0)),
+                        ..default()
+                    },
+                    HostOnly,
+                ))
                 .with_children(|row| {
-                    button(row, "Ready (Space)", LobbyButton::Ready);
                     button(row, "Start (Enter)", LobbyButton::Start);
                 });
             });
@@ -771,64 +679,6 @@ fn header(parent: &mut ChildSpawnerCommands, label: &str) {
         },
         TextColor(Color::srgb(0.92, 0.92, 0.95)),
     ));
-}
-
-/// One labelled input row: the label, the text input box, and the key that
-/// focuses it. Enter commits, Esc leaves; visuals follow in
-/// [`sync_input_styles`].
-fn field_row(parent: &mut ChildSpawnerCommands, label: &str, kind: FieldKind, key: &str) {
-    parent
-        .spawn(Node {
-            column_gap: Val::Px(10.0),
-            align_items: AlignItems::Center,
-            ..default()
-        })
-        .with_children(|row| {
-            row.spawn((
-                Text::new(label),
-                TextFont {
-                    font_size: FontSize::Px(14.0),
-                    ..default()
-                },
-                TextColor(Color::srgb(0.62, 0.62, 0.68)),
-            ));
-            input_box(row, kind);
-            row.spawn((
-                Text::new(key),
-                TextFont {
-                    font_size: FontSize::Px(14.0),
-                    ..default()
-                },
-                TextColor(Color::srgb(0.62, 0.62, 0.68)),
-            ));
-        });
-}
-
-/// A text input box, shared by every field row.
-fn input_box(parent: &mut ChildSpawnerCommands, kind: FieldKind) {
-    parent
-        .spawn((
-            Button,
-            Node {
-                width: Val::Px(240.0),
-                padding: UiRect::axes(Val::Px(10.0), Val::Px(6.0)),
-                border: UiRect::all(Val::Px(1.0)),
-                border_radius: BorderRadius::all(Val::Px(5.0)),
-                ..default()
-            },
-            BackgroundColor(IDLE),
-            BorderColor::all(Color::srgb(0.35, 0.35, 0.40)),
-            TextInput(kind),
-        ))
-        .with_child((
-            Text::new(String::new()),
-            TextFont {
-                font_size: FontSize::Px(14.0),
-                ..default()
-            },
-            TextColor(Color::srgb(0.9, 0.9, 0.92)),
-            InputText(kind),
-        ));
 }
 
 /// Star geometry: the container the wedges and their labels live in.
@@ -1125,25 +975,15 @@ pub fn start_decision(net: &NetState, table: &Table) -> StartDecision {
     // having Enter do nothing.
     if !net.sequences() {
         return StartDecision::Refuse(
-            "Only the host can start a shared game. Claim a corner and get ready.".into(),
+            "Only the host can start a shared game. Claim a corner and wait.".into(),
         );
     }
 
-    // Engines read as ready the moment they sit, so every not-ready seat is a
-    // human who claimed a corner.
     let seated: Vec<&Seat> = net.seats.iter().filter(|s| s.player.is_some()).collect();
     if seated.len() < 2 {
         return StartDecision::Refuse(
             "At least two corners must be claimed before the game can start.".into(),
         );
-    }
-    let waiting: Vec<&str> = seated
-        .iter()
-        .filter(|s| !s.ready)
-        .map(|s| s.name.as_str())
-        .collect();
-    if !waiting.is_empty() {
-        return StartDecision::Refuse(format!("Waiting for: {}.", waiting.join(", ")));
     }
     StartDecision::Multiplayer
 }
@@ -1241,15 +1081,6 @@ pub fn pump_socket(
                         seat_for(&mut net, &from.to_string(), &name);
                         publish_roster(&mut socket, &net, &peers);
                     }
-                }
-            }
-            NetMsg::Ready(ready) => {
-                if net.sequences() {
-                    let key = from.to_string();
-                    if let Some(seat) = net.seats.iter_mut().find(|s| s.peer == key) {
-                        seat.ready = ready;
-                    }
-                    publish_roster(&mut socket, &net, &peers);
                 }
             }
             NetMsg::Claim(claim) => {
@@ -1383,7 +1214,6 @@ fn seat_for(net: &mut NetState, peer: &str, name: &str) {
         peer: peer.to_string(),
         name: name.to_string(),
         player: None,
-        ready: false,
         spectate: false,
         engine: false,
     });
@@ -1398,7 +1228,6 @@ fn seat_engine_at(net: &mut NetState, corner: usize) {
         peer: format!("engine-{n}"),
         name: "Engine".into(),
         player: Some(corner as u32),
-        ready: true,
         spectate: false,
         engine: true,
     });
@@ -1547,41 +1376,6 @@ pub fn select_corner(
     }
 }
 
-/// Clicking anywhere that is not a text field closes the focused one.
-///
-/// A click *on* a field — including the focused one — is not "elsewhere", so
-/// reaching for another field never closes the one in hand. The system runs
-/// after the lobby's action systems, but ordering is not what makes the modal
-/// hold: while a field is active `not_editing` keeps every action system out
-/// for the whole frame, so the dismissing click is spent on the dismissal and
-/// the next click is the one that acts.
-pub fn blur_on_elsewhere_click(
-    mouse: Res<ButtonInput<MouseButton>>,
-    clicked: Query<(&Interaction, Has<TextInput>), Changed<Interaction>>,
-    mut room: ResMut<RoomEdit>,
-    mut name: ResMut<NameEdit>,
-) {
-    if !mouse.just_pressed(MouseButton::Left) {
-        return;
-    }
-    if clicked
-        .iter()
-        .any(|(interaction, is_field)| *interaction == Interaction::Pressed && is_field)
-    {
-        return;
-    }
-    if room.active {
-        room.active = false;
-        room.buffer.clear();
-        room.error.clear();
-    }
-    if name.active {
-        name.active = false;
-        name.buffer.clear();
-        name.error.clear();
-    }
-}
-
 /// Track which wedge the cursor rests on, for the hover shading.
 fn hover_corner(
     hit: Query<&RelativeCursorPosition, With<StarHit>>,
@@ -1610,6 +1404,8 @@ pub enum CornerEffect {
     AddEngine(u32),
     /// The host removes the engine from this corner.
     RemoveEngine(u32),
+    /// The host un-seats the player holding this corner.
+    Unseat(u32),
 }
 
 pub fn corner_effect(
@@ -1637,7 +1433,15 @@ pub fn corner_effect(
                     }
                 };
             }
-            return Err(format!("Corner {corner} is held by {}.", owner.name));
+            // The host may un-seat anyone: a stray claim, a peer that wandered
+            // off, a table being rearranged before the start.
+            if net.sequences() && cmd == CornerCommand::Off {
+                return Ok(CornerEffect::Unseat(corner));
+            }
+            return Err(format!(
+                "Corner {corner} is held by {}. Only the host can un-seat a player.",
+                owner.name
+            ));
         }
         return match cmd {
             // The human claiming this corner is me — any peer may.
@@ -1685,7 +1489,6 @@ pub fn handle_buttons(
     mut variants: ResMut<ChosenVariants>,
     mut next_state: ResMut<NextState<AppState>>,
 ) {
-    let mut ready = keys.just_pressed(KeyCode::Space);
     let mut start = keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::NumpadEnter);
     let mut foreign = keys.just_pressed(KeyCode::KeyF);
     let deselect = keys.just_pressed(KeyCode::Escape);
@@ -1697,7 +1500,6 @@ pub fn handle_buttons(
             continue;
         }
         match button {
-            LobbyButton::Ready => ready = true,
             LobbyButton::Start => start = true,
             LobbyButton::ForeignCamps => foreign = true,
             LobbyButton::Preset(s) => preset = Some(*s),
@@ -1751,6 +1553,20 @@ pub fn handle_buttons(
                 }
                 net.status = format!("Corner {c}: engine removed.");
             }
+            Ok(CornerEffect::Unseat(c)) => {
+                if let Some(seat) = net
+                    .seats
+                    .iter_mut()
+                    .find(|s| s.player == Some(c) && !s.engine)
+                {
+                    let name = seat.name.clone();
+                    seat.player = None;
+                    if let Some(s) = socket.as_mut() {
+                        publish_roster(s, &net, &net.peers);
+                    }
+                    net.status = format!("{} was un-seated from corner {c}.", name);
+                }
+            }
             Err(why) => net.status = why,
         }
     }
@@ -1778,31 +1594,6 @@ pub fn handle_buttons(
             };
         } else {
             net.status = "Only the host chooses the rules.".into();
-        }
-    }
-
-    if ready {
-        if solo {
-            net.status = "Playing on this device - no ready sign needed.".into();
-        } else if net.my_seat().is_none_or(|s| s.player.is_none()) {
-            net.status = "Claim a corner first, then ready up.".into();
-        } else {
-            let now = !net.my_seat().is_some_and(|s| s.ready);
-            if net.sequences() {
-                if let Some(seat) = net.seats.iter_mut().find(|s| s.peer == me) {
-                    seat.ready = now;
-                }
-                if let Some(s) = socket.as_mut() {
-                    publish_roster(s, &net, &net.peers);
-                }
-            } else if let Some(s) = socket.as_mut() {
-                broadcast(s, &net.peers, &NetMsg::Ready(now));
-            }
-            net.status = if now {
-                "You are ready - waiting for the rest of the table.".into()
-            } else {
-                "Not ready.".into()
-            };
         }
     }
 
@@ -1859,14 +1650,12 @@ fn draw_roster(
             let corner = seat
                 .player
                 .map_or_else(|| "no corner".into(), |p| format!("corner {p}"));
-            let status = if seat.ready { "ready" } else { "..." };
             let engine = if seat.engine { " (computer)" } else { "" };
             out.push_str(&format!(
-                "  {} {}  {}  {}{}\n",
+                "  {} {}  {}{}\n",
                 if seat.peer == me { ">" } else { " " },
                 seat.name,
                 corner,
-                status,
                 engine,
             ));
         }
@@ -1875,80 +1664,12 @@ fn draw_roster(
     out.push_str(if net.peers.is_empty() {
         "\nEnter starts this table locally.\nDigits 1-6 select a corner."
     } else {
-        "\nClaim a corner on the star; Space readies you; Enter starts for everyone."
+        "\nClaim a corner on the star; the host starts the game with Enter."
     });
     if !net.status.is_empty() {
         out.push_str(&format!("\n\n{}", net.status));
     }
     **text = out;
-}
-
-/// Draw the name input: the buffer with a caret while focused, the current
-/// name otherwise.
-fn draw_name(
-    net: Res<NetState>,
-    edit: Res<NameEdit>,
-    mut values: Query<(&mut Text, &InputText)>,
-    mut errors: Query<(&mut Text, &InputError), Without<InputText>>,
-) {
-    if !net.is_changed() && !edit.is_changed() {
-        return;
-    }
-    for (mut text, kind) in &mut values {
-        if kind.0 != FieldKind::Name {
-            continue;
-        }
-        **text = if edit.active {
-            format!("{}_", edit.buffer)
-        } else if net.name.is_empty() {
-            "(unnamed)".into()
-        } else {
-            net.name.clone()
-        };
-    }
-    for (mut text, kind) in &mut errors {
-        if kind.0 != FieldKind::Name {
-            continue;
-        }
-        **text = if edit.active && !edit.error.is_empty() {
-            edit.error.clone()
-        } else {
-            String::new()
-        };
-    }
-}
-
-/// Draw the room input: the buffer with a caret while focused, the current
-/// room otherwise; any commit error shows on the line beneath.
-fn draw_room(
-    room: Res<RoomId>,
-    edit: Res<RoomEdit>,
-    mut values: Query<(&mut Text, &InputText)>,
-    mut errors: Query<(&mut Text, &InputError), Without<InputText>>,
-) {
-    if !room.is_changed() && !edit.is_changed() {
-        return;
-    }
-    for (mut text, kind) in &mut values {
-        if kind.0 != FieldKind::Room {
-            continue;
-        }
-        **text = if edit.active {
-            format!("{}_", edit.buffer)
-        } else {
-            room.0.clone()
-        };
-    }
-    for (mut text, kind) in &mut errors {
-        if kind.0 != FieldKind::Room {
-            continue;
-        }
-        **text = if edit.active && !edit.error.is_empty() {
-            edit.error.clone()
-        } else {
-            String::new()
-        };
-    }
 }
 
 /// Keep the star's petals in step with the table/roster: colour, selection
@@ -2014,8 +1735,7 @@ fn draw_corner_labels(
             if seat.engine {
                 ("Engine".into(), "CPU".into())
             } else {
-                let sub = if seat.ready { "ready" } else { "..." };
-                (seat.name.clone(), sub.into())
+                (seat.name.clone(), "human".into())
             }
         } else {
             ("Empty".into(), "click to claim".into())
@@ -2045,189 +1765,6 @@ fn shade(c: Color, factor: f32) -> Color {
         (b * factor).min(1.0),
         a,
     )
-}
-
-/// Focus an input box: by clicking it, or with its key (`R` room, `N` name).
-/// Focusing one field unfocuses the others; each is seeded with its current
-/// value, so a small change does not mean retyping the whole thing.
-///
-/// Runs only while no field holds the keyboard — the modal rule. Leaving a
-/// field (Enter/Esc) is what frees the keys again.
-fn focus_input_fields(
-    buttons: Query<(&Interaction, &TextInput), Changed<Interaction>>,
-    keys: Res<ButtonInput<KeyCode>>,
-    room: Res<RoomId>,
-    mut net: ResMut<NetState>,
-    mut room_edit: ResMut<RoomEdit>,
-    mut name_edit: ResMut<NameEdit>,
-) {
-    let mut clicked: Option<FieldKind> = None;
-    for (interaction, input) in buttons.iter() {
-        if *interaction == Interaction::Pressed {
-            clicked = Some(input.0);
-        }
-    }
-
-    let focus_room = clicked == Some(FieldKind::Room) || keys.just_pressed(KeyCode::KeyR);
-    let focus_name = clicked == Some(FieldKind::Name) || keys.just_pressed(KeyCode::KeyN);
-    if !focus_room && !focus_name {
-        return;
-    }
-
-    room_edit.active = focus_room;
-    name_edit.active = focus_name && !focus_room;
-    if focus_room {
-        room_edit.buffer = room.0.clone();
-        room_edit.error.clear();
-    }
-    if focus_name {
-        name_edit.buffer = if net.name.is_empty() {
-            String::new()
-        } else {
-            net.name.clone()
-        };
-        name_edit.error.clear();
-    }
-    // The key (or click) that opened a field belongs to it, not to the
-    // systems chained after this one.
-    room_edit.consumed_input = true;
-    name_edit.consumed_input = true;
-    net.status = "Editing. Enter accepts, Esc cancels.".into();
-}
-
-/// Apply the room-name editor's keypresses, and rejoin on commit.
-///
-/// Changing the room means **reopening the socket**: the room is baked into the
-/// signaling URL, so editing [`RoomId`] alone would change the label and
-/// nothing else. Removing `MatchboxSocket` makes `open_socket` run again on the
-/// next entry to the lobby, and [`NetState::leave_room`] discards everything
-/// the old room's socket told us.
-pub fn edit_room(
-    mut commands: Commands,
-    mut keys: MessageReader<KeyboardInput>,
-    mut edit: ResMut<RoomEdit>,
-    mut room: ResMut<RoomId>,
-    mut net: ResMut<NetState>,
-    mut next_state: ResMut<NextState<AppState>>,
-) {
-    // Only ever true for the remainder of the frame that set it.
-    edit.consumed_input = false;
-
-    if !edit.active {
-        // Drain regardless: a buffered keypress from before the field opened
-        // must not appear in it later.
-        keys.clear();
-        return;
-    }
-
-    for event in keys.read() {
-        if event.state != ButtonState::Pressed {
-            continue;
-        }
-        // Whatever this key turns out to mean, it belonged to the field. Set
-        // before the match so that closing the field below cannot let the same
-        // press through to `handle_buttons` later in the chain.
-        edit.consumed_input = true;
-        match edit_action(event.key_code, event.text.as_deref()) {
-            EditAction::Insert(c) => {
-                if edit.buffer.chars().count() < RoomId::MAX_LEN {
-                    edit.buffer.push(c);
-                    edit.error.clear();
-                }
-            }
-            EditAction::Backspace => {
-                edit.buffer.pop();
-                edit.error.clear();
-            }
-            EditAction::Cancel => {
-                edit.active = false;
-                edit.buffer.clear();
-                edit.error.clear();
-            }
-            EditAction::Commit => match RoomId::parse(&edit.buffer) {
-                Ok(parsed) => {
-                    edit.active = false;
-                    edit.error.clear();
-                    if parsed == *room {
-                        // Same room: rejoining would drop the peers already here
-                        // for no reason.
-                        net.status = format!("Already in room \"{}\".", room.0);
-                        continue;
-                    }
-                    info!(from = %room.0, to = %parsed.0, "changing room");
-                    *room = parsed;
-                    // Publish the new room in the URL, so the address always
-                    // points where this peer is.
-                    crate::web::share_room(&room);
-                    net.leave_room();
-                    net.status = format!("Joining room \"{}\"...", room.0);
-                    // Drop the old socket and re-enter the lobby, which reopens
-                    // it against the new room.
-                    commands.remove_resource::<MatchboxSocket>();
-                    next_state.set(AppState::Lobby);
-                }
-                Err(why) => edit.error = why.to_string(),
-            },
-            EditAction::Ignore => {}
-        }
-    }
-}
-
-/// Apply the name editor's keypresses. Same classification as the room field,
-/// but committing writes the display name and re-greets: the roster is only
-/// ever exchanged on Hello, so a rename without a re-greet would leave every
-/// peer looking at the old name.
-pub fn edit_name(
-    mut keys: MessageReader<KeyboardInput>,
-    mut edit: ResMut<NameEdit>,
-    mut net: ResMut<NetState>,
-) {
-    edit.consumed_input = false;
-
-    if !edit.active {
-        keys.clear();
-        return;
-    }
-
-    for event in keys.read() {
-        if event.state != ButtonState::Pressed {
-            continue;
-        }
-        edit.consumed_input = true;
-        match edit_action(event.key_code, event.text.as_deref()) {
-            EditAction::Insert(c) => {
-                if edit.buffer.chars().count() < RoomId::MAX_LEN {
-                    edit.buffer.push(c);
-                    edit.error.clear();
-                }
-            }
-            EditAction::Backspace => {
-                edit.buffer.pop();
-                edit.error.clear();
-            }
-            EditAction::Cancel => {
-                edit.active = false;
-                edit.buffer.clear();
-                edit.error.clear();
-            }
-            EditAction::Commit => {
-                let trimmed = edit.buffer.trim().to_string();
-                if trimmed.is_empty() {
-                    edit.error = "A name cannot be empty.".into();
-                } else {
-                    edit.active = false;
-                    if trimmed != net.name {
-                        net.name = trimmed;
-                        // Re-greet everyone, so the roster carries the new name.
-                        net.greeted.clear();
-                        net.status = "Name updated.".into();
-                    }
-                    edit.buffer.clear();
-                }
-            }
-            EditAction::Ignore => {}
-        }
-    }
 }
 
 /// The camps that sit down in the current room: which corners are filled,
@@ -2303,12 +1840,11 @@ mod tests {
     use checkers_core::position::Player;
     use checkers_net::Seat;
 
-    fn seat(name: &str, player: Option<u32>, ready: bool) -> Seat {
+    fn seat(name: &str, player: Option<u32>) -> Seat {
         Seat {
             peer: name.into(),
             name: name.into(),
             player,
-            ready,
             spectate: false,
             engine: false,
         }
@@ -2350,33 +1886,13 @@ mod tests {
         }
     }
 
-    /// The host is told who it is waiting for.
-    #[test]
-    fn the_host_is_told_who_it_is_waiting_for() {
-        let mut net = NetState::default();
-        net.peers.push(fake_peer());
-        net.is_host = true;
-        net.seats = vec![seat("ada", Some(0), true), seat("grace", Some(3), false)];
-
-        match start_decision(&net, &Table::default()) {
-            StartDecision::Refuse(why) => {
-                assert!(why.contains("grace"), "should name who is not ready: {why}");
-                assert!(
-                    !why.contains("ada"),
-                    "should not name a ready player: {why}"
-                );
-            }
-            other => panic!("expected a refusal, got {other:?}"),
-        }
-    }
-
     /// Fewer than two claimed corners cannot start, whatever the readiness.
     #[test]
     fn a_shared_start_needs_two_claimed_corners() {
         let mut net = NetState::default();
         net.peers.push(fake_peer());
         net.is_host = true;
-        net.seats = vec![seat("ada", Some(0), true)];
+        net.seats = vec![seat("ada", Some(0))];
         assert!(
             matches!(
                 start_decision(&net, &Table::default()),
@@ -2387,28 +1903,26 @@ mod tests {
     }
 
     #[test]
-    fn the_host_starts_once_everyone_is_ready() {
+    fn the_host_starts_two_claimed_corners() {
         let mut net = NetState::default();
         net.peers.push(fake_peer());
         net.is_host = true;
-        net.seats = vec![seat("ada", Some(0), true), seat("grace", Some(3), true)];
+        net.seats = vec![seat("ada", Some(0)), seat("grace", Some(3))];
         assert_eq!(
             start_decision(&net, &Table::default()),
             StartDecision::Multiplayer
         );
     }
 
-    /// A claimed corner, a seat that needs no readiness: engines read as
-    /// ready from the moment they sit, and count toward the two claims.
+    /// A claimed corner plus an engine seat reaches the two-corner minimum.
     #[test]
     fn engines_count_toward_the_two_corners() {
         let mut net = NetState::default();
         net.peers.push(fake_peer());
         net.is_host = true;
-        net.seats = vec![seat("ada", Some(0), true)];
-        let mut engine = seat("engine-0", Some(3), false);
+        net.seats = vec![seat("ada", Some(0))];
+        let mut engine = seat("engine-0", Some(3));
         engine.engine = true;
-        engine.ready = true;
         net.seats.push(engine);
         assert_eq!(
             start_decision(&net, &Table::default()),
@@ -2421,7 +1935,7 @@ mod tests {
     #[test]
     fn the_start_message_carries_the_claimed_corners() {
         let net = NetState {
-            seats: vec![seat("ada", Some(3), true), seat("grace", Some(0), true)],
+            seats: vec![seat("ada", Some(3)), seat("grace", Some(0))],
             ..Default::default()
         };
         let NetMsg::Start { players, .. } = start_message(&net, Variants::default()) else {
@@ -2445,7 +1959,6 @@ mod tests {
         assert_eq!(effect, Ok(CornerEffect::AddEngine(2)));
         seat_engine_at(&mut net, 2);
         assert!(net.seats[0].engine);
-        assert!(net.seats[0].ready, "an engine must never block a start");
         assert_eq!(net.seats[0].player, Some(2));
 
         // The host removes it again.
@@ -2496,7 +2009,7 @@ mod tests {
     fn an_occupied_corner_is_not_claimable() {
         let mut net = NetState::default();
         net.peers.push(fake_peer());
-        net.seats = vec![seat("ada", Some(2), true)];
+        net.seats = vec![seat("ada", Some(2))];
         let err = corner_effect(&net, "grace", 2, CornerCommand::Human).expect_err("taken");
         assert!(err.contains("ada"), "must name the holder: {err}");
     }
@@ -2507,7 +2020,7 @@ mod tests {
     fn releasing_my_own_corner() {
         let mut net = NetState::default();
         net.peers.push(fake_peer());
-        net.seats = vec![seat("ada", Some(2), true)];
+        net.seats = vec![seat("ada", Some(2))];
         assert_eq!(
             corner_effect(&net, "ada", 2, CornerCommand::Off),
             Ok(CornerEffect::Claim(None))
@@ -2581,27 +2094,6 @@ mod tests {
         assert_eq!(corner_from_keys(&keys, None), None);
     }
 
-    #[test]
-    fn ordinary_characters_are_inserted() {
-        for (key, text, want) in [
-            (KeyCode::KeyA, Some("a"), 'a'),
-            (KeyCode::KeyZ, Some("Z"), 'Z'),
-            (KeyCode::Digit4, Some("4"), '4'),
-            (KeyCode::Minus, Some("-"), '-'),
-            (KeyCode::KeyY, Some("z"), 'z'),
-        ] {
-            assert_eq!(edit_action(key, text), EditAction::Insert(want));
-        }
-    }
-
-    #[test]
-    fn the_editing_keys_are_recognised() {
-        assert_eq!(edit_action(KeyCode::Enter, None), EditAction::Commit);
-        assert_eq!(edit_action(KeyCode::NumpadEnter, None), EditAction::Commit);
-        assert_eq!(edit_action(KeyCode::Escape, None), EditAction::Cancel);
-        assert_eq!(edit_action(KeyCode::Backspace, None), EditAction::Backspace);
-    }
-
     /// The deal must run on the configured corners: `apply_seats` rebuilds the
     /// session from them, and a session built for two corners must not be
     /// holding a board nobody set up. Solo setups read the local table; the
@@ -2641,7 +2133,7 @@ mod tests {
         net.peers = vec![me, fake_peer()];
         net.is_host = true;
         let host = me.to_string();
-        net.seats = vec![seat(&host, Some(0), true), seat("grace", Some(3), true)];
+        net.seats = vec![seat(&host, Some(0)), seat("grace", Some(3))];
         let mut table = Table::default();
         table.0[5] = CornerState::Cpu;
 
@@ -2741,7 +2233,7 @@ mod tests {
         let me = PeerId(uuid::Uuid::from_u128(1));
         net.my_id = Some(me);
         net.peers = vec![me, fake_peer()];
-        net.seats = vec![seat(&me.to_string(), None, false)];
+        net.seats = vec![seat(&me.to_string(), None)];
         assert_eq!(
             sector_click(&net, &me.to_string(), 5),
             SectorClick::Claim(5)
@@ -2758,10 +2250,10 @@ mod tests {
         net.my_id = Some(me);
         net.peers = vec![me, other];
         net.seats = vec![
-            seat(&me.to_string(), Some(2), false),
+            seat(&me.to_string(), Some(2)),
             Seat {
                 engine: true,
-                ..seat("bot", Some(4), true)
+                ..seat("bot", Some(4))
             },
         ];
         let me = me.to_string();
@@ -2776,46 +2268,29 @@ mod tests {
         }
     }
 
-    /// An elsewhere-click — on a bare button or on no UI at all — closes the
-    /// focused field; clicking a field itself never does.
+    /// The host can un-seat another player's corner; a guest cannot touch a
+    /// corner held by someone else.
     #[test]
-    fn an_elsewhere_click_closes_the_focused_field() {
-        use bevy::ecs::system::RunSystemOnce;
+    fn the_host_unseats_a_player() {
+        let mut net = NetState::default();
+        net.peers.push(fake_peer());
+        net.is_host = true;
+        let host = "host";
+        net.seats = vec![seat(host, Some(0)), seat("grace", Some(3))];
 
-        let mut world = World::new();
-        world.init_resource::<ButtonInput<MouseButton>>();
-        world.init_resource::<RoomEdit>();
-        world.init_resource::<NameEdit>();
-        world.resource_mut::<RoomEdit>().active = true;
-
-        // A press on a bare button (a stand-in: the star hit area, the ready
-        // button) is an elsewhere-click.
-        world
-            .resource_mut::<ButtonInput<MouseButton>>()
-            .press(MouseButton::Left);
-        world.spawn((Button, Interaction::Pressed));
-        world.run_system_once(blur_on_elsewhere_click).unwrap();
-        assert!(
-            !world.resource::<RoomEdit>().active,
-            "clicking outside the fields must close the focused one"
+        assert_eq!(
+            corner_effect(&net, host, 3, CornerCommand::Off),
+            Ok(CornerEffect::Unseat(3)),
+            "the host un-seats anyone"
+        );
+        assert_eq!(
+            corner_effect(&net, host, 0, CornerCommand::Off),
+            Ok(CornerEffect::Claim(None)),
+            "releasing one's own corner is a release, not an un-seat"
         );
 
-        // A press on a text field is not "elsewhere": focus survives it.
-        world.resource_mut::<RoomEdit>().active = true;
-        world
-            .resource_mut::<ButtonInput<MouseButton>>()
-            .press(MouseButton::Left);
-        world.spawn((Button, Interaction::Pressed, TextInput(FieldKind::Name)));
-        world.run_system_once(blur_on_elsewhere_click).unwrap();
-        assert!(
-            world.resource::<RoomEdit>().active,
-            "a click on a field is not an elsewhere-click"
-        );
-
-        // No left press this frame, no blur — a mere hover is not a dismissal.
-        world.resource_mut::<ButtonInput<MouseButton>>().clear();
-        world.spawn((Button, Interaction::Hovered));
-        world.run_system_once(blur_on_elsewhere_click).unwrap();
-        assert!(world.resource::<RoomEdit>().active);
+        net.is_host = false;
+        let effect = corner_effect(&net, "grace", 0, CornerCommand::Off);
+        assert!(effect.is_err(), "a guest cannot un-seat another player");
     }
 }

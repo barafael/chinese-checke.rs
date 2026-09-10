@@ -282,14 +282,6 @@ fn wait_roster_agreement(apps: &mut [App], timeout: Duration) -> bool {
     })
 }
 
-/// Wait until every seated corner on every instance is ready.
-fn wait_all_seated_ready(apps: &mut [App], timeout: Duration) -> bool {
-    wait_for(apps, timeout, |apps| {
-        apps.iter()
-            .all(|a| net(a).seats.iter().all(|s| s.player.is_none() || s.ready))
-    })
-}
-
 /// Wait until every instance has entered the game.
 fn wait_in_game(apps: &mut [App], timeout: Duration) -> bool {
     wait_for(apps, timeout, |apps| apps.iter().all(in_game))
@@ -383,15 +375,7 @@ fn two_instances_share_one_engine_table() {
         fmt_roster(net(&apps[guest_i]))
     ));
 
-    // Both sides ready up; the host starts.
-    for app in apps.iter_mut() {
-        press(app, KeyCode::Space);
-    }
-    let ready = wait_all_seated_ready(&mut apps, Duration::from_secs(30));
-    assert!(ready, "readiness never converged: {}", describe(&apps));
-    log(&format!(
-        "[{host_name}] everyone is ready; starting the game"
-    ));
+    // The host just starts; readiness is not part of the setup any more.
     press(&mut apps[host_i], KeyCode::Enter);
 
     let started = wait_in_game(&mut apps, Duration::from_secs(30));
@@ -514,13 +498,8 @@ fn three_instances_criss_cross() {
     let engine_seats: usize = net(&apps[0]).seats.iter().filter(|s| s.engine).count();
     assert_eq!(engine_seats, 1, "exactly one engine, seated by the host");
 
-    for app in apps.iter_mut() {
-        press(app, KeyCode::Space);
-    }
-    let ready = wait_all_seated_ready(&mut apps, Duration::from_secs(30));
-    assert!(ready, "readiness never converged: {}", describe(&apps));
     let host_name = net(&apps[host_i]).name.clone();
-    log(&format!("[{host_name}] everyone is ready; starting."));
+    log(&format!("[{host_name}] starting."));
     press(&mut apps[host_i], KeyCode::Enter);
 
     let started = wait_in_game(&mut apps, Duration::from_secs(30));
@@ -669,12 +648,6 @@ fn a_spectator_watches_the_pair() {
         describe(&apps)
     );
 
-    // Only the seated peers ready; the spectator stays a spectator.
-    for app in apps.iter_mut() {
-        press(app, KeyCode::Space);
-    }
-    let ready = wait_all_seated_ready(&mut apps, Duration::from_secs(30));
-    assert!(ready, "readiness never converged: {}", describe(&apps));
     press(&mut apps[host_i], KeyCode::Enter);
 
     let started = wait_in_game(&mut apps, Duration::from_secs(30));

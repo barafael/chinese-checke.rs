@@ -25,9 +25,9 @@ use serde::{Deserialize, Serialize};
 /// `MATCHBOX_SERVER`.
 ///
 /// The default is omdurman's shared deployment — its room namespace is not
-/// ours, so pick a room ([`RoomId::DEFAULT`]) and point `MATCHBOX_SERVER` at
-/// your own `matchbox_server` for anything beyond local testing. Only
-/// peer-introduction traffic crosses it; game moves are peer-to-peer.
+/// ours, so point `MATCHBOX_SERVER` at your own `matchbox_server` for anything
+/// beyond local testing. Only peer-introduction traffic crosses it; game moves
+/// are peer-to-peer.
 pub const SIGNALING_SERVER: &str = match option_env!("MATCHBOX_SERVER") {
     Some(s) => s,
     None => "wss://omdurman-matchbox.fly.dev",
@@ -100,16 +100,14 @@ pub struct Seat {
     /// claim the peer made. `None` until then, and for spectators and engines
     /// that have not claimed a corner.
     pub player: Option<u32>,
-    pub ready: bool,
-    /// Spectators watch the game and touch nothing: no camp, no ready flag,
-    /// no voice in when it starts. A seat that claimed no corner is a
-    /// spectator in effect, but this field is the *declared* choice.
+    /// Spectators watch the game and touch nothing: no camp and no voice in
+    /// when it starts. A seat that claimed no corner is a spectator in
+    /// effect, but this field is the *declared* choice.
     #[serde(default)]
     pub spectate: bool,
-    /// A seat the host gave to an engine rather than a peer. It claims a
-    /// corner and reads as ready like anyone else; only the host's engine
-    /// actually plays it, and its moves reach the table as ordinary sequenced
-    /// moves — no privileged path.
+    /// A seat the host gave to an engine rather than a peer. Only the host's
+    /// engine actually plays it, and its moves reach the table as ordinary
+    /// sequenced moves — no privileged path.
     #[serde(default)]
     pub engine: bool,
 }
@@ -125,8 +123,6 @@ pub enum NetMsg {
     Hello { name: String },
     /// Host -> all: the full lobby roster, whenever it changes.
     Roster(Vec<Seat>),
-    /// Guest -> host: toggle my ready flag.
-    Ready(bool),
     /// Guest -> host: claim a corner, or release the one I hold. `Some(i)` is
     /// a claim of camp `i`; `None` relinquishes whatever the sender held. The
     /// host grants it only if the corner is free — or held by the sender — and
@@ -283,29 +279,17 @@ impl core::fmt::Display for RoomIdError {
 
 impl core::error::Error for RoomIdError {}
 
-/// The room to join. Peers sharing a room id find each other.
+/// The room to join. Peers sharing a room id find each other. It comes from
+/// the URL (a share link, or a fresh generated room) — never typed at runtime.
 #[derive(Resource, Clone, Debug, PartialEq, Eq)]
 pub struct RoomId(pub String);
 
-impl Default for RoomId {
-    fn default() -> Self {
-        // Namespaced, because the default signaling server is shared with other
-        // projects. The bare name `checkers` collided with live sessions there:
-        // two unrelated peers joined, this build lost the host election, and it
-        // sat in the lobby forever waiting for a `Start` that those peers — a
-        // different game entirely — were never going to send.
-        Self(Self::DEFAULT.into())
-    }
-}
-
 impl RoomId {
-    pub const DEFAULT: &'static str = "chinese-checkers-rs-v1";
-
     /// Long enough for a descriptive name, short enough to type and to read
     /// back to someone over the phone.
     pub const MAX_LEN: usize = 40;
 
-    /// Validate a room name typed by the player.
+    /// Validate a room name handed over by a share link.
     ///
     /// The name is interpolated into the signaling URL's path, so it is
     /// restricted to characters that need no escaping: letters, digits, `-` and
@@ -497,16 +481,6 @@ mod room_tests {
     use super::*;
 
     #[test]
-    fn the_default_room_is_valid() {
-        assert_eq!(
-            RoomId::parse(RoomId::DEFAULT),
-            Ok(RoomId(RoomId::DEFAULT.into())),
-            "the default must survive its own validator"
-        );
-        assert_eq!(RoomId::default().0, RoomId::DEFAULT);
-    }
-
-    #[test]
     fn ordinary_names_are_accepted() {
         for name in ["a", "game", "Room_7", "my-game-2", "ABC123"] {
             assert!(RoomId::parse(name).is_ok(), "{name} should be accepted");
@@ -588,7 +562,6 @@ mod room_tests {
                 peer: "p".into(),
                 name: "p".into(),
                 player: Some(0),
-                ready: true,
                 spectate: false,
                 engine: false,
             }],

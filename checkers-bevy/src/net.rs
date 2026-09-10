@@ -81,7 +81,6 @@ pub fn pump(
             | NetMsg::Claim(_)
             | NetMsg::Hello { .. }
             | NetMsg::Roster(_)
-            | NetMsg::Ready(_)
             | NetMsg::Cursor { .. }
             | NetMsg::Variants { .. }
             | NetMsg::Start { .. } => {}
