@@ -184,19 +184,27 @@ pub fn plugin(app: &mut App) {
         .add_systems(
             Update,
             (
-                elect_host,
-                pump_socket,
-                // First, and the rest are suppressed while a field holds the
-                // keyboard: typing a name must not also start a game on the
-                // Enter that commits it.
-                (edit_room, edit_name, edit_corner),
-                focus_input_fields.run_if(not_editing),
-                (select_corner, handle_buttons).run_if(not_editing),
-                // The modal's exit: an elsewhere-click closes the focused
-                // field, while `not_editing` keeps this frame's click from
-                // also acting on whatever was clicked.
-                blur_on_elsewhere_click.run_if(in_state(AppState::Lobby)),
-                broadcast_cursor.run_if(in_state(AppState::Lobby)),
+                // Lobby machinery stays out of the game: ungated, `pump_socket`
+                // raced `net::pump` for the same socket and a stray key in a
+                // game opened an invisible text field. Everything here is
+                // lobby furniture.
+                (
+                    elect_host,
+                    pump_socket,
+                    // First, and the rest are suppressed while a field holds
+                    // the keyboard: typing a name must not also start a game
+                    // on the Enter that commits it.
+                    (edit_room, edit_name, edit_corner),
+                    focus_input_fields.run_if(not_editing),
+                    (select_corner, handle_buttons).run_if(not_editing),
+                    // The modal's exit: an elsewhere-click closes the focused
+                    // field, while `not_editing` keeps this frame's click from
+                    // also acting on whatever was clicked.
+                    blur_on_elsewhere_click,
+                    broadcast_cursor,
+                )
+                    .chain()
+                    .run_if(in_state(AppState::Lobby)),
                 (
                     sync_button_styles,
                     sync_input_styles,

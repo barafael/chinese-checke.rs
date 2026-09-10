@@ -89,12 +89,19 @@ fn main() {
         .init_resource::<AiStrength>()
         .init_resource::<AiPace>()
         .init_resource::<replay::Replay>()
+        .init_resource::<AppliedStyle>()
         .add_plugins(lobby::plugin)
         .add_plugins(sound::plugin)
         .add_systems(Startup, setup)
         // Not state-scoped: the lobby is the first thing shown, and it is the
         // screen whose buttons the old size hid.
         .add_systems(Update, (size_to_monitor, scale_ui_to_window))
+        .add_systems(
+            OnExit(AppState::InGame),
+            // The menu is a full teardown: the next deal rebuilds the board
+            // and the UI from nothing.
+            exit_round_teardown,
+        )
         .add_systems(
             OnEnter(AppState::InGame),
             // Only the UI is spawned here. The board visuals are spawned by
@@ -130,6 +137,8 @@ fn main() {
                     // keys do the same for exactly that time.
                     replay::handle_view_keys,
                     handle_keys,
+                    // The game-over card's way out, next to its `M` key.
+                    exit_to_lobby,
                     ai_one_shot,
                     board_style::handle_style_key,
                     // Spawns the board for the current style on entry, and
@@ -220,6 +229,12 @@ struct TurnText;
 #[derive(Component)]
 struct GameOverUi;
 
+/// A root of the in-game UI (status column, turn controls). Marks what
+/// leaving to the lobby must tear down; the game-over card has its own
+/// marker and goes with it.
+#[derive(Component)]
+struct HudUi;
+
 /// Board rings marking the active player's home camp.
 #[derive(Component)]
 struct CampMarker;
@@ -249,6 +264,9 @@ enum ControlButton {
     Open,
     /// Open a `.cchkrs` record and walk through it.
     Replay,
+    /// Hand the finished round back to the lobby. Lives on the game-over
+    /// card, next to the `M` key that does the same.
+    Menu,
 }
 
 /// Size the window to two thirds of the monitor and centre it.
@@ -358,14 +376,17 @@ fn spawn_ui(mut commands: Commands) {
     // Bottom-left column: the active-base indicator (colour swatch + label)
     // above the status text.
     commands
-        .spawn(Node {
-            position_type: PositionType::Absolute,
-            bottom: Val::Px(10.0),
-            left: Val::Px(12.0),
-            flex_direction: FlexDirection::Column,
-            row_gap: Val::Px(3.0),
-            ..default()
-        })
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                bottom: Val::Px(10.0),
+                left: Val::Px(12.0),
+                flex_direction: FlexDirection::Column,
+                row_gap: Val::Px(3.0),
+                ..default()
+            },
+            HudUi,
+        ))
         .with_children(|col| {
             col.spawn(Node {
                 flex_direction: FlexDirection::Row,
@@ -407,13 +428,16 @@ fn spawn_ui(mut commands: Commands) {
 
     // Turn controls, top right: Confirm, Cancel, Resign.
     commands
-        .spawn(Node {
-            position_type: PositionType::Absolute,
-            top: Val::Px(10.0),
-            right: Val::Px(12.0),
-            column_gap: Val::Px(8.0),
-            ..default()
-        })
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                top: Val::Px(10.0),
+                right: Val::Px(12.0),
+                column_gap: Val::Px(8.0),
+                ..default()
+            },
+            HudUi,
+        ))
         .with_children(|row| {
             for (which, label) in [
                 (ControlButton::Confirm, "Confirm (Enter)"),
@@ -451,21 +475,26 @@ fn spawn_ui(mut commands: Commands) {
 ///
 /// This is the whole switch mechanism: board state is never touched, and the
 /// sync systems rebuild pieces and highlights from the unchanged session in
-/// the new style the same frame. A `Local` tracker rather than
-/// `is_changed()` makes first entry deterministic.
+/// the new style the same frame. A resource tracker rather than a `Local`
+/// makes first entry deterministic — and lets [`exit_round_teardown`] clear
+/// it, so a re-entry rebuilds a board the teardown had despawned instead of
+/// mistaking the cleared screen for the current style.
+#[derive(Resource, Default)]
+struct AppliedStyle(Option<BoardStyle>);
+
 fn apply_style(
     style: Res<BoardStyle>,
-    mut applied: Local<Option<BoardStyle>>,
+    mut applied: ResMut<AppliedStyle>,
     visuals: Query<Entity, With<BoardVisual>>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
     mut std_materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    if *applied == Some(*style) {
+    if applied.0 == Some(*style) {
         return;
     }
-    *applied = Some(*style);
+    applied.0 = Some(*style);
 
     for e in &visuals {
         commands.entity(e).despawn();
@@ -493,6 +522,28 @@ fn apply_style(
             spawn_amalah_board(&mut commands, &mut meshes, &mut std_materials);
         }
     }
+}
+
+/// Leaving the round tears down everything the round owns: the board visuals
+/// (the style system rebuilds them, tracker cleared, on the next deal), the
+/// in-game UI, the game-over card, and the record viewer — which otherwise
+/// would re-open its overlay in the middle of the next round.
+fn exit_round_teardown(
+    mut commands: Commands,
+    visuals: Query<Entity, With<BoardVisual>>,
+    hud: Query<Entity, With<HudUi>>,
+    over: Query<Entity, With<GameOverUi>>,
+    viewer: Option<ResMut<replay::ReplayView>>,
+    mut applied: ResMut<AppliedStyle>,
+) {
+    for e in visuals.iter().chain(hud.iter()).chain(over.iter()) {
+        commands.entity(e).despawn();
+    }
+    if viewer.is_some() {
+        commands.remove_resource::<replay::ReplayView>();
+    }
+    commands.remove_resource::<board_amlah::AmlahAssets>();
+    applied.0 = None;
 }
 
 /// The classic board: one entity per hole, exactly as it has always been.
@@ -646,8 +697,29 @@ fn handle_buttons(
                 },
                 Err(e) => session.message = format!("Replay failed: {e}"),
             },
+            // Handled by [`exit_to_lobby`], which must not be gated on
+            // `may_act` — a finished game leaves the turn wherever it ended.
+            ControlButton::Menu => {}
         }
     }
+}
+
+/// The way out of a finished round: the game-over card's `Menu` button, or
+/// the `M` key once the game is over. Both hand the state back to the lobby;
+/// [`exit_round_teardown`] on the exit transition clears the screen.
+fn exit_to_lobby(
+    keys: Res<ButtonInput<KeyCode>>,
+    buttons: Query<(&Interaction, &ControlButton), Changed<Interaction>>,
+    session: Res<Session>,
+    mut next_state: ResMut<NextState<AppState>>,
+) {
+    let pressed = buttons.iter().any(|(interaction, which)| {
+        *interaction == Interaction::Pressed && *which == ControlButton::Menu
+    });
+    if !pressed && !(keys.just_pressed(KeyCode::KeyM) && session.game.is_over()) {
+        return;
+    }
+    next_state.set(AppState::Lobby);
 }
 
 /// Fingers being tracked for a tap, and the feed they come from: a release
@@ -1456,14 +1528,41 @@ fn sync_game_over(
                         TextColor(Color::srgb(0.72, 0.72, 0.78)),
                     ));
                 }
-                panel.spawn((
-                    Text::new("Press R for a new game"),
-                    TextFont {
-                        font_size: FontSize::Px(13.0),
+                panel
+                    .spawn(Node {
+                        column_gap: Val::Px(10.0),
+                        align_items: AlignItems::Center,
+                        margin: UiRect::top(Val::Px(6.0)),
                         ..default()
-                    },
-                    TextColor(Color::srgb(0.62, 0.62, 0.68)),
-                ));
+                    })
+                    .with_children(|row| {
+                        row.spawn((
+                            Button,
+                            Node {
+                                padding: UiRect::axes(Val::Px(12.0), Val::Px(7.0)),
+                                border_radius: BorderRadius::all(Val::Px(4.0)),
+                                ..default()
+                            },
+                            BackgroundColor(Color::srgb(0.18, 0.18, 0.21)),
+                            ControlButton::Menu,
+                        ))
+                        .with_child((
+                            Text::new("Menu (M)"),
+                            TextFont {
+                                font_size: FontSize::Px(13.0),
+                                ..default()
+                            },
+                            TextColor(Color::srgb(0.9, 0.9, 0.92)),
+                        ));
+                        row.spawn((
+                            Text::new("R deals a new game"),
+                            TextFont {
+                                font_size: FontSize::Px(13.0),
+                                ..default()
+                            },
+                            TextColor(Color::srgb(0.62, 0.62, 0.68)),
+                        ));
+                    });
             });
         });
 }
