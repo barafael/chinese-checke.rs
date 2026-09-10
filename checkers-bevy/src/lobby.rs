@@ -866,16 +866,13 @@ fn input_box(parent: &mut ChildSpawnerCommands, kind: FieldKind) {
 const STAR_W: f32 = 420.0;
 const STAR_H: f32 = 360.0;
 
-/// Wedge geometry: each corner is an out-facing triangle sector, base at
-/// [`WEDGE_INNER`] from the centre, apex at [`WEDGE_OUTER`] — the tip points
-/// away from the star, like a short stubby ray, and the
-/// [`WEDGE_HALF_ANGLE_DEG`] spread keeps a gap between neighbouring wedges.
-/// The inner radius is what leaves the middle of the star empty and readable
-/// instead of covered by six overlapping rectangles; the labels may overhang
-/// the short wedges.
-const WEDGE_INNER: f32 = 118.0;
+/// Wedge geometry: each corner is an **equilateral** triangle pointing
+/// outward, like the board's camp triangles. With the apex at
+/// [`WEDGE_OUTER`] on the camp's axis and the base corners on the ±30° rays
+/// at `WEDGE_OUTER / √3`, the triangle is exactly equilateral and the six
+/// wedges meet corner-to-corner in a rosette — the star's silhouette — while
+/// the middle stays open. Labels may overhang the wedges.
 const WEDGE_OUTER: f32 = 175.0;
-const WEDGE_HALF_ANGLE_DEG: f32 = 26.0;
 
 /// Corner `i`'s direction, in container coordinates (y down), so the angle
 /// arithmetic matches [`Window::cursor_position`] directly.
@@ -884,19 +881,18 @@ fn wedge_angle(i: usize) -> f32 {
 }
 
 /// The three corners of corner `i`'s wedge, in container-local pixels: the
-/// outward tip first, then the two base corners near the star.
+/// outward tip first, then the two base corners. Apex on the axis at
+/// [`WEDGE_OUTER`], base corners on the ±30° rays at `WEDGE_OUTER / √3` —
+/// the arrangement that makes the triangle equilateral.
 fn wedge_vertices(i: usize) -> [Vec2; 3] {
     let t = wedge_angle(i);
-    let beta = WEDGE_HALF_ANGLE_DEG.to_radians();
+    let beta = 30f32.to_radians();
     let centre = Vec2::new(STAR_W / 2.0, STAR_H / 2.0);
-    let dir = Vec2::new(t.cos(), t.sin());
-    let left = Vec2::new((t + beta).cos(), (t + beta).sin());
-    let right = Vec2::new((t - beta).cos(), (t - beta).sin());
-    [
-        centre + WEDGE_OUTER * dir,
-        centre + WEDGE_INNER * left,
-        centre + WEDGE_INNER * right,
-    ]
+    let apex = centre + WEDGE_OUTER * Vec2::new(t.cos(), t.sin());
+    let base_r = WEDGE_OUTER / 3.0f32.sqrt();
+    let left = centre + base_r * Vec2::new((t - beta).cos(), (t - beta).sin());
+    let right = centre + base_r * Vec2::new((t + beta).cos(), (t + beta).sin());
+    [apex, left, right]
 }
 
 /// Which side of the line `a -> b` the point `p` is on, as a signed area.
@@ -2805,6 +2801,26 @@ mod tests {
         let angle = (-60.0f32).to_radians();
         let between = centre + 120.0 * Vec2::new(angle.cos(), angle.sin());
         assert_eq!(sector_at(normalized_of(between)), None);
+    }
+
+    /// The wedges are equilateral, like the board's camp triangles: all three
+    /// sides equal, and the tip the outermost point of its wedge.
+    #[test]
+    fn the_wedges_are_equilateral() {
+        let centre = vec2(STAR_W / 2.0, STAR_H / 2.0);
+        for i in 0..6 {
+            let [apex, left, right] = wedge_vertices(i);
+            let side = left.distance(right);
+            assert!(
+                (apex.distance(left) - side).abs() < 1e-3
+                    && (apex.distance(right) - side).abs() < 1e-3,
+                "wedge {i} is not equilateral"
+            );
+            assert!(
+                apex.distance(centre) > left.distance(centre),
+                "wedge {i}'s tip must face outward"
+            );
+        }
     }
 
     /// The rasterized wedge is opaque inside the triangle and transparent at
