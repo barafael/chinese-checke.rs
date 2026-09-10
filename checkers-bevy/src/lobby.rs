@@ -24,10 +24,9 @@
 //!
 //! # Choosing the room
 //!
-//! `R` opens the room field; Enter joins, Esc cancels. Changing the room
-//! **reopens the socket**, because the room is part of the signaling URL — see
-//! [`edit_room`]. Fields are modal, and every other key is suppressed while
-//! one holds the keyboard.
+//! The room is not chosen in the app: it lives in the page's URL, and the
+//! lobby shows it so the link can be shared. A bare page is redirected to a
+//! fresh generated room before the lobby ever opens.
 //!
 //! # Host election
 //!
@@ -1361,7 +1360,7 @@ fn send_claim(
 ///
 /// A system of its own rather than a branch of [`handle_buttons`] so a headless
 /// test can drive corner selection without a socket. The star has one button;
-/// the wedge under the cursor is resolved by angle in [`sector_at`].
+/// the wedge under the cursor is resolved by angle in `sector_at`.
 #[allow(clippy::type_complexity)]
 pub fn select_corner(
     mut hit: Query<(&Interaction, &RelativeCursorPosition), (With<StarHit>, Changed<Interaction>)>,
