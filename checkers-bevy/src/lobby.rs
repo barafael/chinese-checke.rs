@@ -188,9 +188,10 @@ pub fn plugin(app: &mut App) {
                 (
                     sync_button_styles,
                     // Host-only and solo-only rows fold away for the players
-                    // who could not use them.
+                    // who could not use them; the corner rows follow the
+                    // selection.
                     sync_host_rows,
-                    sync_corner_settings,
+                    sync_corner_actions,
                     hover_corner,
                     // The wedge tint follows the state, and the labels follow
                     // the roster; both after the hover is settled this frame.
@@ -425,57 +426,75 @@ fn spawn(mut commands: Commands, art: Res<SectorArt>, net: Res<NetState>, room: 
                     }
                 });
 
-                // The claimed corner's settings. In a shared room these exist
-                // only once a corner is claimed — clicking an empty wedge is
-                // the claim — so [`sync_corner_settings`] folds them away
-                // until then.
-                col.spawn((
-                    Node {
-                        flex_direction: FlexDirection::Column,
-                        align_items: AlignItems::Center,
-                        row_gap: Val::Px(10.0),
-                        ..default()
-                    },
-                    CornerSettings,
-                ))
-                .with_children(|corner| {
-                    // What to do with the selected corner. Seating an engine
-                    // is the host's call alone — the engine runs in the
-                    // host's process — so guests never see the button.
-                    corner
-                        .spawn(Node {
-                            column_gap: Val::Px(10.0),
-                            align_items: AlignItems::Center,
-                            ..default()
-                        })
-                        .with_children(|row| {
-                            button(
-                                row,
-                                "Human",
-                                LobbyButton::CornerAction(CornerCommand::Human),
-                            );
-                            row.spawn((
-                                Button,
+                // What to do with the selected corner. [`sync_corner_actions`]
+                // shows exactly one of these rows: a free corner offers
+                // seating, a claimed corner offers cancelling it.
+                col.spawn((Node {
+                    flex_direction: FlexDirection::Column,
+                    align_items: AlignItems::Center,
+                    row_gap: Val::Px(10.0),
+                    ..default()
+                },))
+                    .with_children(|corner| {
+                        // Seat a free corner. Seating an engine is the host's
+                        // call alone — the engine runs in the host's process —
+                        // so guests never see the button.
+                        corner
+                            .spawn((
                                 Node {
-                                    padding: UiRect::axes(Val::Px(10.0), Val::Px(6.0)),
-                                    border_radius: BorderRadius::all(Val::Px(5.0)),
+                                    column_gap: Val::Px(10.0),
+                                    align_items: AlignItems::Center,
                                     ..default()
                                 },
-                                BackgroundColor(IDLE),
-                                LobbyButton::CornerAction(CornerCommand::Cpu),
-                                HostOnly,
+                                SeatButtons,
                             ))
-                            .with_child((
-                                Text::new("Computer"),
-                                TextFont {
-                                    font_size: FontSize::Px(14.0),
+                            .with_children(|row| {
+                                button(
+                                    row,
+                                    "Human",
+                                    LobbyButton::CornerAction(CornerCommand::Human),
+                                );
+                                row.spawn((
+                                    Button,
+                                    Node {
+                                        padding: UiRect::axes(Val::Px(10.0), Val::Px(6.0)),
+                                        border_radius: BorderRadius::all(Val::Px(5.0)),
+                                        ..default()
+                                    },
+                                    BackgroundColor(IDLE),
+                                    LobbyButton::CornerAction(CornerCommand::Cpu),
+                                    HostOnly,
+                                ))
+                                .with_child((
+                                    Text::new("Computer"),
+                                    TextFont {
+                                        font_size: FontSize::Px(14.0),
+                                        ..default()
+                                    },
+                                    TextColor(Color::srgb(0.9, 0.9, 0.92)),
+                                ));
+                            });
+
+                        // Cancel a claimed corner — yours (release), another
+                        // player's (host un-seats), or an engine's (host removes
+                        // it). [`corner_effect`] picks the right move.
+                        corner
+                            .spawn((
+                                Node {
+                                    column_gap: Val::Px(10.0),
+                                    align_items: AlignItems::Center,
                                     ..default()
                                 },
-                                TextColor(Color::srgb(0.9, 0.9, 0.92)),
-                            ));
-                            button(row, "Empty", LobbyButton::CornerAction(CornerCommand::Off));
-                        });
-                });
+                                CancelSeat,
+                            ))
+                            .with_children(|row| {
+                                button(
+                                    row,
+                                    "Cancel Seat",
+                                    LobbyButton::CornerAction(CornerCommand::Off),
+                                );
+                            });
+                    });
 
                 // House rules, one toggle per switch. Only the host decides
                 // them, so only the host even sees them.
@@ -535,24 +554,53 @@ fn spawn(mut commands: Commands, art: Res<SectorArt>, net: Res<NetState>, room: 
         });
 }
 
-/// Marker on the corner-settings group that only makes sense once this peer
-/// holds a corner of its own.
+/// Marker on the Human / Computer row: shown while the selected corner is
+/// free, so it offers seating.
 #[derive(Component)]
-struct CornerSettings;
+struct SeatButtons;
 
-/// Fold the corner settings away until they can do something: in a shared
-/// room, a peer that claims nothing only watches, so its corner controls would
-/// be a row of refusals. `Display::None` rather than hidden visibility, so no
-/// dead gap is left behind.
-fn sync_corner_settings(net: Res<NetState>, mut groups: Query<&mut Node, With<CornerSettings>>) {
-    let wanted = if net.peers.is_empty() || net.my_seat().is_some_and(|s| s.player.is_some()) {
-        Display::Flex
-    } else {
-        Display::None
-    };
-    for mut node in groups.iter_mut() {
-        if node.display != wanted {
-            node.display = wanted;
+/// Marker on the Cancel Seat row: shown while the selected corner is claimed.
+#[derive(Component)]
+struct CancelSeat;
+
+/// Show exactly one of the two corner rows, according to the selected corner:
+/// a free corner offers seating, a claimed corner offers cancelling it. With
+/// nothing selected both fold away — an empty star has nothing to act on, and
+/// a guest that claimed nothing is a spectator to the sidebar.
+fn sync_corner_actions(
+    net: Res<NetState>,
+    table: Res<Table>,
+    selected: Res<SelectedCorner>,
+    mut seat_rows: Query<&mut Visibility, With<SeatButtons>>,
+    mut cancel_rows: Query<&mut Visibility, With<CancelSeat>>,
+) {
+    let solo = net.peers.is_empty();
+    let claimed = selected.0.is_some_and(|i| {
+        if solo {
+            table.0[i] != CornerState::Empty
+        } else {
+            net.seats.iter().any(|s| s.player == Some(i as u32))
+        }
+    });
+    let seat_wanted = selected.0.is_some() && !claimed;
+    for mut visibility in &mut seat_rows {
+        let wanted = if seat_wanted {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+        if *visibility != wanted {
+            *visibility = wanted;
+        }
+    }
+    for mut visibility in &mut cancel_rows {
+        let wanted = if claimed {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+        if *visibility != wanted {
+            *visibility = wanted;
         }
     }
 }
@@ -1308,26 +1356,22 @@ fn key_for(digit: u32) -> KeyCode {
 /// What clicking corner `sector` does, given the room.
 ///
 /// Solo setups select the corner for the sidebar buttons. Shared rooms claim
-/// an empty corner on the spot — clicking the triangle *is* the claim — and
-/// selecting your own corner hands it to the sidebar to configure or release.
+/// an empty corner on the spot — clicking the triangle *is* the claim — and a
+/// claimed corner is selected for the sidebar, whoever holds it: your own to
+/// cancel, another player's or an engine's for the host to cancel for them.
 #[derive(Debug, PartialEq, Eq)]
 pub enum SectorClick {
     Select(usize),
     Claim(u32),
-    Status(String),
 }
 
-pub fn sector_click(net: &NetState, me: &str, sector: usize) -> SectorClick {
+pub fn sector_click(net: &NetState, sector: usize) -> SectorClick {
     if net.peers.is_empty() {
         return SectorClick::Select(sector);
     }
     match net.seats.iter().find(|s| s.player == Some(sector as u32)) {
         None => SectorClick::Claim(sector as u32),
-        Some(seat) if seat.peer == me => SectorClick::Select(sector),
-        Some(seat) if seat.engine => {
-            SectorClick::Status(format!("An engine plays corner {sector}."))
-        }
-        Some(seat) => SectorClick::Status(format!("Corner {sector} is held by {}.", seat.name)),
+        Some(_) => SectorClick::Select(sector),
     }
 }
 
@@ -1377,19 +1421,18 @@ pub fn select_corner(
             continue;
         };
         let me = net.my_seat().map(|s| s.peer.clone()).unwrap_or_default();
-        match sector_click(&net, &me, sector) {
+        match sector_click(&net, sector) {
             SectorClick::Select(i) => selected.0 = Some(i),
             SectorClick::Claim(c) => {
                 if let Some(s) = socket.as_mut() {
                     net.status = send_claim(s, &mut net, Some(c), &me);
                 }
                 // The claimed corner is the selected one: the very next
-                // Computer / Empty press acts on it without a second wedge
-                // click. Without this the first press after a claim was
+                // Computer / Cancel Seat press acts on it without a second
+                // wedge click. Without this the first press after a claim was
                 // silently swallowed — nothing was selected to act on.
                 selected.0 = Some(c as usize);
             }
-            SectorClick::Status(why) => net.status = why,
         }
     }
     if let Some(next) = corner_from_keys(&keys, selected.0) {
@@ -2357,7 +2400,7 @@ mod tests {
     #[test]
     fn a_solo_wedge_click_selects() {
         let net = NetState::default();
-        assert_eq!(sector_click(&net, "", 3), SectorClick::Select(3));
+        assert_eq!(sector_click(&net, 3), SectorClick::Select(3));
     }
 
     /// Shared: an empty wedge is claimed on the spot — the click is the claim.
@@ -2368,16 +2411,14 @@ mod tests {
         net.my_id = Some(me);
         net.peers = vec![me, fake_peer()];
         net.seats = vec![seat(&me.to_string(), None)];
-        assert_eq!(
-            sector_click(&net, &me.to_string(), 5),
-            SectorClick::Claim(5)
-        );
+        assert_eq!(sector_click(&net, 5), SectorClick::Claim(5));
     }
 
-    /// Shared: clicking your own corner selects it for the sidebar; someone
-    /// else's corner is refused by name, and an engine corner is not touchable.
+    /// Shared: clicking a claimed corner selects it — yours, another
+    /// player's, or an engine's — so the sidebar's Cancel Seat can act on it;
+    /// a free corner is claimed on the spot.
     #[test]
-    fn a_shared_click_on_an_owned_corner_selects_or_refuses() {
+    fn a_shared_click_selects_any_claimed_corner() {
         let mut net = NetState::default();
         let me = PeerId(uuid::Uuid::from_u128(1));
         let other = fake_peer();
@@ -2385,21 +2426,16 @@ mod tests {
         net.peers = vec![me, other];
         net.seats = vec![
             seat(&me.to_string(), Some(2)),
+            seat("grace", Some(1)),
             Seat {
                 engine: true,
                 ..seat("bot", Some(4))
             },
         ];
-        let me = me.to_string();
-        assert_eq!(sector_click(&net, &me, 2), SectorClick::Select(2));
-        match sector_click(&net, &me, 4) {
-            SectorClick::Status(why) => assert!(why.contains("engine"), "{why}"),
-            other => panic!("an engine corner is not clickable, got {other:?}"),
-        }
-        match sector_click(&net, &me, 1) {
-            SectorClick::Claim(1) => {}
-            other => panic!("corner 1 is free, got {other:?}"),
-        }
+        assert_eq!(sector_click(&net, 2), SectorClick::Select(2));
+        assert_eq!(sector_click(&net, 1), SectorClick::Select(1));
+        assert_eq!(sector_click(&net, 4), SectorClick::Select(4));
+        assert_eq!(sector_click(&net, 3), SectorClick::Claim(3));
     }
 
     /// The host can un-seat another player's corner; a guest cannot touch a
