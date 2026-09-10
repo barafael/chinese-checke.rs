@@ -26,7 +26,7 @@ use checkers_bevy::board_view::{
     BOARD_FRAME, HOLE_RADIUS, HOLE_SPACING, PIECE_RADIUS, camp_triangles, coord_to_world,
     hole_edges, hole_points, player_colour, world_to_coord,
 };
-use checkers_bevy::replay;
+use checkers_bevy::replay::{self, TraceMarker};
 use checkers_bevy::setup::Seating;
 use checkers_bevy::{
     AppState, Selection, Session, audit, format_round_duration, lobby, net, record, sound, web,
@@ -524,19 +524,39 @@ fn apply_style(
     }
 }
 
-/// Leaving the round tears down everything the round owns: the board visuals
-/// (the style system rebuilds them, tracker cleared, on the next deal), the
-/// in-game UI, the game-over card, and the record viewer — which otherwise
-/// would re-open its overlay in the middle of the next round.
+/// Leaving the round tears down everything the round owns: the board meshes,
+/// pieces, highlights and trace, the in-game UI, the game-over card, and the
+/// record viewer — which otherwise would re-open its overlay in the middle of
+/// the next round.
+///
+/// The camera is the one thing that stays: the lobby renders and picks
+/// through it (Startup spawns it precisely so the lobby has a camera before
+/// the game state exists), and [`apply_style`] — its tracker cleared below —
+/// despawns and rebuilds it with the board on the next deal, exactly as it
+/// does on a style switch.
+///
+/// A Bevy system: the parameter count is the world access it needs, so the
+/// lint threshold is waived as with [`handle_buttons`].
+#[allow(clippy::too_many_arguments)]
 fn exit_round_teardown(
     mut commands: Commands,
-    visuals: Query<Entity, With<BoardVisual>>,
+    visuals: Query<Entity, (With<BoardVisual>, Without<Camera>)>,
+    pieces: Query<Entity, With<PieceMarker>>,
+    highlights: Query<Entity, With<Overlay>>,
+    traces: Query<Entity, With<TraceMarker>>,
     hud: Query<Entity, With<HudUi>>,
     over: Query<Entity, With<GameOverUi>>,
     viewer: Option<ResMut<replay::ReplayView>>,
     mut applied: ResMut<AppliedStyle>,
 ) {
-    for e in visuals.iter().chain(hud.iter()).chain(over.iter()) {
+    for e in visuals
+        .iter()
+        .chain(pieces.iter())
+        .chain(highlights.iter())
+        .chain(traces.iter())
+        .chain(hud.iter())
+        .chain(over.iter())
+    {
         commands.entity(e).despawn();
     }
     if viewer.is_some() {
@@ -1733,5 +1753,55 @@ fn ai_one_shot(
             mv.origin.q, mv.origin.r, mv.destination.q, mv.destination.r
         );
         session.outbox.push(mv);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::ecs::system::RunSystemOnce;
+
+    /// Leaving for the lobby must leave a camera alive: the lobby renders and
+    /// picks through it. A teardown that took the camera with it left the
+    /// screen on the round's last frame — indistinguishable from a hang.
+    #[test]
+    fn leaving_the_round_leaves_a_camera() {
+        let mut world = World::new();
+        world.init_resource::<AppliedStyle>();
+        world.resource_mut::<AppliedStyle>().0 = Some(BoardStyle::Classic);
+
+        let camera = world.spawn((Camera2d, ClassicCamera, BoardVisual)).id();
+        let hole = world.spawn((HoleMarker, BoardVisual)).id();
+        let piece = world.spawn(PieceMarker).id();
+        let dot = world.spawn(Overlay).id();
+        let trace = world.spawn(TraceMarker).id();
+        let hud = world.spawn(HudUi).id();
+        let card = world.spawn(GameOverUi).id();
+
+        world.run_system_once(exit_round_teardown).unwrap();
+        world.flush();
+
+        assert!(
+            world.get_entity(camera).is_ok(),
+            "the lobby's camera must survive the teardown"
+        );
+        for (e, what) in [
+            (hole, "board meshes"),
+            (piece, "pieces"),
+            (dot, "highlights"),
+            (trace, "the trace"),
+            (hud, "the HUD"),
+            (card, "the game-over card"),
+        ] {
+            assert!(
+                world.get_entity(e).is_err(),
+                "{what} must go with the round"
+            );
+        }
+        assert_eq!(
+            world.resource::<AppliedStyle>().0,
+            None,
+            "the cleared tracker is what makes the next deal rebuild the board"
+        );
     }
 }
