@@ -1011,30 +1011,40 @@ fn outlined_line(parent: &mut ChildSpawnerCommands, tag: usize, font_size: f32, 
         ))
         .with_children(|stack| {
             for offset in OUTLINE_OFFSETS {
-                stack.spawn(outlined_copy(offset, font_size, Color::BLACK));
+                outlined_copy(stack, offset, font_size, Color::BLACK);
             }
-            stack.spawn(outlined_copy(Vec2::ZERO, font_size, fill));
+            outlined_copy(stack, Vec2::ZERO, font_size, fill);
         });
 }
 
-/// One copy of an outlined label: full-width, centred, shifted by `offset`.
-fn outlined_copy(offset: Vec2, font_size: f32, colour: Color) -> impl Bundle {
-    (
-        Node {
+/// One copy of an outlined label: a full-size flex box, shifted by `offset`,
+/// with the text dead-centred inside it. Making the box fill the stack on
+/// every side (`top: y` with `bottom: -y`) keeps it full-height while the
+/// whole line slides by the outline offset, so the glyphs stay centred — the
+/// flex centring below is exact and needs no knowledge of the font's line
+/// metrics.
+fn outlined_copy(stack: &mut ChildSpawnerCommands, offset: Vec2, font_size: f32, colour: Color) {
+    stack
+        .spawn(Node {
             position_type: PositionType::Absolute,
             left: Val::Px(offset.x),
             right: Val::Px(-offset.x),
             top: Val::Px(offset.y),
+            bottom: Val::Px(-offset.y),
+            display: Display::Flex,
+            justify_content: JustifyContent::Center,
+            align_items: AlignItems::Center,
             ..default()
-        },
-        Text::new(String::new()),
-        TextFont {
-            font_size: FontSize::Px(font_size),
-            ..default()
-        },
-        TextLayout::new(Justify::Center, LineBreak::NoWrap),
-        TextColor(colour),
-    )
+        })
+        .with_child((
+            Text::new(String::new()),
+            TextFont {
+                font_size: FontSize::Px(font_size),
+                ..default()
+            },
+            TextLayout::new(Justify::Center, LineBreak::NoWrap),
+            TextColor(colour),
+        ));
 }
 
 /// The star: a fixed container holding one out-facing wedge per corner and its
@@ -2078,6 +2088,7 @@ fn draw_corner_labels(
     net: Res<NetState>,
     table: Res<Table>,
     lines: Query<(&CornerText, &Children)>,
+    boxes: Query<&Children>,
     mut texts: Query<&mut Text>,
 ) {
     if !net.is_changed() && !table.is_changed() {
@@ -2113,7 +2124,10 @@ fn draw_corner_labels(
         };
         let wanted = if line == 0 { title } else { sub };
         for copy in copies.iter() {
-            if let Ok(mut text) = texts.get_mut(copy)
+            // Each copy is a flex box; its one child is the text leaf.
+            if let Ok(leaf) = boxes.get(copy)
+                && let Some(text_entity) = leaf.iter().next()
+                && let Ok(mut text) = texts.get_mut(text_entity)
                 && **text != wanted
             {
                 **text = wanted.clone();
