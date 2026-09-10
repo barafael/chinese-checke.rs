@@ -868,11 +868,12 @@ const STAR_H: f32 = 360.0;
 
 /// Wedge geometry: each corner is an out-facing triangle sector, base at
 /// [`WEDGE_INNER`] from the centre, apex at [`WEDGE_OUTER`] — the tip points
-/// away from the star, like a ray, and the [`WEDGE_HALF_ANGLE_DEG`] spread
-/// keeps a gap between neighbouring wedges. The inner radius is what leaves
-/// the middle of the star empty and readable instead of covered by six
-/// overlapping rectangles.
-const WEDGE_INNER: f32 = 60.0;
+/// away from the star, like a short stubby ray, and the
+/// [`WEDGE_HALF_ANGLE_DEG`] spread keeps a gap between neighbouring wedges.
+/// The inner radius is what leaves the middle of the star empty and readable
+/// instead of covered by six overlapping rectangles; the labels may overhang
+/// the short wedges.
+const WEDGE_INNER: f32 = 118.0;
 const WEDGE_OUTER: f32 = 175.0;
 const WEDGE_HALF_ANGLE_DEG: f32 = 26.0;
 
