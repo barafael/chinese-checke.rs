@@ -130,10 +130,11 @@ pub enum NetMsg {
     Claim(Option<u32>),
     /// Guest -> host: declare or renounce spectator status.
     Spectate(bool),
-    /// Any -> all: where my pointer is, in lobby logical pixels, origin
-    /// top-left. A few dozen bytes at ~10 Hz on the reliable channel — small
-    /// enough that ordering it behind lobby traffic costs nothing, and the
-    /// channel count stays at one.
+    /// Any -> all: where my pointer is, as fractions of the window's width
+    /// and height (0..1, origin top-left). Windows differ in size, so each
+    /// receiver scales the fractions into its own pixels. A few dozen bytes
+    /// at ~10 Hz on the reliable channel — small enough that ordering it
+    /// behind lobby traffic costs nothing, and the channel count stays at one.
     Cursor { pos: [f32; 2] },
     /// Host -> all: the house-rule switch, live, so every lobby shows one
     /// game long before the `Start` carries it again.

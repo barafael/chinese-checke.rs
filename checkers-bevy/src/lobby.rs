@@ -563,9 +563,10 @@ fn sync_corner_settings(net: Res<NetState>, mut groups: Query<&mut Node, With<Co
 const CURSOR_INTERVAL: f32 = 0.1;
 const CURSOR_LINGER_SECS: f64 = 3.0;
 
-/// A remote peer's pointer drawn over the lobby: where it was last reported,
-/// where it is drawn (eased toward the report so it glides rather than jumps),
-/// and when it was last heard from.
+/// A remote peer's pointer drawn over the lobby: where it was last reported
+/// (already scaled into this window's logical pixels), where it is drawn
+/// (eased toward the report so it glides rather than jumps), and when it was
+/// last heard from.
 #[derive(Component)]
 pub struct RemoteCursor {
     peer: String,
@@ -574,11 +575,14 @@ pub struct RemoteCursor {
     last_seen: f64,
 }
 
-/// Broadcast this pointer at a lazy 10 Hz while the lobby is up. Positions are
-/// window-logical, origin top-left — the same space bevy_ui lays out in — so
-/// the receiver draws it where the sender saw it. Matchbox connects every peer
-/// to every peer, so a plain broadcast reaches the whole room; the sender is
-/// the `from` on arrival and no origin field is needed.
+/// Broadcast this pointer at a lazy 10 Hz while the lobby is up, as
+/// **fractions of the window's width and height** (0..1, origin top-left).
+/// Windows differ in size, so absolute pixels would drift apart across peers;
+/// fractions land every pointer at the same relative spot, and each receiver
+/// scales them back into its own logical pixels — the space bevy_ui lays out
+/// in. Matchbox connects every peer to every peer, so a plain broadcast
+/// reaches the whole room; the sender is the `from` on arrival and no origin
+/// field is needed.
 fn broadcast_cursor(
     time: Res<Time>,
     windows: Query<&Window>,
@@ -593,14 +597,21 @@ fn broadcast_cursor(
         return;
     }
     *next_at = time.elapsed_secs() + CURSOR_INTERVAL;
-    let Some(pos) = windows.single().ok().and_then(|w| w.cursor_position()) else {
+    let Some(window) = windows.single().ok() else {
         return;
     };
+    let Some(pos) = window.cursor_position() else {
+        return;
+    };
+    let (width, height) = (window.width(), window.height());
+    if width <= 0.0 || height <= 0.0 {
+        return;
+    }
     broadcast(
         &mut socket,
         &net.peers,
         &NetMsg::Cursor {
-            pos: [pos.x, pos.y],
+            pos: [pos.x / width, pos.y / height],
         },
     );
 }
@@ -1030,6 +1041,7 @@ pub fn pump_socket(
     state: Res<State<AppState>>,
     mut commands: Commands,
     time: Res<Time>,
+    windows: Query<&Window>,
     mut cursors: Query<(Entity, &mut RemoteCursor)>,
 ) {
     let Some(mut socket) = socket else {
@@ -1136,12 +1148,17 @@ pub fn pump_socket(
                 }
             }
             // A peer's pointer, drawn over the lobby only — the game has its
-            // own presentation, and leftover dots must not haunt it.
+            // own presentation, and leftover dots must not haunt it. The wire
+            // carries fractions of the sender's window; scale them into this
+            // window's pixels so the dot sits at the same relative spot.
             NetMsg::Cursor { pos } => {
                 if *state.get() != AppState::Lobby {
                     continue;
                 }
-                let pos = Vec2::new(pos[0], pos[1]);
+                let Some(window) = windows.single().ok() else {
+                    continue;
+                };
+                let pos = Vec2::new(pos[0] * window.width(), pos[1] * window.height());
                 let key = from.to_string();
                 let now = time.elapsed_secs_f64();
                 if let Some((_, mut cursor)) = cursors.iter_mut().find(|(_, c)| c.peer == key) {
