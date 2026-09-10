@@ -93,16 +93,19 @@ pub fn petname() -> String {
 
 /// A seed that differs between processes and between calls. `RandomState` is
 /// randomly seeded per process, the clock stirs it, and a counter keeps the
-/// draws within one process independent.
+/// draws within one process independent. `Instant` is deliberately from Bevy's
+/// platform module rather than std: std's wall clock panics on wasm32, while
+/// the platform module selects a `performance.now()`-backed clock there.
 fn fresh_seed() -> u64 {
     use std::hash::{BuildHasher, Hash, Hasher};
     static CALLS: AtomicU64 = AtomicU64::new(0);
+    static START: std::sync::OnceLock<bevy::platform::time::Instant> = std::sync::OnceLock::new();
     let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
     CALLS.fetch_add(1, Ordering::Relaxed).hash(&mut hasher);
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0)
+    START
+        .get_or_init(bevy::platform::time::Instant::now)
+        .elapsed()
+        .as_nanos()
         .hash(&mut hasher);
     hasher.finish()
 }
