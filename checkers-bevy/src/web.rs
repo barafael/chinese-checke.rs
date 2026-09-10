@@ -91,11 +91,23 @@ pub fn petname() -> String {
     PET_NAMES[(fresh_seed() % PET_NAMES.len() as u64) as usize].to_string()
 }
 
-/// A seed that differs between processes and between calls. `RandomState` is
-/// randomly seeded per process, the clock stirs it, and a counter keeps the
-/// draws within one process independent. `Instant` is deliberately from Bevy's
-/// platform module rather than std: std's wall clock panics on wasm32, while
-/// the platform module selects a `performance.now()`-backed clock there.
+/// A seed that differs between processes and between calls.
+///
+/// The two platforms need different sources, and the difference is the whole
+/// point: std has **no randomness at all on `wasm32-unknown-unknown`** — its
+/// `RandomState` degenerates to a fixed per-process counter, and
+/// `performance.now()` is coarsened to ~100 us — so the seed below was
+/// effectively constant and every fresh page drew the same pet name (and the
+/// same room!). Native std seeds `RandomState` from the OS, so it stays as it
+/// was.
+#[cfg(target_family = "wasm")]
+fn fresh_seed() -> u64 {
+    // The browser's CSPRNG through `Math.random()`: 52 bits of entropy per
+    // draw, and a fresh draw per call.
+    (js_sys::Math::random() * (1u64 << 53) as f64) as u64
+}
+
+#[cfg(not(target_family = "wasm"))]
 fn fresh_seed() -> u64 {
     use std::hash::{BuildHasher, Hash, Hasher};
     static CALLS: AtomicU64 = AtomicU64::new(0);

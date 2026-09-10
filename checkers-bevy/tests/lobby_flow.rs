@@ -242,3 +242,49 @@ fn key_for(digit: u32) -> KeyCode {
         _ => KeyCode::Digit6,
     }
 }
+
+/// The host selecting their own corner and pressing Computer must trade the
+/// seat for an engine: the host is un-seated, an engine takes the corner, and
+/// the roster shows it. This is the end-to-end version of the pure-function
+/// test in `lobby.rs` — same decision, but through the real button handling.
+#[test]
+fn the_host_pressing_computer_on_their_corner_swaps_it() {
+    use checkers_net::{NetState, Seat};
+
+    let mut app = app();
+    {
+        let mut net = app.world_mut().resource_mut::<NetState>();
+        net.my_id = Some(bevy_matchbox::prelude::PeerId::from(uuid::Uuid::from_u128(
+            1,
+        )));
+        net.peers = vec![bevy_matchbox::prelude::PeerId::from(uuid::Uuid::from_u128(
+            2,
+        ))];
+        net.is_host = true;
+        net.seats = vec![Seat {
+            peer: net.my_id.as_ref().unwrap().to_string(),
+            name: "host".into(),
+            player: Some(2),
+            spectate: false,
+            engine: false,
+        }];
+    }
+
+    // Select corner 2 (the host's own), then click Computer.
+    app.world_mut().resource_mut::<SelectedCorner>().0 = Some(2);
+    let computer = spawn_button(&mut app, LobbyButton::CornerAction(CornerCommand::Cpu));
+    press_button(&mut app, computer);
+
+    let net = app.world().resource::<NetState>();
+    let host = net
+        .seats
+        .iter()
+        .find(|s| s.name == "host")
+        .expect("host seat");
+    assert!(
+        host.player.is_none(),
+        "the host must be un-seated after the swap"
+    );
+    let engine = net.seats.iter().find(|s| s.engine).expect("engine seat");
+    assert_eq!(engine.player, Some(2), "the engine takes the corner");
+}

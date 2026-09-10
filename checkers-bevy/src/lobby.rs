@@ -1383,6 +1383,11 @@ pub fn select_corner(
                 if let Some(s) = socket.as_mut() {
                     net.status = send_claim(s, &mut net, Some(c), &me);
                 }
+                // The claimed corner is the selected one: the very next
+                // Computer / Empty press acts on it without a second wedge
+                // click. Without this the first press after a claim was
+                // silently swallowed — nothing was selected to act on.
+                selected.0 = Some(c as usize);
             }
             SectorClick::Status(why) => net.status = why,
         }
@@ -2232,6 +2237,49 @@ mod tests {
 
     fn fake_peer() -> PeerId {
         PeerId(uuid::Uuid::from_u128(2))
+    }
+
+    /// Claiming a corner on the star must also select it: otherwise the first
+    /// sidebar press after a claim was silently swallowed, acting on nothing.
+    #[test]
+    fn claiming_a_corner_selects_it() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        let mut world = World::new();
+        let mut net = NetState::default();
+        net.peers.push(fake_peer());
+        net.is_host = true;
+        let me = PeerId(uuid::Uuid::from_u128(1));
+        net.my_id = Some(me);
+        net.seats = vec![seat(&me.to_string(), None)];
+        world.insert_resource(net);
+        world.insert_resource(SelectedCorner(None));
+        world.init_resource::<ButtonInput<KeyCode>>();
+
+        // A press on corner 1's centroid — free, so a claim.
+        let centre = Vec2::new(STAR_W / 2.0, STAR_H / 2.0);
+        let size = vec2(STAR_W, STAR_H);
+        let mid = {
+            let v = wedge_vertices(1);
+            (v[0] + v[1] + v[2]) / 3.0
+        };
+        world.spawn((
+            Button,
+            Interaction::Pressed,
+            StarHit,
+            RelativeCursorPosition {
+                cursor_over: true,
+                normalized: Some((mid - centre) / size),
+            },
+        ));
+
+        world.run_system_once(select_corner).unwrap();
+
+        assert_eq!(
+            world.resource::<SelectedCorner>().0,
+            Some(1),
+            "the claimed corner must be the selected one"
+        );
     }
 
     /// The wedges leave the middle of the star clear — that is the point of
