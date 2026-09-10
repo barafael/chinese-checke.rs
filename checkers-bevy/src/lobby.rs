@@ -1088,7 +1088,7 @@ fn star(parent: &mut ChildSpawnerCommands, art: &SectorArt) {
                 node.spawn(Node {
                     position_type: PositionType::Absolute,
                     left: Val::Px(mid.x - 55.0),
-                    top: Val::Px(mid.y - 17.0),
+                    top: Val::Px(mid.y - 18.0),
                     width: Val::Px(110.0),
                     height: Val::Px(36.0),
                     flex_direction: FlexDirection::Column,
