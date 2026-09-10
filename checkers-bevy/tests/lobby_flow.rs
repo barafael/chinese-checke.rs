@@ -128,8 +128,8 @@ fn a_preset_fills_the_table() {
     press_button(&mut app, two);
 
     let table = app.world().resource::<Table>().0.clone();
-    assert_eq!(table[0], CornerState::Human("P0".into()));
-    assert_eq!(table[3], CornerState::Human("P3".into()));
+    assert_eq!(table[0], CornerState::Human);
+    assert_eq!(table[3], CornerState::Human);
     assert_eq!(
         table.iter().filter(|c| **c != CornerState::Empty).count(),
         2,
@@ -137,18 +137,14 @@ fn a_preset_fills_the_table() {
     );
 }
 
-/// The corner buttons rewrite the selected corner, keeping the name when a
-/// human corner is toggled off and on.
+/// The corner buttons rewrite the selected corner.
 #[test]
 fn corner_commands_configure_the_table() {
     let mut app = app();
     press(&mut app, KeyCode::Digit1);
     let human = spawn_button(&mut app, LobbyButton::CornerAction(CornerCommand::Human));
     press_button(&mut app, human);
-    assert_eq!(
-        app.world().resource::<Table>().0[0],
-        CornerState::Human("P0".into())
-    );
+    assert_eq!(app.world().resource::<Table>().0[0], CornerState::Human);
 
     let cpu = spawn_button(&mut app, LobbyButton::CornerAction(CornerCommand::Cpu));
     press_button(&mut app, cpu);

@@ -12,8 +12,8 @@ use bevy::prelude::*;
 use bevy::state::app::StatesPlugin;
 use checkers_bevy::AppState;
 use checkers_bevy::lobby::{
-    CornerEdit, EditAction, NameEdit, RoomEdit, SelectedCorner, edit_action, edit_room,
-    not_editing, select_corner,
+    EditAction, NameEdit, RoomEdit, SelectedCorner, edit_action, edit_room, not_editing,
+    select_corner,
 };
 use checkers_net::{NetState, RoomId, Seat};
 
@@ -27,7 +27,6 @@ fn app() -> App {
         .init_resource::<RoomEdit>()
         // `not_editing` reads every editor.
         .init_resource::<NameEdit>()
-        .init_resource::<CornerEdit>()
         .init_resource::<NetState>()
         .add_systems(Update, edit_room.run_if(in_state(AppState::Lobby)));
     app
@@ -256,7 +255,6 @@ fn chained_app() -> App {
         .init_resource::<RoomEdit>()
         // `not_editing` reads every editor.
         .init_resource::<NameEdit>()
-        .init_resource::<CornerEdit>()
         .init_resource::<NetState>()
         .init_resource::<SelectedCorner>()
         .add_systems(
@@ -317,7 +315,6 @@ fn the_committing_keypress_does_not_leak_downstream() {
         .init_resource::<RoomEdit>()
         // `not_editing` reads every editor.
         .init_resource::<NameEdit>()
-        .init_resource::<CornerEdit>()
         .init_resource::<NetState>()
         .init_resource::<SawEnter>()
         // `not_editing` itself, not a copy: an inline duplicate of the condition

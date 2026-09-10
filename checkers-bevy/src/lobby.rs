@@ -108,13 +108,11 @@ pub struct CornerText(pub usize);
 pub enum FieldKind {
     Room,
     Name,
-    /// The name of the selected human corner, in solo setups.
-    Corner,
 }
 
 /// An always-visible text input box: click to focus (or its key), Enter
-/// commits, Esc leaves. The value shown is driven by [`draw_room`],
-/// [`draw_name`] and [`draw_corner`].
+/// commits, Esc leaves. The value shown is driven by [`draw_room`] and
+/// [`draw_name`].
 #[derive(Component)]
 pub struct TextInput(pub FieldKind);
 
@@ -137,7 +135,7 @@ pub enum CornerState {
     #[default]
     Empty,
     /// A corner played by hand on this device.
-    Human(String),
+    Human,
     /// A corner played by this device's engine.
     Cpu,
 }
@@ -174,7 +172,6 @@ pub fn plugin(app: &mut App) {
         .init_resource::<ChosenVariants>()
         .init_resource::<RoomEdit>()
         .init_resource::<NameEdit>()
-        .init_resource::<CornerEdit>()
         .add_systems(
             OnEnter(AppState::Lobby),
             // The wedge art must exist before the star can reference it.
@@ -194,7 +191,7 @@ pub fn plugin(app: &mut App) {
                     // First, and the rest are suppressed while a field holds
                     // the keyboard: typing a name must not also start a game
                     // on the Enter that commits it.
-                    (edit_room, edit_name, edit_corner),
+                    (edit_room, edit_name),
                     focus_input_fields.run_if(not_editing),
                     (select_corner, handle_buttons).run_if(not_editing),
                     // The modal's exit: an elsewhere-click closes the focused
@@ -218,7 +215,6 @@ pub fn plugin(app: &mut App) {
                         draw_roster,
                         draw_room,
                         draw_name,
-                        draw_corner,
                         sync_remote_cursors,
                     )
                         .chain(),
@@ -235,13 +231,8 @@ pub fn plugin(app: &mut App) {
 /// also a command — Space readies, Enter starts, a digit selects a corner — so
 /// a field would be unusable for any name containing them, which is nearly all
 /// of them.
-pub fn not_editing(room: Res<RoomEdit>, name: Res<NameEdit>, corner: Res<CornerEdit>) -> bool {
-    !room.active
-        && !room.consumed_input
-        && !name.active
-        && !name.consumed_input
-        && !corner.active
-        && !corner.consumed_input
+pub fn not_editing(room: Res<RoomEdit>, name: Res<NameEdit>) -> bool {
+    !room.active && !room.consumed_input && !name.active && !name.consumed_input
 }
 
 /// Paint every non-petal button: selected mode, hover, press.
@@ -261,7 +252,7 @@ fn sync_button_styles(
         let cmd = if solo {
             match &table.0[i] {
                 CornerState::Empty => CornerCommand::Off,
-                CornerState::Human(_) => CornerCommand::Human,
+                CornerState::Human => CornerCommand::Human,
                 CornerState::Cpu => CornerCommand::Cpu,
             }
         } else {
@@ -303,7 +294,6 @@ fn sync_button_styles(
 fn sync_input_styles(
     room: Res<RoomEdit>,
     name: Res<NameEdit>,
-    corner: Res<CornerEdit>,
     mut inputs: Query<(
         &Interaction,
         &TextInput,
@@ -315,7 +305,6 @@ fn sync_input_styles(
         let focused = match input.0 {
             FieldKind::Room => room.active,
             FieldKind::Name => name.active,
-            FieldKind::Corner => corner.active,
         };
         let border_colour = if focused {
             CHOSEN
@@ -403,16 +392,6 @@ pub struct RoomEdit {
 /// re-greets peers rather than reopening a socket.
 #[derive(Resource, Default)]
 pub struct NameEdit {
-    pub active: bool,
-    pub buffer: String,
-    pub error: String,
-    pub consumed_input: bool,
-}
-
-/// The selected corner's name editor. Same modal pattern, but it writes
-/// [`Table`], and only on solo setups where the selected corner is human.
-#[derive(Resource, Default)]
-pub struct CornerEdit {
     pub active: bool,
     pub buffer: String,
     pub error: String,
@@ -597,19 +576,22 @@ fn spawn(mut commands: Commands, art: Res<SectorArt>) {
                             }
                         });
 
-                    // The selected corner's name, on solo setups. Spawned
-                    // always; the focus and draw systems stand it down in
-                    // shared rooms.
-                    corner_name_row(corner);
-                    corner.spawn((
-                        Text::new(String::new()),
-                        TextFont {
-                            font_size: FontSize::Px(14.0),
+                    // What to do with the selected corner.
+                    corner
+                        .spawn(Node {
+                            column_gap: Val::Px(10.0),
+                            align_items: AlignItems::Center,
                             ..default()
-                        },
-                        TextColor(Color::srgb(0.85, 0.35, 0.35)),
-                        InputError(FieldKind::Corner),
-                    ));
+                        })
+                        .with_children(|row| {
+                            for (label, cmd) in [
+                                ("Human", CornerCommand::Human),
+                                ("Computer", CornerCommand::Cpu),
+                                ("Empty", CornerCommand::Off),
+                            ] {
+                                button(row, label, LobbyButton::CornerAction(cmd));
+                            }
+                        });
                 });
 
                 // House rules, one toggle per switch.
@@ -819,27 +801,6 @@ fn field_row(parent: &mut ChildSpawnerCommands, label: &str, kind: FieldKind, ke
                 },
                 TextColor(Color::srgb(0.62, 0.62, 0.68)),
             ));
-        });
-}
-
-/// The corner-name row, a field row with a label that follows the selection.
-fn corner_name_row(parent: &mut ChildSpawnerCommands) {
-    parent
-        .spawn(Node {
-            column_gap: Val::Px(10.0),
-            align_items: AlignItems::Center,
-            ..default()
-        })
-        .with_children(|row| {
-            row.spawn((
-                Text::new("Corner name"),
-                TextFont {
-                    font_size: FontSize::Px(14.0),
-                    ..default()
-                },
-                TextColor(Color::srgb(0.62, 0.62, 0.68)),
-            ));
-            input_box(row, FieldKind::Corner);
         });
 }
 
@@ -1599,7 +1560,6 @@ pub fn blur_on_elsewhere_click(
     clicked: Query<(&Interaction, Has<TextInput>), Changed<Interaction>>,
     mut room: ResMut<RoomEdit>,
     mut name: ResMut<NameEdit>,
-    mut corner: ResMut<CornerEdit>,
 ) {
     if !mouse.just_pressed(MouseButton::Left) {
         return;
@@ -1619,11 +1579,6 @@ pub fn blur_on_elsewhere_click(
         name.active = false;
         name.buffer.clear();
         name.error.clear();
-    }
-    if corner.active {
-        corner.active = false;
-        corner.buffer.clear();
-        corner.error.clear();
     }
 }
 
@@ -1659,7 +1614,6 @@ pub enum CornerEffect {
 
 pub fn corner_effect(
     net: &NetState,
-    table: &Table,
     me: &str,
     corner: u32,
     cmd: CornerCommand,
@@ -1696,13 +1650,7 @@ pub fn corner_effect(
 
     // Solo setup: rewrite the local table.
     let state = match cmd {
-        CornerCommand::Human => {
-            let name = match &table.0[corner as usize] {
-                CornerState::Human(name) => name.clone(),
-                _ => format!("P{corner}"),
-            };
-            CornerState::Human(name)
-        }
+        CornerCommand::Human => CornerState::Human,
         CornerCommand::Cpu => CornerState::Cpu,
         CornerCommand::Off => CornerState::Empty,
     };
@@ -1717,7 +1665,7 @@ pub fn apply_preset(table: &mut Table, seating: Seating) {
             .players()
             .contains(&Player::new(i as u8).expect("corner indices are below six"));
         *corner = if seated {
-            CornerState::Human(format!("P{i}"))
+            CornerState::Human
         } else {
             CornerState::Empty
         };
@@ -1725,7 +1673,7 @@ pub fn apply_preset(table: &mut Table, seating: Seating) {
 }
 
 /// A Bevy system: the parameter count is the world access it needs, so the
-/// lint threshold is waived for it and [`focus_input_fields`].
+/// lint threshold is waived for it.
 #[allow(clippy::too_many_arguments)]
 pub fn handle_buttons(
     buttons: Query<(&Interaction, &LobbyButton), Changed<Interaction>>,
@@ -1775,7 +1723,7 @@ pub fn handle_buttons(
 
     if let (Some(corner), Some(cmd)) = (selected.0, command) {
         let corner = corner as u32;
-        match corner_effect(&net, &table, &me, corner, cmd) {
+        match corner_effect(&net, &me, corner, cmd) {
             Ok(CornerEffect::Local(state)) => {
                 table.0[corner as usize] = state;
                 net.status = match cmd {
@@ -2003,49 +1951,6 @@ fn draw_room(
     }
 }
 
-/// Draw the corner-name input: its buffer while focused, else the selected
-/// corner's name on a solo setup, else nothing.
-fn draw_corner(
-    net: Res<NetState>,
-    table: Res<Table>,
-    selected: Res<SelectedCorner>,
-    edit: Res<CornerEdit>,
-    mut values: Query<(&mut Text, &InputText)>,
-    mut errors: Query<(&mut Text, &InputError), Without<InputText>>,
-) {
-    if !net.is_changed() && !table.is_changed() && !selected.is_changed() && !edit.is_changed() {
-        return;
-    }
-    let solo_name = if net.peers.is_empty() {
-        selected.0.and_then(|i| match &table.0[i] {
-            CornerState::Human(name) => Some(name.clone()),
-            _ => None,
-        })
-    } else {
-        None
-    };
-    for (mut text, kind) in &mut values {
-        if kind.0 != FieldKind::Corner {
-            continue;
-        }
-        **text = if edit.active {
-            format!("{}_", edit.buffer)
-        } else {
-            solo_name.clone().unwrap_or_default()
-        };
-    }
-    for (mut text, kind) in &mut errors {
-        if kind.0 != FieldKind::Corner {
-            continue;
-        }
-        **text = if edit.active && !edit.error.is_empty() {
-            edit.error.clone()
-        } else {
-            String::new()
-        };
-    }
-}
-
 /// Keep the star's petals in step with the table/roster: colour, selection
 /// ring, state line.
 fn sync_corner_styles(
@@ -2102,14 +2007,7 @@ fn draw_corner_labels(
         let (title, sub) = if solo {
             match &table.0[i] {
                 CornerState::Empty => ("Empty".into(), "click to select".into()),
-                CornerState::Human(name) => {
-                    let name = if name.is_empty() {
-                        format!("P{}", p.index())
-                    } else {
-                        name.clone()
-                    };
-                    (name, "human".into())
-                }
+                CornerState::Human => (format!("P{}", p.index()), "human".into()),
                 CornerState::Cpu => ("Computer".into(), "CPU".into()),
             }
         } else if let Some(seat) = net.seats.iter().find(|s| s.player == Some(i as u32)) {
@@ -2149,73 +2047,12 @@ fn shade(c: Color, factor: f32) -> Color {
     )
 }
 
-/// Apply the name editor's keypresses. Same classification as the other
-/// fields, but committing writes the selected corner's name into [`Table`],
-/// and only where the selected corner is human on a solo setup.
-fn edit_corner(
-    mut keys: MessageReader<KeyboardInput>,
-    mut edit: ResMut<CornerEdit>,
-    mut table: ResMut<Table>,
-    selected: Res<SelectedCorner>,
-    mut net: ResMut<NetState>,
-) {
-    edit.consumed_input = false;
-
-    if !edit.active {
-        keys.clear();
-        return;
-    }
-
-    for event in keys.read() {
-        if event.state != ButtonState::Pressed {
-            continue;
-        }
-        edit.consumed_input = true;
-        match edit_action(event.key_code, event.text.as_deref()) {
-            EditAction::Insert(c) => {
-                if edit.buffer.chars().count() < RoomId::MAX_LEN {
-                    edit.buffer.push(c);
-                    edit.error.clear();
-                }
-            }
-            EditAction::Backspace => {
-                edit.buffer.pop();
-                edit.error.clear();
-            }
-            EditAction::Cancel => {
-                edit.active = false;
-                edit.buffer.clear();
-                edit.error.clear();
-            }
-            EditAction::Commit => {
-                let trimmed = edit.buffer.trim().to_string();
-                if trimmed.is_empty() {
-                    edit.error = "A name cannot be empty.".into();
-                } else if let Some(i) = selected.0
-                    && net.peers.is_empty()
-                {
-                    table.0[i] = CornerState::Human(trimmed);
-                    edit.active = false;
-                    edit.buffer.clear();
-                    edit.error.clear();
-                    net.status = format!("Corner {i} named.");
-                }
-            }
-            EditAction::Ignore => {}
-        }
-    }
-}
-
 /// Focus an input box: by clicking it, or with its key (`R` room, `N` name).
 /// Focusing one field unfocuses the others; each is seeded with its current
 /// value, so a small change does not mean retyping the whole thing.
 ///
 /// Runs only while no field holds the keyboard — the modal rule. Leaving a
 /// field (Enter/Esc) is what frees the keys again.
-///
-/// A Bevy system: the parameter count is the world access it needs, so the
-/// lint threshold is waived as with [`handle_buttons`].
-#[allow(clippy::too_many_arguments)]
 fn focus_input_fields(
     buttons: Query<(&Interaction, &TextInput), Changed<Interaction>>,
     keys: Res<ButtonInput<KeyCode>>,
@@ -2223,9 +2060,6 @@ fn focus_input_fields(
     mut net: ResMut<NetState>,
     mut room_edit: ResMut<RoomEdit>,
     mut name_edit: ResMut<NameEdit>,
-    mut corner_edit: ResMut<CornerEdit>,
-    table: Res<Table>,
-    selected: Res<SelectedCorner>,
 ) {
     let mut clicked: Option<FieldKind> = None;
     for (interaction, input) in buttons.iter() {
@@ -2234,27 +2068,14 @@ fn focus_input_fields(
         }
     }
 
-    let corner_ok = net.peers.is_empty()
-        && selected
-            .0
-            .is_some_and(|i| matches!(table.0[i], CornerState::Human(_)));
-    if clicked == Some(FieldKind::Corner) && !corner_ok {
-        if net.peers.is_empty() {
-            net.status = "Set this corner to Human before naming it.".into();
-        }
-        return;
-    }
-
     let focus_room = clicked == Some(FieldKind::Room) || keys.just_pressed(KeyCode::KeyR);
     let focus_name = clicked == Some(FieldKind::Name) || keys.just_pressed(KeyCode::KeyN);
-    let focus_corner = clicked == Some(FieldKind::Corner) && corner_ok;
-    if !focus_room && !focus_name && !focus_corner {
+    if !focus_room && !focus_name {
         return;
     }
 
     room_edit.active = focus_room;
-    name_edit.active = focus_name && !focus_room && !focus_corner;
-    corner_edit.active = focus_corner;
+    name_edit.active = focus_name && !focus_room;
     if focus_room {
         room_edit.buffer = room.0.clone();
         room_edit.error.clear();
@@ -2267,19 +2088,10 @@ fn focus_input_fields(
         };
         name_edit.error.clear();
     }
-    if focus_corner {
-        let name = selected.0.and_then(|i| match &table.0[i] {
-            CornerState::Human(name) => Some(name.clone()),
-            _ => None,
-        });
-        corner_edit.buffer = name.unwrap_or_default();
-        corner_edit.error.clear();
-    }
     // The key (or click) that opened a field belongs to it, not to the
     // systems chained after this one.
     room_edit.consumed_input = true;
     name_edit.consumed_input = true;
-    corner_edit.consumed_input = true;
     net.status = "Editing. Enter accepts, Esc cancels.".into();
 }
 
@@ -2507,7 +2319,7 @@ mod tests {
     fn a_solo_table_starts_with_the_configured_corners() {
         let net = NetState::default();
         let mut table = Table::default();
-        table.0[0] = CornerState::Human("Caro".into());
+        table.0[0] = CornerState::Human;
         table.0[3] = CornerState::Cpu;
         assert_eq!(start_decision(&net, &table), StartDecision::Solo);
     }
@@ -2518,7 +2330,7 @@ mod tests {
     fn one_corner_cannot_start() {
         let net = NetState::default();
         let mut table = Table::default();
-        table.0[0] = CornerState::Human("Caro".into());
+        table.0[0] = CornerState::Human;
         match start_decision(&net, &table) {
             StartDecision::Refuse(why) => assert!(why.contains("two corners"), "{why}"),
             other => panic!("expected a refusal, got {other:?}"),
@@ -2629,7 +2441,7 @@ mod tests {
             peers: vec![fake_peer()],
             ..Default::default()
         };
-        let effect = corner_effect(&net, &Table::default(), "", 2, CornerCommand::Cpu);
+        let effect = corner_effect(&net, "", 2, CornerCommand::Cpu);
         assert_eq!(effect, Ok(CornerEffect::AddEngine(2)));
         seat_engine_at(&mut net, 2);
         assert!(net.seats[0].engine);
@@ -2638,7 +2450,7 @@ mod tests {
 
         // The host removes it again.
         assert_eq!(
-            corner_effect(&net, &Table::default(), "", 2, CornerCommand::Off),
+            corner_effect(&net, "", 2, CornerCommand::Off),
             Ok(CornerEffect::RemoveEngine(2))
         );
         remove_engine_at(&mut net, 2);
@@ -2671,7 +2483,7 @@ mod tests {
         seat_for(&mut net, "host", "ada");
         assert_eq!(net.seats[0].player, None, "no corner until claimed");
 
-        let effect = corner_effect(&net, &Table::default(), "host", 1, CornerCommand::Human)
+        let effect = corner_effect(&net, "host", 1, CornerCommand::Human)
             .expect("a free corner is claimable");
         assert_eq!(effect, CornerEffect::Claim(Some(1)));
         net.seats[0].player = Some(1);
@@ -2685,8 +2497,7 @@ mod tests {
         let mut net = NetState::default();
         net.peers.push(fake_peer());
         net.seats = vec![seat("ada", Some(2), true)];
-        let err = corner_effect(&net, &Table::default(), "grace", 2, CornerCommand::Human)
-            .expect_err("taken");
+        let err = corner_effect(&net, "grace", 2, CornerCommand::Human).expect_err("taken");
         assert!(err.contains("ada"), "must name the holder: {err}");
     }
 
@@ -2698,10 +2509,10 @@ mod tests {
         net.peers.push(fake_peer());
         net.seats = vec![seat("ada", Some(2), true)];
         assert_eq!(
-            corner_effect(&net, &Table::default(), "ada", 2, CornerCommand::Off),
+            corner_effect(&net, "ada", 2, CornerCommand::Off),
             Ok(CornerEffect::Claim(None))
         );
-        assert!(corner_effect(&net, &Table::default(), "ada", 2, CornerCommand::Human).is_err());
+        assert!(corner_effect(&net, "ada", 2, CornerCommand::Human).is_err());
     }
 
     /// A guest cannot place an engine; that is the host's call.
@@ -2711,35 +2522,32 @@ mod tests {
             peers: vec![fake_peer()],
             ..Default::default()
         };
-        assert!(corner_effect(&net, &Table::default(), "grace", 1, CornerCommand::Cpu).is_err());
+        assert!(corner_effect(&net, "grace", 1, CornerCommand::Cpu).is_err());
         let host = NetState {
             is_host: true,
             peers: vec![fake_peer()],
             ..Default::default()
         };
         assert_eq!(
-            corner_effect(&host, &Table::default(), "host", 1, CornerCommand::Cpu),
+            corner_effect(&host, "host", 1, CornerCommand::Cpu),
             Ok(CornerEffect::AddEngine(1))
         );
     }
 
-    /// Solo commands rewrite the local table, keeping an existing name when a
-    /// human corner is toggled off and on.
+    /// Solo commands map straight onto corner states.
     #[test]
     fn solo_commands_rewrite_the_table() {
         let net = NetState::default();
-        let mut table = Table::default();
-        table.0[0] = CornerState::Human("Caro".into());
         assert_eq!(
-            corner_effect(&net, &table, "", 0, CornerCommand::Cpu),
+            corner_effect(&net, "", 0, CornerCommand::Cpu),
             Ok(CornerEffect::Local(CornerState::Cpu))
         );
         assert_eq!(
-            corner_effect(&net, &table, "", 0, CornerCommand::Human),
-            Ok(CornerEffect::Local(CornerState::Human("Caro".into())))
+            corner_effect(&net, "", 0, CornerCommand::Human),
+            Ok(CornerEffect::Local(CornerState::Human))
         );
         assert_eq!(
-            corner_effect(&net, &table, "", 0, CornerCommand::Off),
+            corner_effect(&net, "", 0, CornerCommand::Off),
             Ok(CornerEffect::Local(CornerState::Empty))
         );
     }
@@ -2750,8 +2558,8 @@ mod tests {
     fn presets_fill_the_seatings_corners() {
         let mut table = Table::default();
         apply_preset(&mut table, Seating::Two);
-        assert_eq!(table.0[0], CornerState::Human("P0".into()));
-        assert_eq!(table.0[3], CornerState::Human("P3".into()));
+        assert_eq!(table.0[0], CornerState::Human);
+        assert_eq!(table.0[3], CornerState::Human);
         assert_eq!(table.0[1], CornerState::Empty);
         assert_eq!(table.0[2], CornerState::Empty);
     }
@@ -2802,9 +2610,9 @@ mod tests {
     fn the_configured_corners_build_the_session() {
         let net = NetState::default();
         let mut table = Table::default();
-        table.0[0] = CornerState::Human("Caro".into());
+        table.0[0] = CornerState::Human;
         table.0[2] = CornerState::Cpu;
-        table.0[4] = CornerState::Human("Lee".into());
+        table.0[4] = CornerState::Human;
         let (players, ai, local, spectating) = deal_for(&net, &table);
         assert_eq!(
             players,
@@ -2978,7 +2786,6 @@ mod tests {
         world.init_resource::<ButtonInput<MouseButton>>();
         world.init_resource::<RoomEdit>();
         world.init_resource::<NameEdit>();
-        world.init_resource::<CornerEdit>();
         world.resource_mut::<RoomEdit>().active = true;
 
         // A press on a bare button (a stand-in: the star hit area, the ready
