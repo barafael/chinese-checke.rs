@@ -862,14 +862,15 @@ fn input_box(parent: &mut ChildSpawnerCommands, kind: FieldKind) {
 const STAR_W: f32 = 420.0;
 const STAR_H: f32 = 360.0;
 
-/// Wedge geometry: each corner is an out-facing triangle sector, apex at
-/// [`WEDGE_INNER`] from the centre, base at [`WEDGE_OUTER`], spread
-/// [`WEDGE_HALF_ANGLE_DEG`] either side of its camp's direction. The inner
-/// radius is what leaves the middle of the star empty and readable instead of
-/// covered by six overlapping rectangles.
-const WEDGE_INNER: f32 = 64.0;
-const WEDGE_OUTER: f32 = 170.0;
-const WEDGE_HALF_ANGLE_DEG: f32 = 22.0;
+/// Wedge geometry: each corner is an out-facing triangle sector, base at
+/// [`WEDGE_INNER`] from the centre, apex at [`WEDGE_OUTER`] — the tip points
+/// away from the star, like a ray, and the [`WEDGE_HALF_ANGLE_DEG`] spread
+/// keeps a gap between neighbouring wedges. The inner radius is what leaves
+/// the middle of the star empty and readable instead of covered by six
+/// overlapping rectangles.
+const WEDGE_INNER: f32 = 60.0;
+const WEDGE_OUTER: f32 = 175.0;
+const WEDGE_HALF_ANGLE_DEG: f32 = 26.0;
 
 /// Corner `i`'s direction, in container coordinates (y down), so the angle
 /// arithmetic matches [`Window::cursor_position`] directly.
@@ -877,7 +878,8 @@ fn wedge_angle(i: usize) -> f32 {
     (60.0 * i as f32 - 90.0).to_radians()
 }
 
-/// The three corners of corner `i`'s wedge, in container-local pixels.
+/// The three corners of corner `i`'s wedge, in container-local pixels: the
+/// outward tip first, then the two base corners near the star.
 fn wedge_vertices(i: usize) -> [Vec2; 3] {
     let t = wedge_angle(i);
     let beta = WEDGE_HALF_ANGLE_DEG.to_radians();
@@ -886,9 +888,9 @@ fn wedge_vertices(i: usize) -> [Vec2; 3] {
     let left = Vec2::new((t + beta).cos(), (t + beta).sin());
     let right = Vec2::new((t - beta).cos(), (t - beta).sin());
     [
-        centre + WEDGE_INNER * dir,
-        centre + WEDGE_OUTER * left,
-        centre + WEDGE_OUTER * right,
+        centre + WEDGE_OUTER * dir,
+        centre + WEDGE_INNER * left,
+        centre + WEDGE_INNER * right,
     ]
 }
 
