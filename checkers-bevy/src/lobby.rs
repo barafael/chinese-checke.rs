@@ -105,7 +105,7 @@ pub struct CornerText(pub usize);
 
 /// Which editor an on-screen text input drives.
 #[derive(Component, Clone, Copy, PartialEq, Eq)]
-enum FieldKind {
+pub enum FieldKind {
     Room,
     Name,
     /// The name of the selected human corner, in solo setups.
@@ -116,7 +116,7 @@ enum FieldKind {
 /// commits, Esc leaves. The value shown is driven by [`draw_room`],
 /// [`draw_name`] and [`draw_corner`].
 #[derive(Component)]
-struct TextInput(FieldKind);
+pub struct TextInput(pub FieldKind);
 
 /// The value text inside an input box.
 #[derive(Component)]
@@ -192,6 +192,10 @@ pub fn plugin(app: &mut App) {
                 (edit_room, edit_name, edit_corner),
                 focus_input_fields.run_if(not_editing),
                 (select_corner, handle_buttons).run_if(not_editing),
+                // The modal's exit: an elsewhere-click closes the focused
+                // field, while `not_editing` keeps this frame's click from
+                // also acting on whatever was clicked.
+                blur_on_elsewhere_click.run_if(in_state(AppState::Lobby)),
                 broadcast_cursor.run_if(in_state(AppState::Lobby)),
                 (
                     sync_button_styles,
@@ -1524,6 +1528,47 @@ pub fn select_corner(
     }
 }
 
+/// Clicking anywhere that is not a text field closes the focused one.
+///
+/// A click *on* a field — including the focused one — is not "elsewhere", so
+/// reaching for another field never closes the one in hand. The system runs
+/// after the lobby's action systems, but ordering is not what makes the modal
+/// hold: while a field is active `not_editing` keeps every action system out
+/// for the whole frame, so the dismissing click is spent on the dismissal and
+/// the next click is the one that acts.
+pub fn blur_on_elsewhere_click(
+    mouse: Res<ButtonInput<MouseButton>>,
+    clicked: Query<(&Interaction, Has<TextInput>), Changed<Interaction>>,
+    mut room: ResMut<RoomEdit>,
+    mut name: ResMut<NameEdit>,
+    mut corner: ResMut<CornerEdit>,
+) {
+    if !mouse.just_pressed(MouseButton::Left) {
+        return;
+    }
+    if clicked
+        .iter()
+        .any(|(interaction, is_field)| *interaction == Interaction::Pressed && is_field)
+    {
+        return;
+    }
+    if room.active {
+        room.active = false;
+        room.buffer.clear();
+        room.error.clear();
+    }
+    if name.active {
+        name.active = false;
+        name.buffer.clear();
+        name.error.clear();
+    }
+    if corner.active {
+        corner.active = false;
+        corner.buffer.clear();
+        corner.error.clear();
+    }
+}
+
 /// Track which wedge the cursor rests on, for the hover shading.
 fn hover_corner(
     hit: Query<&RelativeCursorPosition, With<StarHit>>,
@@ -2830,5 +2875,49 @@ mod tests {
             SectorClick::Claim(1) => {}
             other => panic!("corner 1 is free, got {other:?}"),
         }
+    }
+
+    /// An elsewhere-click — on a bare button or on no UI at all — closes the
+    /// focused field; clicking a field itself never does.
+    #[test]
+    fn an_elsewhere_click_closes_the_focused_field() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        let mut world = World::new();
+        world.init_resource::<ButtonInput<MouseButton>>();
+        world.init_resource::<RoomEdit>();
+        world.init_resource::<NameEdit>();
+        world.init_resource::<CornerEdit>();
+        world.resource_mut::<RoomEdit>().active = true;
+
+        // A press on a bare button (a stand-in: the star hit area, the ready
+        // button) is an elsewhere-click.
+        world
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .press(MouseButton::Left);
+        world.spawn((Button, Interaction::Pressed));
+        world.run_system_once(blur_on_elsewhere_click).unwrap();
+        assert!(
+            !world.resource::<RoomEdit>().active,
+            "clicking outside the fields must close the focused one"
+        );
+
+        // A press on a text field is not "elsewhere": focus survives it.
+        world.resource_mut::<RoomEdit>().active = true;
+        world
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .press(MouseButton::Left);
+        world.spawn((Button, Interaction::Pressed, TextInput(FieldKind::Name)));
+        world.run_system_once(blur_on_elsewhere_click).unwrap();
+        assert!(
+            world.resource::<RoomEdit>().active,
+            "a click on a field is not an elsewhere-click"
+        );
+
+        // No left press this frame, no blur — a mere hover is not a dismissal.
+        world.resource_mut::<ButtonInput<MouseButton>>().clear();
+        world.spawn((Button, Interaction::Hovered));
+        world.run_system_once(blur_on_elsewhere_click).unwrap();
+        assert!(world.resource::<RoomEdit>().active);
     }
 }

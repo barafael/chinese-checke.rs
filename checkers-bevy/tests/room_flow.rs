@@ -267,6 +267,7 @@ fn chained_app() -> App {
                 // duplicate here made this test pass with the guard removed
                 // from the app -- it was checking its own logic.
                 select_corner.run_if(not_editing),
+                checkers_bevy::lobby::blur_on_elsewhere_click,
             )
                 .chain()
                 .run_if(in_state(AppState::Lobby)),
