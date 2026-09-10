@@ -1284,11 +1284,17 @@ pub fn pump_socket(
 /// Drop seats whose peer has left the room, and greeting memory of peers that
 /// are gone. A refresh mints a fresh `PeerId`, so without this the old seat
 /// would sit in the roster forever. Engine seats have no peer behind them —
-/// they belong to the host — so they survive. Pure, so the rule is testable
-/// without a socket; the host runs it every lobby frame.
+/// they belong to the host — so they survive, and so does the host's own
+/// seat: matchbox's peer list is *other* peers and never names yourself.
+/// Pure, so the rule is testable without a socket; the host runs it every
+/// lobby frame.
 fn prune_departed(net: &mut NetState) {
-    net.seats
-        .retain(|s| s.engine || net.peers.iter().any(|p| p.to_string() == s.peer));
+    let me = net.my_id.as_ref().map(|id| id.to_string());
+    net.seats.retain(|s| {
+        s.engine
+            || Some(&s.peer) == me.as_ref()
+            || net.peers.iter().any(|p| p.to_string() == s.peer)
+    });
     net.greeted.retain(|p| net.peers.contains(p));
 }
 
@@ -2439,7 +2445,9 @@ mod tests {
     }
 
     /// A peer that leaves takes its seat with it: a refresh mints a new peer
-    /// id, and without pruning the roster only ever grew.
+    /// id, and without pruning the roster only ever grew. Note `net.peers`
+    /// never names the host itself — matchbox lists only *other* peers — so
+    /// the host's own seat is exempted explicitly.
     #[test]
     fn departed_peers_lose_their_seats() {
         let mut net = NetState::default();
@@ -2448,8 +2456,9 @@ mod tests {
         let here = PeerId(uuid::Uuid::from_u128(3));
         net.my_id = Some(me);
         net.is_host = true;
-        net.peers = vec![me, here];
-        net.greeted = vec![me, gone, here];
+        // Others only: the mesh never reports the host's own id as a peer.
+        net.peers = vec![here];
+        net.greeted = vec![gone, here];
         net.seats = vec![
             seat(&me.to_string(), Some(0)),
             seat(&gone.to_string(), Some(3)),
@@ -2462,6 +2471,10 @@ mod tests {
 
         prune_departed(&mut net);
 
+        assert!(
+            net.seats.iter().any(|s| s.peer == me.to_string()),
+            "the host's own seat must survive the prune"
+        );
         assert!(
             !net.seats.iter().any(|s| s.peer == gone.to_string()),
             "the departed peer's seat must go"
