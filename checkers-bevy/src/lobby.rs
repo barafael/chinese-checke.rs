@@ -571,8 +571,8 @@ fn sync_corner_actions(
     net: Res<NetState>,
     table: Res<Table>,
     selected: Res<SelectedCorner>,
-    mut seat_rows: Query<&mut Visibility, With<SeatButtons>>,
-    mut cancel_rows: Query<&mut Visibility, With<CancelSeat>>,
+    mut seat_rows: Query<&mut Visibility, (With<SeatButtons>, Without<CancelSeat>)>,
+    mut cancel_rows: Query<&mut Visibility, (With<CancelSeat>, Without<SeatButtons>)>,
 ) {
     let solo = net.peers.is_empty();
     let claimed = selected.0.is_some_and(|i| {
