@@ -1423,6 +1423,10 @@ pub enum CornerEffect {
     RemoveEngine(u32),
     /// The host un-seats the player holding this corner.
     Unseat(u32),
+    /// The host gives up this corner to an engine: the host is un-seated and
+    /// an engine takes the corner in the same stroke, leaving the host free
+    /// to claim another.
+    SwapSelfForEngine(u32),
 }
 
 pub fn corner_effect(
@@ -1445,6 +1449,12 @@ pub fn corner_effect(
                 return match cmd {
                     CornerCommand::Off => Ok(CornerEffect::Claim(None)),
                     CornerCommand::Human => Err("You already hold this corner.".into()),
+                    // The host trading their own seat for an engine: un-seat
+                    // and seat the engine in one stroke. A guest never sees
+                    // the Computer button, and could not sequence anyway.
+                    CornerCommand::Cpu if net.sequences() => {
+                        Ok(CornerEffect::SwapSelfForEngine(corner))
+                    }
                     CornerCommand::Cpu => {
                         Err("Only the host can seat an engine, and only on an empty corner.".into())
                     }
@@ -1583,6 +1593,18 @@ pub fn handle_buttons(
                     }
                     net.status = format!("{} was un-seated from corner {c}.", name);
                 }
+            }
+            Ok(CornerEffect::SwapSelfForEngine(c)) => {
+                // Free the host's own seat first; only then does the engine's
+                // corner look unclaimed to the roster it joins.
+                if let Some(seat) = net.seats.iter_mut().find(|s| s.peer == me) {
+                    seat.player = None;
+                }
+                seat_engine_at(&mut net, c as usize);
+                if let Some(s) = socket.as_mut() {
+                    publish_roster(s, &net, &net.peers);
+                }
+                net.status = format!("Corner {c}: engine seated. Claim another corner.");
             }
             Err(why) => net.status = why,
         }
@@ -2043,6 +2065,54 @@ mod tests {
             Ok(CornerEffect::Claim(None))
         );
         assert!(corner_effect(&net, "ada", 2, CornerCommand::Human).is_err());
+    }
+
+    /// The host trading their own corner for an engine: the swap effect, not
+    /// a refusal. The host owns the corner and presses Computer — the host is
+    /// un-seated and an engine takes the corner in one stroke.
+    #[test]
+    fn the_host_swaps_their_corner_for_an_engine() {
+        let mut net = NetState::default();
+        net.peers.push(fake_peer());
+        net.is_host = true;
+        let host = "host";
+        net.seats = vec![seat(host, Some(2))];
+
+        assert_eq!(
+            corner_effect(&net, host, 2, CornerCommand::Cpu),
+            Ok(CornerEffect::SwapSelfForEngine(2)),
+            "a host-owned corner may become an engine"
+        );
+
+        // The performer: the host's seat frees, the engine takes the corner,
+        // and the host may claim again.
+        let me = host.to_string();
+        if let Some(seat) = net.seats.iter_mut().find(|s| s.peer == me) {
+            seat.player = None;
+        }
+        seat_engine_at(&mut net, 2);
+        assert!(
+            net.seats
+                .iter()
+                .any(|s| s.peer == host && s.player.is_none())
+        );
+        assert_eq!(
+            corner_effect(&net, host, 3, CornerCommand::Human),
+            Ok(CornerEffect::Claim(Some(3))),
+            "the host can claim another corner afterwards"
+        );
+        assert_eq!(
+            corner_effect(&net, host, 2, CornerCommand::Human),
+            Err("An engine plays corner 2.".to_string()),
+            "the engine's corner is not claimable"
+        );
+
+        // A guest with a corner still cannot: the Computer button is
+        // host-only and the swap is sequencing work.
+        let mut net = NetState::default();
+        net.peers.push(fake_peer());
+        net.seats = vec![seat("grace", Some(2))];
+        assert!(corner_effect(&net, "grace", 2, CornerCommand::Cpu).is_err());
     }
 
     /// A guest cannot place an engine; that is the host's call.
