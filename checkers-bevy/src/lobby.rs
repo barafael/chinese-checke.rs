@@ -972,6 +972,63 @@ fn ensure_sector_art(mut art: ResMut<SectorArt>, mut images: ResMut<Assets<Image
     art.0 = Some(handles);
 }
 
+/// The eight offsets the label's black border copies take around the white
+/// fill (a ~1px ring). Bevy's text pipeline has no stroke, so a legible
+/// border over the coloured wedges is a shadow ring of copies.
+const OUTLINE_OFFSETS: [Vec2; 8] = [
+    Vec2::new(1.0, 0.0),
+    Vec2::new(-1.0, 0.0),
+    Vec2::new(0.0, 1.0),
+    Vec2::new(0.0, -1.0),
+    Vec2::new(0.71, 0.71),
+    Vec2::new(0.71, -0.71),
+    Vec2::new(-0.71, 0.71),
+    Vec2::new(-0.71, -0.71),
+];
+
+/// One outlined label line: the white fill copy on top, black copies offset
+/// around it underneath. All copies carry the same string —
+/// [`draw_corner_labels`] writes it into every one via the [`CornerText`]
+/// marker on the stack. Each copy stretches the stack's width and centres its
+/// glyphs, so the copies cannot drift apart.
+fn outlined_line(parent: &mut ChildSpawnerCommands, tag: usize, font_size: f32, fill: Color) {
+    parent
+        .spawn((
+            Node {
+                width: Val::Percent(100.0),
+                height: Val::Px(font_size * 1.3),
+                ..default()
+            },
+            CornerText(tag),
+        ))
+        .with_children(|stack| {
+            for offset in OUTLINE_OFFSETS {
+                stack.spawn(outlined_copy(offset, font_size, Color::BLACK));
+            }
+            stack.spawn(outlined_copy(Vec2::ZERO, font_size, fill));
+        });
+}
+
+/// One copy of an outlined label: full-width, centred, shifted by `offset`.
+fn outlined_copy(offset: Vec2, font_size: f32, colour: Color) -> impl Bundle {
+    (
+        Node {
+            position_type: PositionType::Absolute,
+            left: Val::Px(offset.x),
+            right: Val::Px(-offset.x),
+            top: Val::Px(offset.y),
+            ..default()
+        },
+        Text::new(String::new()),
+        TextFont {
+            font_size: FontSize::Px(font_size),
+            ..default()
+        },
+        TextLayout::new(Justify::Center, LineBreak::NoWrap),
+        TextColor(colour),
+    )
+}
+
 /// The star: a fixed container holding one out-facing wedge per corner and its
 /// two label lines. The container itself is the only button — hit-testing is
 /// angular, against [`sector_at`] — and the middle stays empty, which is what
@@ -1033,24 +1090,10 @@ fn star(parent: &mut ChildSpawnerCommands, art: &SectorArt) {
                     ..default()
                 })
                 .with_children(|label| {
-                    label.spawn((
-                        Text::new("Empty"),
-                        TextFont {
-                            font_size: FontSize::Px(14.0),
-                            ..default()
-                        },
-                        TextColor(Color::srgb(0.9, 0.9, 0.92)),
-                        CornerText(i * 2),
-                    ));
-                    label.spawn((
-                        Text::new("click to select"),
-                        TextFont {
-                            font_size: FontSize::Px(11.0),
-                            ..default()
-                        },
-                        TextColor(Color::srgb(0.62, 0.62, 0.68)),
-                        CornerText(i * 2 + 1),
-                    ));
+                    // White fill over a black border, so the labels stay
+                    // legible over whichever colour the wedge wears.
+                    outlined_line(label, i * 2, 14.0, Color::srgb(0.96, 0.96, 0.97));
+                    outlined_line(label, i * 2 + 1, 11.0, Color::srgb(0.85, 0.85, 0.88));
                 });
             }
         });
@@ -2019,16 +2062,21 @@ fn sync_corner_styles(
 }
 
 /// Draw the two lines of every star petal.
+///
+/// Each line is a stack of copies (white fill over black border copies, see
+/// [`outlined_line`]); the marker sits on the stack and the string goes into
+/// every copy, so fill and border can never disagree.
 fn draw_corner_labels(
     net: Res<NetState>,
     table: Res<Table>,
-    mut texts: Query<(&CornerText, &mut Text)>,
+    lines: Query<(&CornerText, &Children)>,
+    mut texts: Query<&mut Text>,
 ) {
     if !net.is_changed() && !table.is_changed() {
         return;
     }
     let solo = net.peers.is_empty();
-    for (label, mut text) in &mut texts {
+    for (label, copies) in &lines {
         let i = label.0 / 2;
         let line = label.0 % 2;
         let p = Player::new(i as u8).expect("corner indices are below six");
@@ -2056,8 +2104,12 @@ fn draw_corner_labels(
             ("Empty".into(), "click to claim".into())
         };
         let wanted = if line == 0 { title } else { sub };
-        if **text != wanted {
-            **text = wanted;
+        for copy in copies.iter() {
+            if let Ok(mut text) = texts.get_mut(copy)
+                && **text != wanted
+            {
+                **text = wanted.clone();
+            }
         }
     }
 }
