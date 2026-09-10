@@ -1099,6 +1099,19 @@ pub fn pump_socket(
     // have a name, and afterwards only to peers that join later.
     let peers = net.peers.clone();
     let me = net.my_id.map(|id| id.to_string()).unwrap_or_default();
+
+    // The host prunes seats whose peer has left the mesh: a refresh (or a
+    // crashed tab) mints a fresh peer id, so the old seat would otherwise sit
+    // in the roster forever, and the list only ever grew. Publish only on an
+    // actual change, so an idle room costs nothing.
+    if net.sequences() {
+        let before = net.seats.clone();
+        prune_departed(&mut net);
+        if net.seats != before {
+            publish_roster(&mut socket, &net, &peers);
+        }
+    }
+
     if net.name.is_empty() && !me.is_empty() {
         net.name = format!("player-{}", &me[..me.len().min(4)]);
     }
@@ -1266,6 +1279,17 @@ pub fn pump_socket(
             NetMsg::Move(_) | NetMsg::Sequenced { .. } | NetMsg::Spectate(_) => {}
         }
     }
+}
+
+/// Drop seats whose peer has left the room, and greeting memory of peers that
+/// are gone. A refresh mints a fresh `PeerId`, so without this the old seat
+/// would sit in the roster forever. Engine seats have no peer behind them —
+/// they belong to the host — so they survive. Pure, so the rule is testable
+/// without a socket; the host runs it every lobby frame.
+fn prune_departed(net: &mut NetState) {
+    net.seats
+        .retain(|s| s.engine || net.peers.iter().any(|p| p.to_string() == s.peer));
+    net.greeted.retain(|p| net.peers.contains(p));
 }
 
 /// Add a seat if this peer has none. A new seat claims nothing; the corner is
@@ -2412,6 +2436,49 @@ mod tests {
         net.peers = vec![me, fake_peer()];
         net.seats = vec![seat(&me.to_string(), None)];
         assert_eq!(sector_click(&net, 5), SectorClick::Claim(5));
+    }
+
+    /// A peer that leaves takes its seat with it: a refresh mints a new peer
+    /// id, and without pruning the roster only ever grew.
+    #[test]
+    fn departed_peers_lose_their_seats() {
+        let mut net = NetState::default();
+        let me = PeerId(uuid::Uuid::from_u128(1));
+        let gone = PeerId(uuid::Uuid::from_u128(2));
+        let here = PeerId(uuid::Uuid::from_u128(3));
+        net.my_id = Some(me);
+        net.is_host = true;
+        net.peers = vec![me, here];
+        net.greeted = vec![me, gone, here];
+        net.seats = vec![
+            seat(&me.to_string(), Some(0)),
+            seat(&gone.to_string(), Some(3)),
+            Seat {
+                engine: true,
+                ..seat("engine-0", Some(4))
+            },
+            seat(&here.to_string(), None),
+        ];
+
+        prune_departed(&mut net);
+
+        assert!(
+            !net.seats.iter().any(|s| s.peer == gone.to_string()),
+            "the departed peer's seat must go"
+        );
+        assert!(
+            net.seats.iter().any(|s| s.peer == here.to_string()),
+            "connected peers keep their seats"
+        );
+        assert!(
+            net.seats.iter().any(|s| s.engine),
+            "engines have no peer behind them and survive"
+        );
+        assert!(
+            !net.greeted.contains(&gone),
+            "greeting memory of the departed is dropped"
+        );
+        assert!(net.greeted.contains(&here));
     }
 
     /// Shared: clicking a claimed corner selects it — yours, another
