@@ -426,14 +426,16 @@ fn spawn_ui(mut commands: Commands) {
             ));
         });
 
-    // Turn controls, top right: Confirm, Cancel, Resign.
+    // Turn controls, centred at the top: Confirm, Cancel, Resign.
     commands
         .spawn((
             Node {
                 position_type: PositionType::Absolute,
                 top: Val::Px(10.0),
-                right: Val::Px(12.0),
+                left: Val::Px(0.0),
+                right: Val::Px(0.0),
                 column_gap: Val::Px(8.0),
+                justify_content: JustifyContent::Center,
                 ..default()
             },
             HudUi,
