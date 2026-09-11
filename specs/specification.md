@@ -42,7 +42,6 @@ Each law records how strongly it is established:
 | proof (Kani) | Proven for the whole domain by bounded model checking. |
 | exhaustive | Checked over a finite domain by enumeration. |
 | property test | Checked over inputs from a generated strategy. |
-| example | Checked against fixed examples only. |
 
 `proof (Kani)` laws additionally re-check themselves in ordinary Rust, so `cargo test` exercises them on every platform; the proofs themselves need Linux or WSL, since Kani does not build on Windows.
 
