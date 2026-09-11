@@ -20,6 +20,7 @@
 //! sources of truth about which player it commands.
 
 use bevy::asset::RenderAssetUsages;
+use bevy::ecs::system::SystemParam;
 use bevy::image::Image;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
@@ -1047,25 +1048,48 @@ pub fn elect_host(socket: Option<ResMut<MatchboxSocket>>, mut net: ResMut<NetSta
     }
 }
 
+/// The world one lobby conversation reads and mutates: the roster and house
+/// rules being negotiated, and the window/cursor furniture for peer pointers.
+/// One parameter in place of eight, exactly the [`crate::draw::DrawContext`]
+/// deal: both lobby pumps would otherwise cross the clippy argument limit,
+/// and being a unit of type keeps `pump_socket` and `handle_buttons` from
+/// drifting apart. The socket is not here: it is an optional input, so each
+/// system takes it as its own parameter.
+#[derive(SystemParam)]
+pub struct LobbyWorld<'w, 's> {
+    pub net: ResMut<'w, NetState>,
+    pub status: ResMut<'w, LobbyStatus>,
+    pub variants: ResMut<'w, ChosenVariants>,
+    pub selected: ResMut<'w, SelectedCorner>,
+    pub table: ResMut<'w, Table>,
+    pub next_state: ResMut<'w, NextState<AppState>>,
+    pub state: Res<'w, State<AppState>>,
+    pub commands: Commands<'w, 's>,
+    pub time: Res<'w, Time>,
+    pub windows: Query<'w, 's, &'static Window>,
+    pub cursors: Query<'w, 's, (Entity, &'static mut RemoteCursor)>,
+}
+
 /// The whole lobby conversation, one message at a time: greetings, corner
 /// claims, the host's roster broadcasts, and the `Start` that moves everyone
 /// into the game. Runs on the socket every frame.
 ///
 /// `pub` so the multiplayer integration test can run the real pump in a
 /// headless instance, exactly as the app schedules it.
-#[allow(clippy::too_many_arguments)]
-pub fn pump_socket(
-    socket: Option<ResMut<MatchboxSocket>>,
-    mut net: ResMut<NetState>,
-    mut status: ResMut<LobbyStatus>,
-    mut variants: ResMut<ChosenVariants>,
-    mut next_state: ResMut<NextState<AppState>>,
-    state: Res<State<AppState>>,
-    mut commands: Commands,
-    time: Res<Time>,
-    windows: Query<&Window>,
-    mut cursors: Query<(Entity, &mut RemoteCursor)>,
-) {
+pub fn pump_socket(socket: Option<ResMut<MatchboxSocket>>, lobby: LobbyWorld) {
+    let LobbyWorld {
+        mut net,
+        mut status,
+        mut variants,
+        mut next_state,
+        state,
+        mut commands,
+        time,
+        windows,
+        mut cursors,
+        ..
+    } = lobby;
+
     let Some(mut socket) = socket else {
         return;
     };
@@ -1322,16 +1346,12 @@ pub fn engine_camps(net: &NetState) -> Vec<Player> {
         .collect()
 }
 
-/// The `Start` the host broadcasts: the final roster and the corners that are
-/// seated. `players` is derived from the seats rather than assumed, so the
-/// wire always carries the table that was actually claimed.
+/// The `Start` the host broadcasts: the final roster and the house-rule
+/// toggle. Receivers deal from `seats`, so the roster is the single source
+/// for who sits where.
 pub fn start_message(net: &NetState, variants: Variants) -> NetMsg {
-    let mut players: Vec<u32> = net.seats.iter().filter_map(|s| s.player).collect();
-    players.sort_unstable();
-    players.dedup();
     NetMsg::Start {
         seats: net.seats.clone(),
-        players,
         forbid_foreign_camps: variants.forbid_foreign_camps,
     }
 }
@@ -1544,20 +1564,25 @@ pub fn apply_preset(table: &mut Table, seating: Seating) {
     }
 }
 
-/// A Bevy system: the parameter count is the world access it needs, so the
-/// lint threshold is waived for it.
-#[allow(clippy::too_many_arguments)]
+/// One corner of the lobby reacts to what the player clicks or types: presets,
+/// corner-by-corner seats, the foreign-camps toggle, and the `Start` that
+/// packs the table. The rules-only half lives in [`corner_effect`]; a network
+/// conversation lives in [`pump_socket`].
 pub fn handle_buttons(
     buttons: Query<(&Interaction, &LobbyButton), Changed<Interaction>>,
     keys: Res<ButtonInput<KeyCode>>,
     mut socket: Option<ResMut<MatchboxSocket>>,
-    mut net: ResMut<NetState>,
-    mut table: ResMut<Table>,
-    mut selected: ResMut<SelectedCorner>,
-    mut variants: ResMut<ChosenVariants>,
-    mut status: ResMut<LobbyStatus>,
-    mut next_state: ResMut<NextState<AppState>>,
+    lobby: LobbyWorld,
 ) {
+    let LobbyWorld {
+        mut net,
+        mut table,
+        mut selected,
+        mut variants,
+        mut status,
+        mut next_state,
+        ..
+    } = lobby;
     let mut start = keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::NumpadEnter);
     let mut foreign = keys.just_pressed(KeyCode::KeyF);
     let deselect = keys.just_pressed(KeyCode::Escape);
@@ -1870,19 +1895,11 @@ pub fn deal_for(net: &NetState, table: &Table) -> (Vec<Player>, Vec<Player>, Opt
     }
 }
 
-/// Build the game for the configured table and seat the local player.
-///
-/// The session is *rebuilt* here rather than mutated, because the players
-/// determine the starting position and there is no meaningful way to reseat a
-/// board that has already been dealt. Runs on entering the game, before the
-/// board is spawned.
-pub fn apply_seats(
-    net: Res<NetState>,
-    table: Res<Table>,
-    variants: Res<ChosenVariants>,
-    mut session: ResMut<Session>,
-) {
-    let (players, ai, local_player, spectating) = deal_for(&net, &table);
+/// Build the round's session for the configured table and variants, seating
+/// the local player. Pure, so the entry system and the "deal a new game" key
+/// share exactly one deal path.
+pub fn deal_session(net: &NetState, table: &Table, variants: Variants) -> Session {
+    let (players, ai, local_player, spectating) = deal_for(net, table);
     let wording = if spectating {
         if net.peers.is_empty() {
             "Spectating - the engines play each other.".into()
@@ -1895,11 +1912,27 @@ pub fn apply_seats(
         format!("Playing all {} corners on this device", players.len())
     };
 
-    *session = Session::for_players(&players, variants.0);
+    let mut session = Session::for_players(&players, variants);
     session.ai_players = ai;
     session.local_player = local_player;
     session.spectating = spectating;
     session.message = wording;
+    session
+}
+
+/// Build the game for the configured table and seat the local player.
+///
+/// The session is *rebuilt* here rather than mutated, because the players
+/// determine the starting position and there is no meaningful way to reseat a
+/// board that has already been dealt. Runs on entering the game, before the
+/// board is spawned.
+pub fn apply_seats(
+    net: Res<NetState>,
+    table: Res<Table>,
+    variants: Res<ChosenVariants>,
+    mut session: ResMut<Session>,
+) {
+    *session = deal_session(&net, &table, variants.0);
 }
 
 #[cfg(test)]
@@ -1997,18 +2030,18 @@ mod tests {
         );
     }
 
-    /// The `Start` broadcast derives the players from the seats, so the wire
-    /// always carries the table the host actually claims.
+    /// The `Start` broadcast carries the roster as it stands, so every peer
+    /// deals from the same seats.
     #[test]
-    fn the_start_message_carries_the_claimed_corners() {
+    fn the_start_message_carries_the_roster() {
         let net = NetState {
             seats: vec![seat("ada", Some(3)), seat("grace", Some(0))],
             ..Default::default()
         };
-        let NetMsg::Start { players, .. } = start_message(&net, Variants::default()) else {
+        let NetMsg::Start { seats, .. } = start_message(&net, Variants::default()) else {
             panic!("start_message must build a Start");
         };
-        assert_eq!(players, vec![0, 3], "corners are sorted, not join order");
+        assert_eq!(seats, net.seats);
     }
 
     /// The host seats an engine on a free corner; it claims that corner and

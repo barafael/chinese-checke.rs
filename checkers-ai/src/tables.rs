@@ -45,10 +45,9 @@ pub fn coord_of(index: u8) -> Coord {
     TABLES.coord[index as usize]
 }
 
-/// The hole index of a board coordinate. Kept for tests and callers building
-/// states by hand.
-#[allow(dead_code)]
-pub fn index_of(c: Coord) -> Option<usize> {
+/// The hole index of a board coordinate, for tests building states by hand.
+#[cfg(test)]
+pub(crate) fn index_of(c: Coord) -> Option<usize> {
     TABLES.index.get(&c).copied()
 }
 

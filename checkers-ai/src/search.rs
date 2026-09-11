@@ -19,9 +19,9 @@
 //! the time budget, discarding a partially searched depth (standard practice:
 //! a partial iteration's scores are unsound; its best move is not used).
 
+use crate::AiConfig;
 use crate::engine::{RawMove, State};
 use crate::tables::TABLES;
-use crate::{AiConfig, AiStats};
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -100,7 +100,7 @@ impl Budget {
 /// `history` holds zobrist keys this game has already seen; a root move into
 /// one of them is refused while any alternative exists, which is what stops a
 /// race engine from shuffling in a won position.
-pub fn search(state: &State, config: &AiConfig, history: &[u64]) -> (Option<RawMove>, AiStats) {
+pub fn search(state: &State, config: &AiConfig, history: &[u64]) -> Option<RawMove> {
     // Every seat that owns a piece. The rules guarantee ten per seated player
     // and none for vacant camps, so piece presence identifies the seated set.
     let mut seated: Vec<usize> = (0..6).filter(|&p| state.pieces[p] != 0).collect();
@@ -108,7 +108,6 @@ pub fn search(state: &State, config: &AiConfig, history: &[u64]) -> (Option<RawM
     let mut budget = Budget::new(config.budget);
     let mut tt = table();
     let mut best: Option<RawMove> = None;
-    let mut stats = AiStats::default();
 
     if seated.len() == 2 {
         // Two players: negamax from the mover's seat.
@@ -131,7 +130,6 @@ pub fn search(state: &State, config: &AiConfig, history: &[u64]) -> (Option<RawM
                 rival,
                 budget: &mut budget,
                 tt: &mut tt,
-                no_tt: false,
             };
             let (score, mv) = negamax(state, &mut ctx, depth, i32::MIN + 1, i32::MAX, 0);
             if budget.expired {
@@ -142,8 +140,6 @@ pub fn search(state: &State, config: &AiConfig, history: &[u64]) -> (Option<RawM
             {
                 best_score = score;
                 best = Some(mv);
-                stats.depth = depth;
-                stats.nodes = budget.nodes;
             }
             if score.abs() > WIN / 2 {
                 break; // forced result found: deeper search cannot improve it
@@ -157,8 +153,6 @@ pub fn search(state: &State, config: &AiConfig, history: &[u64]) -> (Option<RawM
             }
             if let Some(mv) = mv {
                 best = Some(mv);
-                stats.depth = depth;
-                stats.nodes = budget.nodes;
             }
         }
     }
@@ -169,8 +163,7 @@ pub fn search(state: &State, config: &AiConfig, history: &[u64]) -> (Option<RawM
 
     // Anti-shuffling at the root: refuse to revisit a known position while
     // any alternative exists.
-    let best = refuse_history(state, best, history);
-    (best, stats)
+    refuse_history(state, best, history)
 }
 
 /// Static root ordering: forward progress first, then everything else.
@@ -210,8 +203,6 @@ struct Ctx<'a> {
     rival: usize,
     budget: &'a mut Budget,
     tt: &'a mut Table,
-    /// Debug switch: a table that answers nothing cannot corrupt anything.
-    no_tt: bool,
 }
 
 fn negamax(
@@ -248,11 +239,7 @@ fn negamax(
         return (score, None);
     }
 
-    let entry = if ctx.no_tt {
-        None
-    } else {
-        ctx.tt.get(&state.hash)
-    };
+    let entry = ctx.tt.get(&state.hash);
     let mut best_mv: Option<RawMove> = entry.and_then(|e| e.mv);
     if let Some(entry) = entry
         && entry.depth >= depth
@@ -316,17 +303,15 @@ fn negamax(
         }
     }
 
-    if !ctx.no_tt {
-        ctx.tt.insert(
-            state.hash,
-            Entry {
-                depth,
-                flag,
-                score: best_score,
-                mv: best_mv,
-            },
-        );
-    }
+    ctx.tt.insert(
+        state.hash,
+        Entry {
+            depth,
+            flag,
+            score: best_score,
+            mv: best_mv,
+        },
+    );
     (best_score, best_mv)
 }
 
@@ -391,6 +376,7 @@ mod tests {
     use super::*;
     use crate::engine::{pack, unpack};
     use crate::tables::index_of;
+    use crate::testutil::state_with;
     use crate::{Ai, AiConfig};
     use checkers_core::geometry::Coord;
     use checkers_core::position::Player;
@@ -402,26 +388,6 @@ mod tests {
             budget: Duration::from_millis(40),
             max_depth: 6,
         }
-    }
-
-    /// A sparse state: one racing piece for seat 0, a wall for seat 3.
-    fn state_with(p0: &[Coord], p3: &[Coord], turn: u8) -> State {
-        let mut s = State {
-            pieces: [0; 6],
-            occupied: 0,
-            turn,
-            hash: 0,
-            forbid_foreign_camps: false,
-        };
-        for (player, coords) in [(0usize, p0), (3usize, p3)] {
-            for c in coords {
-                let i = index_of(*c).expect("test coordinate is a board hole");
-                s.pieces[player] |= 1u128 << i;
-                s.occupied |= 1u128 << i;
-            }
-        }
-        s.hash = s.zobrist();
-        s
     }
 
     /// The search must refuse a root move that lands on a position this game
@@ -444,7 +410,7 @@ mod tests {
 
         // Without history, the search may pick it; the jump is real progress
         // through the middle.
-        let (free, _) = search(&state, &config(), &[]);
+        let free = search(&state, &config(), &[]);
         assert!(free.is_some(), "a moveable position must yield a move");
 
         // With (0,0)-having-been-occupied in the history, that exact landing
@@ -454,7 +420,7 @@ mod tests {
             probe.apply(shuffle);
             probe.hash
         };
-        let (refused, _) = search(&state, &config(), &[landing]);
+        let refused = search(&state, &config(), &[landing]);
         let refused = refused.expect("a moveable position must still yield a move");
         assert_ne!(refused, shuffle, "the engine returned to a known position");
     }
@@ -487,7 +453,7 @@ mod tests {
             offered.is_empty(),
             "the fixture must be stuck, but offers: {offered:?}"
         );
-        let (mv, _) = search(&state, &config(), &[]);
+        let mv = search(&state, &config(), &[]);
         assert!(mv.is_none(), "no move exists, so no move may be returned");
     }
 
@@ -613,7 +579,6 @@ mod brute_force_check {
                 rival,
                 budget: &mut budget,
                 tt: &mut tt,
-                no_tt: false,
             };
             let (neg, _) = negamax(&state, &mut ctx, depth, i32::MIN + 1, i32::MAX, 0);
 
@@ -651,7 +616,6 @@ mod brute_force_check {
                 rival,
                 budget: &mut budget,
                 tt: &mut tt,
-                no_tt: false,
             };
             let (_, neg_best) = negamax(&state, &mut ctx, depth, i32::MIN + 1, i32::MAX, 0);
 

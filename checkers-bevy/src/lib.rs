@@ -550,17 +550,16 @@ impl Session {
         // the *pre-move* position.
         self.last_move = Some(LastMove {
             mover,
-            path: self.move_path(mv),
+            path: self.fly_route(mv),
         });
 
         self.game.play(mv);
     }
 
     /// Whether this peer wants the last committed move replayed: someone
-    /// else's. A peer with no seat of its own — hotseat, or a spectator —
-    /// replays every move, since whoever moves next is always watching
-    /// someone else's turn begin. One's own move arriving back sequenced is
-    /// not news worth animating.
+    /// else's. A peer with no seat of its own replays every move, since whoever
+    /// moves next is always watching someone else's turn begin. One's own move
+    /// arriving back sequenced is not news worth animating.
     pub fn should_replay(&self) -> bool {
         let Some(last) = &self.last_move else {
             return false;
@@ -584,11 +583,6 @@ impl Session {
                     .unwrap_or_default(),
             },
         }
-    }
-
-    /// The concrete path a move flies, used to animate the opponent's replay.
-    fn move_path(&self, mv: &GameMove) -> Vec<Coord> {
-        self.fly_route(mv)
     }
 
     /// Hops in a jump move, and how many crossed another player's piece.

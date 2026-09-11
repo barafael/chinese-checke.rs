@@ -6,17 +6,13 @@
 //! `bevy_platform::time::Instant` for the search's wall-clock budget (see
 //! `search`), which works on `wasm32-unknown-unknown` where `std`'s panics.
 //!
-//! # What the research says the game is
+//! # What the engine does
 //!
-//! Chinese checkers is a *race*: nothing is captured, material is constant,
-//! and the only thing that changes over a game is how far each piece has
-//! travelled toward the opposite camp. The strategy literature therefore
-//! values, in order: long jump chains and shared ladders, disciplined
-//! emptying of the home camp (one straggler piece loses races), and — with
-//! more than two players — denying ladders to whoever moves next. Games
-//! between strong players are decided by a couple of moves, which means an
-//! engine needs both a precise notion of progress and enough search to avoid
-//! throwing a piece backwards at the wrong moment.
+//! Chinese checkers is a *race*: nothing is captured and material is
+//! constant, so the whole game is how far each piece has travelled toward the
+//! opposite camp. That makes progress the evaluation's core; jump chains and
+//! shared ladders multiply progress per move, and emptying the home camp
+//! matters because one straggler piece loses races.
 //!
 //! # How this engine plays
 //!
@@ -36,8 +32,10 @@
 mod engine;
 mod search;
 mod tables;
+#[cfg(test)]
+mod testutil;
 
-use checkers_core::geometry::{Coord, Dir};
+use checkers_core::geometry::Dir;
 use checkers_core::position::{Move, MoveKind, Player};
 use checkers_core::rules::Game;
 
@@ -126,26 +124,17 @@ mod strength_tests {
     }
 }
 
-/// Diagnostics from the last search, for tests and curious UIs.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct AiStats {
-    /// Depth the last completed iteration reached.
-    pub depth: u8,
-    /// Nodes explored across the whole last search.
-    pub nodes: u64,
-}
-
-/// A persistent engine instance.
+/// A per-round engine instance.
 ///
-/// Persistence carries the recent-position memory: the engine penalises moves
+/// Per-round holds the recent-position memory: the engine penalises moves
 /// that revisit a position this game has already seen, which is what stops it
-/// from shuffling a piece back and forth in a won position. One engine per
-/// game; [`Ai::forget`] on a restart.
+/// from shuffling a piece back and forth in a won position. A restart deals a
+/// fresh `Ai` rather than reusing this one, so the memory never leaks across
+/// rounds.
 #[derive(Debug)]
 pub struct Ai {
     config: AiConfig,
     recent: Vec<u64>,
-    pub stats: AiStats,
 }
 
 impl Default for Ai {
@@ -159,13 +148,7 @@ impl Ai {
         Self {
             config,
             recent: Vec::new(),
-            stats: AiStats::default(),
         }
-    }
-
-    /// Forget the game's recent positions. Call when the game restarts.
-    pub fn forget(&mut self) {
-        self.recent.clear();
     }
 
     fn remember(&mut self, hash: u64) {
@@ -195,36 +178,8 @@ impl Ai {
         // shuffle) and with the other seat to move (the two-move shuffle).
         self.remember(state.hash);
         self.remember(state.piece_hash());
-        let (raw, stats) = search::search(&state, &self.config, &self.recent);
-        self.stats = stats;
+        let raw = search::search(&state, &self.config, &self.recent);
         raw.map(decode)
-    }
-
-    /// The chosen move plus, for jumps, one concrete hop route that plays it:
-    /// every consecutive pair is a single legal hop, starting at the origin
-    /// and ending at the destination. Steps carry an empty route.
-    pub fn choose_move_route_for(
-        &mut self,
-        game: &Game,
-        player: Player,
-    ) -> Option<(Move, Vec<Coord>)> {
-        let mv = self.choose_move_for(game, player)?;
-        if mv.kind == MoveKind::Step {
-            return Some((mv, Vec::new()));
-        }
-        // The shortest concrete route the rules' enumerator knows that lands
-        // where the search decided. Route choice never changes the resulting
-        // position, so any route to the same hole is equally good to play.
-        let routes = checkers_core::rules::jump_routes(game.position(), mv.origin, 24);
-        // The rules' enumerator lists each path with the origin first; the
-        // viewer wants the *landings only* — the sequence of holes the piece
-        // stops on, in order, ending at the destination.
-        let route = routes
-            .into_iter()
-            .find(|r| r.last() == Some(&mv.destination))
-            .and_then(|r| r.get(1..).map(|r| r.to_vec()))
-            .unwrap_or_else(|| vec![mv.destination]);
-        Some((mv, route))
     }
 }
 

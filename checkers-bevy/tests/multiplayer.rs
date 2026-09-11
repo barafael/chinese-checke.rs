@@ -1,23 +1,23 @@
 //! Live multiplayer lobby: two and three real instances on one room.
 //!
-//! `lobby_flow` and `room_flow` drive the lobby decisions in a single app with
-//! no socket. These tests go one step further: **each instance is its own
-//! headless Bevy app** running the real lobby systems (`elect_host`,
-//! `pump_socket`, `select_corner`, `handle_buttons`, `apply_seats`), each with
-//! its own real [`MatchboxSocket`]. The apps are introduced by an in-process
-//! full-mesh signaling server (the same crate the fork ships for native
-//! development) and then talk peer-to-peer over an actual WebRTC data channel.
+//! `lobby_flow` drives the lobby decisions in a single app with no socket.
+//! These tests go one step further: **each instance is its own headless Bevy
+//! app** running the real lobby systems (`elect_host`, `pump_socket`,
+//! `select_corner`, `handle_buttons`, `apply_seats`), each with its own real
+//! [`MatchboxSocket`]. The apps are introduced by an in-process full-mesh
+//! signaling server (the same crate the fork ships for native development)
+//! and then talk peer-to-peer over an actual WebRTC data channel.
 //!
 //! So the whole shared-room contract crosses a real wire here: host election,
-//! greetings, corner claims, engine seats, the roster broadcasts, readiness,
-//! and the host's `Start` — and the guest's lobby reflects what the peer
-//! actually configured, because there is no other copy of the truth to read.
+//! greetings, corner claims, engine seats, the roster broadcasts, and the
+//! host's `Start` — and the guest's lobby reflects what the peer actually
+//! configured, because there is no other copy of the truth to read.
 //!
 //! There is no window and no renderer: `MinimalPlugins`, plus the input and
 //! state plugins the lobby reads. An instance is driven exactly like the web
 //! build is operated — digit keys select a corner, the corner buttons human /
-//! computer / off, Space readies, F flips the foreign-camp rule, Enter starts —
-//! so the code paths under test are the app's own, not a reimplementation.
+//! computer / off, F flips the foreign-camp rule, Enter starts — so the
+//! code paths under test are the app's own, not a reimplementation.
 //!
 //! These are the slow siblings of the unit tests — each scenario waits for a
 //! real peer handshake to complete — so they are `#[ignore]`d and opt in:

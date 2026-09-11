@@ -38,12 +38,11 @@ pub struct LawInfo {
 pub enum Evidence {
     /// Proven for the whole domain by the Kani harnesses in [`crate::geometry`].
     Proof,
-    /// Checked over `proptest`-generated inputs.
+    /// Checked over pseudo-random inputs from the crate's own xorshift
+    /// generator.
     Property,
     /// Checked exhaustively over a finite domain.
     Exhaustive,
-    /// Checked against fixed examples only.
-    Example,
 }
 
 impl Evidence {
@@ -52,7 +51,6 @@ impl Evidence {
             Evidence::Proof => "proof (Kani)",
             Evidence::Property => "property test",
             Evidence::Exhaustive => "exhaustive",
-            Evidence::Example => "example",
         }
     }
 }

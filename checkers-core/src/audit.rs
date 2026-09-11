@@ -16,7 +16,7 @@
 //! the six per-player counts. Adding checks for those would be decoration, not
 //! validation.
 
-use crate::position::{HOLES, PIECES_PER_PLAYER, Player, Position};
+use crate::position::{PIECES_PER_PLAYER, Player, Position};
 
 /// A position invariant that was violated.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,8 +26,6 @@ pub enum PositionFault {
     /// A player not in the game holds pieces — they would sit forever on
     /// holes another player needs to win through.
     GhostPiece { player: u8, found: usize },
-    /// The position is not backed by the 121-hole board.
-    HoleTable { found: usize },
 }
 
 impl core::fmt::Display for PositionFault {
@@ -42,11 +40,6 @@ impl core::fmt::Display for PositionFault {
                 f,
                 "player {player} is not in the game yet owns {found} pieces \
                  (chapter 15: unseated players sit out entirely)"
-            ),
-            PositionFault::HoleTable { found } => write!(
-                f,
-                "the hole table has {found} entries, expected {HOLES} \
-                 (law CC-GEO-CARDINALITY)"
             ),
         }
     }
@@ -80,12 +73,6 @@ pub fn audit_position(pos: &Position, players: &[Player]) -> Result<(), Position
                 found: n,
             });
         }
-    }
-
-    if pos.holes().len() != HOLES {
-        return Err(PositionFault::HoleTable {
-            found: pos.holes().len(),
-        });
     }
 
     Ok(())

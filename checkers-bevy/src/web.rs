@@ -230,7 +230,7 @@ mod tests {
     #[test]
     fn default_is_no_room_when_none_is_named() {
         assert_eq!(room_from_fragment(""), None);
-        assert_eq!(room_from_fragment("#spectate=1"), None);
+        assert_eq!(room_from_fragment("#legacy=1"), None);
         assert_eq!(room_from_fragment("#room="), None); // empty value is invalid
         assert_eq!(room_from_fragment("#room=has space!"), None); // invalid chars
     }

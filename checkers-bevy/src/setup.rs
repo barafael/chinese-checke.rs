@@ -7,11 +7,10 @@
 //! against those facts. Making the player count a rules-level parameter would
 //! reopen every one of them to support a menu.
 //!
-//! So a shorter game is expressed as a *position*, not as a different rulebook:
-//! [`Seating::position`] fills only the seated players' camps and hands the
-//! result to `Game::from_position`. Unseated players still take their turn in
-//! rotation, have no pieces, no legal moves, and are passed over automatically.
-//! The rules never learn that anyone is missing.
+//! So a shorter game is dealt through the rules' own `Game::for_players` over
+//! [`Seating::players`]'s partial camp list: unseated players still take their
+//! turn in rotation, have no pieces, no legal moves, and are passed over
+//! automatically. The rules never learn that anyone is missing.
 //!
 //! # Which counts are offered
 //!
@@ -23,30 +22,23 @@
 //! - **6** — everyone; the standard game, identical to `Position::initial`.
 //!
 //! Soundness is [`Seating::is_sound`]: nobody starts already won, and everybody
-//! has a legal move. It is checked against the real rules, and a test enumerates
-//! all 64 subsets of the six camps to confirm every offered seating passes.
-//!
-//! Note that soundness does **not** rule out any particular count — four and
-//! five players are perfectly playable, and are left out only because no
-//! rotationally symmetric arrangement of them exists. I initially believed the
-//! criterion was "each seated player's opposite camp starts empty", which would
-//! have made four and five impossible. That reasoning was wrong in both
-//! directions: it rejects $\{0,3\}$, the standard two-player game, and admits
-//! $\{0,1\}$. Occupancy of the target camp at setup says nothing about
-//! reachability, because those pieces move out of the way.
+//! has a legal move, checked against the real rules over all 64 subsets of the
+//! six camps. It does **not** rule out any particular count — four and five
+//! players are perfectly playable and are left out only because no rotationally
+//! symmetric arrangement of them exists. Occupying the target camp at setup
+//! says nothing about reachability, since those pieces move out of the way.
 //!
 //! # Auditing a partial board
 //!
 //! [`checkers_core::audit::audit_position`] requires all six players to own ten
-//! pieces, because law `CC-POS-PIECES` says
-//! $\forall i \in P: |\{v : s(v) = i\}| = 10$ over all six. That law is the
-//! specified game and is not weakened to accommodate a menu, so a partial
-//! seating cannot use that audit.
+//! pieces, because law `CC-POS-PIECES` states
+//! $\forall i \in P: |\{v : s(v) = i\}| = 10$ over all six; that law is the
+//! specified game and is not weakened to accommodate a menu.
 //!
-//! [`Seating::audit`] applies the same underlying invariant — piece
-//! conservation, chapter 14 — restricted to the players who are actually
-//! seated, and additionally requires every unseated player to own *nothing*. At
-//! [`Seating::Six`] it is exactly the core audit, which a test asserts.
+//! [`Seating::audit`] applies the same invariant — piece conservation,
+//! chapter 14 — restricted to the seated players, and additionally requires
+//! every unseated player to own *nothing*. At [`Seating::Six`] it is exactly
+//! the core audit, which a test asserts.
 
 use std::fmt;
 
@@ -117,33 +109,6 @@ impl Seating {
             .collect()
     }
 
-    pub fn count(self) -> usize {
-        self.players().len()
-    }
-
-    /// The seated player indices, for [`checkers_net::NetMsg::Start`].
-    pub fn indices(self) -> Vec<u32> {
-        self.players()
-            .into_iter()
-            .map(|p| u32::from(p.index()))
-            .collect()
-    }
-
-    /// The seating a set of player indices names, if it is one this build knows.
-    ///
-    /// Order-insensitive and duplicate-tolerant, because it parses data from
-    /// another peer rather than from this process. `None` for anything
-    /// unrecognised — a peer running a build that offers a seating this one does
-    /// not, or a corrupt message. The caller decides what to do about it; this
-    /// does not guess, since guessing would deal a board that disagrees with the
-    /// rest of the table, which is the exact bug the field was added to fix.
-    pub fn from_indices(indices: &[u32]) -> Option<Seating> {
-        let mut wanted: Vec<u32> = indices.to_vec();
-        wanted.sort_unstable();
-        wanted.dedup();
-        Seating::ALL.into_iter().find(|s| s.indices() == wanted)
-    }
-
     /// The label shown in the lobby.
     pub fn label(self) -> &'static str {
         match self {
@@ -161,16 +126,6 @@ impl Seating {
     /// the specification of the six-player game.
     pub fn audit(self, pos: &Position) -> Result<(), SeatingFault> {
         audit_players(&self.players(), pos)
-    }
-
-    /// Cycle to the next seating, for the key that steps through them.
-    pub fn next(self) -> Seating {
-        let all = Seating::ALL;
-        let i = all
-            .iter()
-            .position(|s| *s == self)
-            .expect("every seating is in ALL");
-        all[(i + 1) % all.len()]
     }
 
     /// The starting position: only the seated players' camps are filled.
@@ -202,14 +157,6 @@ impl Seating {
     /// from the geometry: nobody may start already having won, and everybody
     /// must have a legal move. A seating failing either shows up as a game that
     /// is over before it starts, or as a player who can never act.
-    ///
-    /// I first wrote this as "no seated player's opposite camp is also seated",
-    /// reasoning that a pre-filled target camp is unreachable. That is wrong in
-    /// both directions, and the enumeration test caught it: it rejects $\{0,3\}$
-    /// — the standard two-player game, where the facing pieces simply move out
-    /// of each other's way — while admitting $\{0,1\}$, which is playable but
-    /// has no such symmetry. Occupancy of the target camp at *setup* says
-    /// nothing about reachability, because those pieces move.
     pub fn is_sound(players: &[Player]) -> bool {
         if players.len() < 2 {
             return false;
@@ -289,14 +236,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn each_seating_seats_the_number_it_claims() {
-        assert_eq!(Seating::Two.count(), 2);
-        assert_eq!(Seating::Three.count(), 3);
-        assert_eq!(Seating::Six.count(), 6);
-    }
-
-    /// Ten pieces per seated player and none for anyone else.
     #[test]
     fn only_the_seated_players_have_pieces() {
         for seating in Seating::ALL {
@@ -528,67 +467,5 @@ mod tests {
                 .unwrap_or_else(|f| panic!("conservation broke at ply {ply}: {f}"));
         }
         assert!(!game.is_over(), "60 plies should not finish a game");
-    }
-
-    /// Every seating must survive the wire round-trip, or a guest deals a
-    /// different board from the host — which is the bug the `players` field on
-    /// `NetMsg::Start` exists to prevent.
-    #[test]
-    fn every_seating_round_trips_through_indices() {
-        for seating in Seating::ALL {
-            let indices = seating.indices();
-            assert_eq!(
-                Seating::from_indices(&indices),
-                Some(seating),
-                "{seating:?} did not survive {indices:?}"
-            );
-        }
-    }
-
-    /// The indices come from another peer, so parsing must not depend on their
-    /// order or assume they are unique.
-    #[test]
-    fn parsing_indices_ignores_order_and_duplicates() {
-        assert_eq!(Seating::from_indices(&[3, 0]), Some(Seating::Two));
-        assert_eq!(Seating::from_indices(&[0, 3, 0, 3]), Some(Seating::Two));
-        assert_eq!(Seating::from_indices(&[4, 0, 2]), Some(Seating::Three));
-        assert_eq!(
-            Seating::from_indices(&[5, 4, 3, 2, 1, 0]),
-            Some(Seating::Six)
-        );
-    }
-
-    /// An unrecognised set must be refused rather than rounded to something
-    /// plausible. Dealing a *nearly* right board silently is worse than saying
-    /// the seating is unknown, because both peers then disagree without knowing.
-    #[test]
-    fn an_unknown_seating_is_refused() {
-        for bad in [
-            vec![],
-            vec![0],
-            vec![0, 1],          // sound, but not offered
-            vec![0, 1, 2, 3],    // four players
-            vec![0, 1, 2, 3, 4], // five
-            vec![9, 42],         // not player indices at all
-        ] {
-            assert_eq!(
-                Seating::from_indices(&bad),
-                None,
-                "{bad:?} must not be accepted"
-            );
-        }
-    }
-
-    #[test]
-    fn cycling_visits_every_seating_and_returns() {
-        let mut seen = vec![Seating::default()];
-        let mut s = Seating::default();
-        for _ in 0..Seating::ALL.len() - 1 {
-            s = s.next();
-            assert!(!seen.contains(&s), "cycle repeated {s:?} early");
-            seen.push(s);
-        }
-        assert_eq!(s.next(), Seating::default(), "cycling must wrap around");
-        assert_eq!(seen.len(), Seating::ALL.len());
     }
 }

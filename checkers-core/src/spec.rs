@@ -122,11 +122,9 @@ impl Chapter {
         }
     }
 
-    /// The chapter's normative prose.
-    ///
-    /// This is the text that was previously carried by the hand-written
-    /// markdown. It lives here so it cannot drift from the laws that formalise
-    /// it, and so the generator can emit a document in a deliberate order.
+    /// The chapter's normative prose. It lives here so it cannot drift from the
+    /// laws that formalise it, and so the generator can emit a document in a
+    /// deliberate order.
     pub const fn prose(self) -> &'static str {
         match self {
             Chapter::Coordinates => {

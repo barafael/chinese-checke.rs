@@ -114,9 +114,9 @@ impl State {
         self.turn = next;
     }
 
-    /// Inverse of [`State::apply`], kept for the round-trip tests: search
+    /// Inverse of [`State::apply`], used only by the round-trip tests: search
     /// itself clones states, which is cheaper than faithful unmaking.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn undo(&mut self, mv: RawMove) {
         // Unapply: wind the turn back first, then the move is the same XOR —
         // except for `occupied`, whose apply is not invertible (OR never is):
@@ -226,30 +226,11 @@ impl State {
 mod tests {
     use super::*;
     use crate::tables::index_of;
+    use crate::testutil::state_with;
     use checkers_core::Xorshift;
     use checkers_core::geometry::Coord;
     use checkers_core::position::Player;
     use checkers_core::rules::legal_moves;
-
-    /// A state with a few pieces placed by coordinate.
-    fn state_with(p0: &[Coord], p3: &[Coord], turn: u8) -> State {
-        let mut s = State {
-            pieces: [0; 6],
-            occupied: 0,
-            turn,
-            hash: 0,
-            forbid_foreign_camps: false,
-        };
-        for (player, coords) in [(0usize, p0), (3usize, p3)] {
-            for c in coords {
-                let i = index_of(*c).expect("test coordinate is a board hole");
-                s.pieces[player] |= 1u128 << i;
-                s.occupied |= 1u128 << i;
-            }
-        }
-        s.hash = s.zobrist();
-        s
-    }
 
     fn random_games() -> Vec<Game> {
         let mut rng = Xorshift::new(0xAB1E);
@@ -520,10 +501,8 @@ mod hash_tests {
     use super::*;
     use checkers_core::Xorshift;
 
-    /// The incremental hash must always equal the canonical hash of the state
-    /// it describes. When this drifted, the transposition table answered
-    /// queries for states it had never seen — and the search played nonsense
-    /// with complete confidence.
+    /// The incremental hash must equal the canonical hash of the state it
+    /// describes, because the transposition table keys on it.
     #[test]
     fn incremental_hash_matches_the_canonical_hash() {
         let mut rng = Xorshift::new(0xBEEF);

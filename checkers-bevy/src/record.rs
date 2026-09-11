@@ -13,8 +13,8 @@
 //!
 //! The format is line-based text, versioned in its first line, so a record
 //! written by an older build is rejected with a readable fault rather than
-//! parsed into something wrong. Version 2 stored the seating; version 3
-//! stores the exact players, because a table may now configure any corners.
+//! parsed into something wrong. The current format names the exact players
+//! and house-rule switches.
 
 use checkers_core::position::Player;
 use checkers_core::rules::Variants;

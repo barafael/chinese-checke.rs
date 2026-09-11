@@ -60,11 +60,11 @@ impl WireMove {
         }
     }
 
-    pub fn origin_coord(&self) -> Coord {
+    fn origin_coord(&self) -> Coord {
         Coord::new(self.origin.0, self.origin.1)
     }
 
-    pub fn destination_coord(&self) -> Coord {
+    fn destination_coord(&self) -> Coord {
         Coord::new(self.destination.0, self.destination.1)
     }
 
@@ -132,17 +132,12 @@ pub enum NetMsg {
     /// Host -> all: the house-rule switch, live, so every lobby shows one
     /// game long before the `Start` carries it again.
     Variants { forbid_foreign_camps: bool },
-    /// Host -> all: assignments are final, start playing.
-    ///
-    /// `players` carries which corners are seated — every claimed corner plus
-    /// the host's engines — so every peer deals the same board. Indices, not a
-    /// front-end type: the wire format must not depend on a crate above it.
-    ///
-    /// `forbid_foreign_camps` is the house-rule toggle the host picked in the
-    /// lobby; every peer plays under the same switch.
+    /// Host -> all: assignments are final, start playing. Receivers deal from
+    /// `seats`; `forbid_foreign_camps` is the house-rule toggle the host
+    /// picked in the lobby, carried again so a peer that missed the live
+    /// `Variants` message still plays under the same switch.
     Start {
         seats: Vec<Seat>,
-        players: Vec<u32>,
         forbid_foreign_camps: bool,
     },
 }
@@ -190,31 +185,10 @@ pub struct NetState {
 }
 
 impl NetState {
-    /// Forget everything tied to the old room, keeping only this peer's name.
-    ///
-    /// Every other field is per-room and wrong the moment the room changes.
-    /// The name survives: it identifies the player, not the session.
-    pub fn leave_room(&mut self) {
-        let name = std::mem::take(&mut self.name);
-        *self = Self {
-            name,
-            ..Self::default()
-        };
-    }
-
     /// Am I the sequencing authority? True for the host, and for a solo peer so
     /// that a single player can start before anyone else joins.
     pub fn sequences(&self) -> bool {
         self.is_host || self.peers.is_empty()
-    }
-
-    /// Release every seat's camp binding, for offline play: hotseat and solo
-    /// drive all camps from one device, so no seat may pin the local player to
-    /// a single camp left over from lobby greetings.
-    pub fn unbind_players(&mut self) {
-        for seat in &mut self.seats {
-            seat.player = None;
-        }
     }
 
     /// This peer's roster entry, if it has one.
@@ -538,34 +512,5 @@ mod room_tests {
 
         let bad = RoomIdError::BadChar('/').to_string();
         assert!(bad.contains('/'), "must name the character: {bad}");
-    }
-
-    /// Leaving a room must not carry that room's identity into the next one.
-    #[test]
-    fn leaving_a_room_forgets_everything_but_the_name() {
-        let mut net = NetState {
-            is_host: true,
-            next_seq: 12,
-            last_applied_seq: Some(11),
-            name: "ada".into(),
-            seats: vec![Seat {
-                peer: "p".into(),
-                name: "p".into(),
-                player: Some(0),
-                engine: false,
-            }],
-            ..NetState::default()
-        };
-
-        net.leave_room();
-
-        assert_eq!(net.name, "ada", "the player's name is not per-room");
-        assert!(!net.is_host, "host status belongs to the old room");
-        assert!(net.seats.is_empty(), "seats were assigned by the old host");
-        assert!(net.peers.is_empty());
-        assert_eq!(net.my_id, None, "the id came from the old socket");
-        assert_eq!(net.next_seq, 0);
-        assert_eq!(net.last_applied_seq, None, "or the first move looks stale");
-        assert!(net.greeted.is_empty());
     }
 }

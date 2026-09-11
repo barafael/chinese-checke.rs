@@ -173,9 +173,6 @@ fn the_wire_form_preserves_move_identity() {
 /// the guest playing six, each peer convinced it was right. Nothing detected
 /// it, because both boards were individually valid — they simply were not the
 /// same board.
-///
-/// The `players` line is derived ([`checkers_bevy::lobby::start_message`]) and
-/// travels with the roster; the guest runs the same derivation the host did.
 #[test]
 fn the_hosts_roster_reaches_the_guest_over_the_wire() {
     use checkers_net::{NetMsg, Seat, decode, encode};
@@ -198,14 +195,9 @@ fn the_hosts_roster_reaches_the_guest_over_the_wire() {
         ..Default::default()
     };
     let sent = checkers_bevy::lobby::start_message(&net, Default::default());
-    let NetMsg::Start { seats, players, .. } = &sent else {
+    let NetMsg::Start { seats, .. } = &sent else {
         panic!("start_message must build a Start");
     };
-    assert_eq!(
-        players,
-        &vec![0, 3],
-        "players are the claimed corners, sorted"
-    );
 
     let bytes = encode(&sent).expect("Start must encode");
     let NetMsg::Start { seats: back, .. } = decode(&bytes).expect("Start must decode") else {
@@ -222,17 +214,15 @@ fn arbitrary_claimed_corners_reach_the_guests_board() {
     use checkers_net::{NetMsg, decode, encode};
 
     // Camps 0, 1 and 4: playable, and not one of the 2/3/6 presets.
-    let players = vec![0u32, 1, 4];
+    let players = [0u32, 1, 4];
     let sent = NetMsg::Start {
         seats: Vec::new(),
-        players: players.clone(),
         forbid_foreign_camps: false,
     };
     let bytes = encode(&sent).expect("must encode");
-    let NetMsg::Start { players: back, .. } = decode(&bytes).expect("must decode") else {
+    let NetMsg::Start { .. } = decode(&bytes).expect("must decode") else {
         panic!("wrong variant");
     };
-    assert_eq!(back, players);
 
     let camps: Vec<Player> = players
         .iter()

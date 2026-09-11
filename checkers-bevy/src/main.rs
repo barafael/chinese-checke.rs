@@ -16,7 +16,6 @@ use bevy::ecs::system::SystemParam;
 use bevy::input::touch::{TouchInput, TouchPhase};
 use bevy::window::{Monitor, PrimaryMonitor};
 use checkers_ai::{Ai, AiConfig};
-use checkers_bevy::ai::AiStrength;
 use checkers_bevy::ai::{Action, AiPace};
 use checkers_bevy::board_amlah;
 use checkers_bevy::board_style::{
@@ -86,7 +85,6 @@ fn main() {
         .init_resource::<OrbitCamera>()
         .init_state::<AppState>()
         .init_resource::<AiEngine>()
-        .init_resource::<AiStrength>()
         .init_resource::<AiPace>()
         .init_resource::<replay::Replay>()
         .init_resource::<AppliedStyle>()
@@ -108,13 +106,11 @@ fn main() {
             // `apply_style`, so entering the game and switching styles go
             // through one code path.
             (
-                // A fresh engine at the chosen strength: the deal is where a
-                // round's tuning is decided, and a new engine carries no
-                // repetition memory from the last one.
-                |mut engine: ResMut<AiEngine>,
-                 mut pace: ResMut<AiPace>,
-                 strength: Res<AiStrength>| {
-                    engine.0 = Ai::new(AiConfig::strength(strength.0));
+                // A fresh engine per round: the deal is where a round's tuning is decided,
+                // and a new engine carries no repetition memory from the last
+                // one.
+                |mut engine: ResMut<AiEngine>, mut pace: ResMut<AiPace>| {
+                    engine.0 = Ai::new(AiConfig::default());
                     pace.reset();
                 },
                 lobby::apply_seats,
@@ -130,13 +126,15 @@ fn main() {
                 // and move sequencing versus the view-sync systems — and
                 // chain the halves: order is preserved exactly.
                 (
-                    handle_buttons,
-                    handle_clicks,
-                    // The record viewer's keys. It takes the viewer
-                    // optionally and stands down while none is open; the play
-                    // keys do the same for exactly that time.
+                    // The record viewer owns both the board and the keyboard
+                    // while it is up, so every play system stands down for
+                    // exactly that time (`ReplayView` exists only then);
+                    // `handle_view_keys` is the lone exception, opening and
+                    // stepping the viewer.
+                    handle_buttons.run_if(not(resource_exists::<replay::ReplayView>)),
+                    handle_clicks.run_if(not(resource_exists::<replay::ReplayView>)),
                     replay::handle_view_keys,
-                    handle_keys,
+                    handle_keys.run_if(not(resource_exists::<replay::ReplayView>)),
                     // The game-over card's way out, next to its `M` key.
                     exit_to_lobby,
                     ai_one_shot,
@@ -148,7 +146,10 @@ fn main() {
                     // are.
                     apply_style,
                     toggle_status,
-                    stamp_session_clock,
+                    // A viewer session is rebuilt per step; without this guard
+                    // the game-over card would report the viewer's age, not
+                    // the round's length.
+                    stamp_session_clock.run_if(not(resource_exists::<replay::ReplayView>)),
                     board_style::orbit_camera,
                     // The zoom the player chose stays proportional when the
                     // window changes shape: scale the radius by the ratio of
@@ -159,7 +160,7 @@ fn main() {
                     // so it must run after input and before the view syncs.
                     // The computer plays through the same outbox as a human:
                     // one sequencing path, no privileged moves.
-                    ai_take_turn,
+                    ai_take_turn.run_if(not(resource_exists::<replay::ReplayView>)),
                     net::pump,
                     sound_watch,
                     // Queue the opponent's move for its replay before the
@@ -321,21 +322,11 @@ fn setup(mut commands: Commands) {
     // tab painted nothing at all until the registry finished, which is
     // indistinguishable from a hung build.
     //
-    // The default `WindowSize` scaling, deliberately.
-    //
-    // I first set `ScalingMode::AutoMin` over the board's extent, reasoning it
-    // would fit the board to any canvas. It does the opposite: `AutoMin` and
-    // `AutoMax` both *pin* the viewport to the given size in world units, so a
-    // 434-unit viewport in a 900px window magnifies everything by the ratio —
-    // and again by the display scale factor. The screenshot showed about a tenth
-    // of the board, with the UI text blown up to match.
-    //
-    // `WindowSize` mapped one world unit to one pixel, which is what
-    // `HOLE_SPACING = 34` was chosen against. It has one flaw: the board's
-    // on-screen size was then fixed in pixels, tiny on a large monitor and
-    // cropped in a small window. `fit_projection` replaces that: the camera
-    // frames the board plus breathing room, so the board fills the window at
-    // any size and any shape.
+    // Framed by `fit_projection` rather than the default `WindowSize` scaling:
+    // `WindowSize` maps one world unit to one pixel, pinning the board's size
+    // in pixels — small on a large monitor, cropped in a small window.
+    // `AutoMin` over `BOARD_FRAME` keeps the whole board visible and scales
+    // with the window instead.
     //
     // Marked as the classic style's camera: `apply_style` despawns and
     // respawns it if the player ever switches visualizations. It must carry
@@ -352,14 +343,10 @@ fn setup(mut commands: Commands) {
 }
 
 /// The classic camera's framing: at least [`BOARD_FRAME`] world units visible,
-/// keeping aspect ratio.
-///
-/// `AutoMin` guarantees the board always fits entirely — window too small and
-/// the camera zooms out, window large and it zooms in until the frame is full —
-/// so the board's on-screen size follows the window instead of being pinned in
-/// pixels. The earlier `AutoMin` attempt that the `WindowSize` comment warns
-/// about was replaced by this one constant framing; the magnified-text symptom
-/// it describes came from pinning a *fixed* size, not from fitting a minimum.
+/// keeping aspect ratio. `AutoMin` guarantees the frame always fits entirely —
+/// window too small and the camera zooms out, larger and it zooms in until the
+/// frame is full — so the board's on-screen size follows the window instead of
+/// being pinned in pixels.
 fn fit_projection() -> Projection {
     Projection::Orthographic(OrthographicProjection {
         scaling_mode: ScalingMode::AutoMin {
@@ -537,20 +524,35 @@ fn apply_style(
 /// despawns and rebuilds it with the board on the next deal, exactly as it
 /// does on a style switch.
 ///
-/// A Bevy system: the parameter count is the world access it needs, so the
-/// lint threshold is waived as with [`handle_buttons`].
-#[allow(clippy::too_many_arguments)]
-fn exit_round_teardown(
-    mut commands: Commands,
-    visuals: Query<Entity, (With<BoardVisual>, Without<Camera>)>,
-    pieces: Query<Entity, With<PieceMarker>>,
-    highlights: Query<Entity, With<Overlay>>,
-    traces: Query<Entity, With<TraceMarker>>,
-    hud: Query<Entity, With<HudUi>>,
-    over: Query<Entity, With<GameOverUi>>,
-    viewer: Option<ResMut<replay::ReplayView>>,
-    mut applied: ResMut<AppliedStyle>,
-) {
+/// Everything a completed round hands back to the lobby: the entities it
+/// spawned (board, pieces, highlights, traces, HUD, game-over card), a live
+/// record viewer if one is open, and the style the teardown resets. One
+/// parameter in place of nine, exactly the [`crate::draw::DrawContext`] deal.
+#[derive(SystemParam)]
+struct RoundWorld<'w, 's> {
+    commands: Commands<'w, 's>,
+    visuals: Query<'w, 's, Entity, (With<BoardVisual>, Without<Camera>)>,
+    pieces: Query<'w, 's, Entity, With<PieceMarker>>,
+    highlights: Query<'w, 's, Entity, With<Overlay>>,
+    traces: Query<'w, 's, Entity, With<TraceMarker>>,
+    hud: Query<'w, 's, Entity, With<HudUi>>,
+    over: Query<'w, 's, Entity, With<GameOverUi>>,
+    viewer: Option<ResMut<'w, replay::ReplayView>>,
+    applied: ResMut<'w, AppliedStyle>,
+}
+
+fn exit_round_teardown(world: RoundWorld) {
+    let RoundWorld {
+        mut commands,
+        visuals,
+        pieces,
+        highlights,
+        traces,
+        hud,
+        over,
+        viewer,
+        mut applied,
+    } = world;
     for e in visuals
         .iter()
         .chain(pieces.iter())
@@ -650,16 +652,10 @@ fn spawn_amalah_board(
 fn handle_buttons(
     interactions: Query<(&Interaction, &ControlButton), Changed<Interaction>>,
     mut session: ResMut<Session>,
-    viewer: Option<Res<replay::ReplayView>>,
     sounds: Res<sound::Sounds>,
     on: Res<sound::SoundOn>,
     mut commands: Commands,
 ) {
-    // The viewer hides the controls, so this cannot fire — but if it ever
-    // did, a click must not rewrite the derived session under the cursor.
-    if viewer.is_some() {
-        return;
-    }
     for (interaction, which) in interactions.iter() {
         if *interaction != Interaction::Pressed {
             continue;
@@ -758,11 +754,10 @@ fn handle_clicks(
     cameras: Query<(&Camera, &GlobalTransform, Option<&AmlahCamera>)>,
     controls: Query<&Interaction, With<ControlButton>>,
     mut session: ResMut<Session>,
-    viewer: Option<Res<replay::ReplayView>>,
     mut taps: TouchTaps,
 ) {
     // The record viewer's board is read-only: clicks move nothing.
-    if viewer.is_some() || session.game.is_over() {
+    if session.game.is_over() {
         return;
     }
 
@@ -852,18 +847,31 @@ fn handle_clicks(
     }
 }
 
-fn handle_keys(
-    keys: Res<ButtonInput<KeyCode>>,
-    mut session: ResMut<Session>,
-    viewer: Option<Res<replay::ReplayView>>,
-    sounds: Res<sound::Sounds>,
-    on: Res<sound::SoundOn>,
-    mut commands: Commands,
-) {
-    // The record viewer owns the keyboard while it is up.
-    if viewer.is_some() {
-        return;
-    }
+/// Everything an input system drives in a live round: the session being
+/// played, the table and house rules it was dealt from, and the sound
+/// handler. One parameter in place of seven, exactly the
+/// [`crate::draw::DrawContext`] deal.
+#[derive(SystemParam)]
+struct PlayContext<'w, 's> {
+    session: ResMut<'w, Session>,
+    net: Res<'w, NetState>,
+    table: Res<'w, lobby::Table>,
+    variants: Res<'w, lobby::ChosenVariants>,
+    sounds: Res<'w, sound::Sounds>,
+    on: Res<'w, sound::SoundOn>,
+    commands: Commands<'w, 's>,
+}
+
+fn handle_keys(keys: Res<ButtonInput<KeyCode>>, play: PlayContext) {
+    let PlayContext {
+        mut session,
+        net,
+        table,
+        variants,
+        sounds,
+        on,
+        mut commands,
+    } = play;
     if (keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::NumpadEnter))
         && session.may_act()
     {
@@ -879,11 +887,13 @@ fn handle_keys(
         session.undo_hop();
     }
     if keys.just_pressed(KeyCode::Escape) {
-        session.clear_selection();
-        session.message = "Selection cleared".into();
+        // The message names what was actually cleared, jump or selection.
+        session.cancel();
     }
-    if keys.just_pressed(KeyCode::KeyR) {
-        *session = Session::default();
+    // A networked round is shared state; only the host restarts it, from the
+    // lobby. Solo, `R` just deals the configured table afresh.
+    if keys.just_pressed(KeyCode::KeyR) && net.peers.is_empty() {
+        *session = lobby::deal_session(&net, &table, variants.0);
         session.message = "New game".into();
     }
 }
@@ -898,22 +908,12 @@ fn toggle_status(keys: Res<ButtonInput<KeyCode>>, mut visible: ResMut<StatusVisi
 /// Stamp the session's clock once per round. A replaced session arrives with
 /// `started_at: None`, so the next frame re-stamps it; nothing else writes
 /// the field. Bevy's clock, not the wall clock, so this works on wasm.
-fn stamp_session_clock(
-    mut session: ResMut<Session>,
-    time: Res<Time>,
-    viewer: Option<Res<replay::ReplayView>>,
-) {
-    // A viewer session is rebuilt per step; stamping it would make the
-    // game-over card report the viewer's age, not the round's length.
-    if viewer.is_some() {
-        return;
-    }
+fn stamp_session_clock(mut session: ResMut<Session>, time: Res<Time>) {
     session.stats.note_started(time.elapsed());
 }
 
 /// Scale the interface with the window, so menus, fields, and the status panel
-/// use the available space rather than being pinned to the 900x700 window the
-/// widgets were laid out against. Tiny windows shrink the text but keep it
+/// use the available space rather than being pinned to a fixed widget size. Tiny windows shrink the text but keep it
 /// legible; large monitors grow everything so the UI does not huddle in a
 /// corner of an otherwise empty screen.
 ///
@@ -967,9 +967,8 @@ fn sync_pieces(
     }
     let position = session.display_position();
 
-    // Unconditional despawn-and-respawn. The previous early-out compared only
-    // which holes were occupied, not by whom, and only ran when the session had
-    // already changed — so it never actually skipped anything.
+    // Unconditional despawn-and-respawn: the previous `is_changed` early-out
+    // compared only occupied holes — not by whom — so it never skipped anything.
     for e in existing.iter() {
         commands.entity(e).despawn();
     }
@@ -1663,12 +1662,7 @@ fn ai_take_turn(
     mut pace: ResMut<AiPace>,
     time: Res<Time>,
     replay_state: Res<replay::Replay>,
-    viewer: Option<Res<replay::ReplayView>>,
 ) {
-    // The viewer's session is a derived copy; the engine must not advance it.
-    if viewer.is_some() {
-        return;
-    }
     // The driver only has opinions about a move once the previous execution
     // has finished flying — see `Replay::busy`.
     let action = if replay_state.busy() {

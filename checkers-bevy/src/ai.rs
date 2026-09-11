@@ -15,17 +15,6 @@ use checkers_ai::Ai;
 use checkers_core::position::{Move, MoveKind};
 use std::time::Duration;
 
-/// The engine strength players pick for a computer corner, 1–5. Read when the
-/// game is dealt: the engine is rebuilt at that strength for the round.
-#[derive(Resource, Debug, Clone, Copy)]
-pub struct AiStrength(pub u8);
-
-impl Default for AiStrength {
-    fn default() -> Self {
-        Self(3)
-    }
-}
-
 /// Minimum wall-clock spacing between two committed moves. A flight longer
 /// than this holds the driver off on its own wall clock (the Bevy system
 /// skips driving while the previous execution is on screen), so the engine's
@@ -74,10 +63,7 @@ pub const MAX_MOVES: u32 = 240;
 
 impl Default for AiPace {
     fn default() -> Self {
-        let mut p = Self::new();
-        // `new` initialises an un-stalled, past-the-edge sentinel.
-        p.plies_stalled = 0;
-        p
+        Self::new()
     }
 }
 
@@ -92,11 +78,7 @@ impl AiPace {
         }
     }
     pub fn reset(&mut self) {
-        self.next_allowed = None;
-        self.result_logged = false;
-        self.best_progress = i32::MIN;
-        self.plies_stalled = 0;
-        self.total_plies = 0;
+        *self = Self::new();
     }
 
     fn ready(&self, now: Duration) -> bool {

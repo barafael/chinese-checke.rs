@@ -72,7 +72,8 @@ impl Board {
         self.holes.iter().copied()
     }
 
-    pub fn hex(&self) -> &HashSet<Coord> {
+    #[cfg(test)]
+    pub(crate) fn hex(&self) -> &HashSet<Coord> {
         &self.hex
     }
 

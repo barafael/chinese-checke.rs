@@ -23,11 +23,6 @@ impl Coord {
         Self { q, r }
     }
 
-    /// The implicit third cube coordinate, $s = -q-r$.
-    pub const fn s(self) -> i32 {
-        -self.q - self.r
-    }
-
     /// Neighbour in direction `d`: $x + d$.
     pub const fn neighbour(self, d: Dir) -> Self {
         Self::new(self.q + d.dq(), self.r + d.dr())

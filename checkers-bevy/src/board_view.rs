@@ -15,9 +15,8 @@ pub const HOLE_RADIUS: f32 = 7.0;
 /// Radius of a piece.
 pub const PIECE_RADIUS: f32 = 13.0;
 
-/// The colour used to draw a player's pieces. Shared by the in-game board and
-/// the menu's background bot race so the two can never disagree on a camp's
-/// colour.
+/// The colour used to draw a player's pieces and used by the turn indicator
+/// and game-over card to match them.
 pub fn player_colour(player: Player) -> Color {
     match player.index() {
         0 => Color::srgb(0.90, 0.35, 0.30),
