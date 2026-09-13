@@ -7,9 +7,11 @@
 //! query parameter because the browser never sends it to the server — the
 //! GitHub Pages deployment has no server to care.
 //!
-//! A room is never typed: opening the bare page is redirected to a freshly
-//! generated five-character room, and a room named in the URL is honoured as
-//! it stands. Either way the address bar ends up shareable.
+//! A room names the link: opening the bare page is redirected to a freshly
+//! generated five-character room, a room named in the URL is honoured as it
+//! stands, and a room typed or edited in the lobby is written back by
+//! [`share_room`]. Either way the address bar keeps pointing where this peer
+//! is, and the link stays shareable.
 //!
 //! Native builds have no URL; the room then comes from the `CCHKRS_ROOM`
 //! environment variable, or is generated like on the web. The write side is a
@@ -51,7 +53,9 @@ fn room_from_fragment(fragment: &str) -> Option<RoomId> {
     None
 }
 
-/// Publish the room in the URL so the address can be copied and shared.
+/// Publish the room in the URL so the address can be copied and shared. The
+/// lobby calls this when a typed room is accepted; it replaces the old `room=`
+/// value, so the link always matches where the peer actually is.
 pub fn share_room(room: &RoomId) {
     #[cfg(target_family = "wasm")]
     write_fragment(&format!("room={}", room.0));

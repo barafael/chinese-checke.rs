@@ -11,17 +11,22 @@
 //!   host starts once two or more corners are claimed. Peers who claimed
 //!   nothing watch.
 //!
-//! The room lives in the page's URL ([`crate::web`]); the lobby only shows
-//! it. The host is the peer with the lexicographically smallest `PeerId`,
-//! recomputed every frame so host loss self-heals. The host owns the roster:
-//! guests announce themselves with [`NetMsg::Hello`] and claim with
-//! [`NetMsg::Claim`]; everything else is the host broadcasting
-//! [`NetMsg::Roster`]. One authority, so no guest ever reconciles two
-//! sources of truth about which player it commands.
+//! The room and the player's name are typed — on desktop they are the only way
+//! in. The room field accepts with Enter, which rewrites the page URL (on the
+//! web) and reopens the socket against the new room; the name field applies
+//! with its button. Editing is modal: while a field holds the keyboard, the
+//! rest of the lobby listens to nothing else. The host is the peer with the
+//! lexicographically smallest `PeerId`, recomputed every frame so host loss
+//! self-heals. The host owns the roster: guests announce themselves with
+//! [`NetMsg::Hello`] and claim with [`NetMsg::Claim`]; everything else is the
+//! host broadcasting [`NetMsg::Roster`]. One authority, so no guest ever
+//! reconciles two sources of truth about which player it commands.
 
 use bevy::asset::RenderAssetUsages;
 use bevy::ecs::system::SystemParam;
 use bevy::image::Image;
+use bevy::input::ButtonState;
+use bevy::input::keyboard::KeyboardInput;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::ui::RelativeCursorPosition;
@@ -89,6 +94,30 @@ pub struct CornerText(pub usize);
 #[derive(Component)]
 struct RosterText;
 
+/// Which editor an on-screen text input drives.
+#[derive(Component, Clone, Copy, PartialEq, Eq)]
+pub enum FieldKind {
+    Room,
+    Name,
+}
+
+/// An always-visible text input box: click to focus (or its key), Enter
+/// commits, Esc leaves. The value shown is driven by the `draw_*` systems.
+#[derive(Component)]
+pub struct TextInput(pub FieldKind);
+
+/// The name row's accept button: commits the name field.
+#[derive(Component)]
+pub struct ApplyName;
+
+/// The value text inside an input box.
+#[derive(Component)]
+struct InputText(FieldKind);
+
+/// The error line under an input box.
+#[derive(Component)]
+struct InputError(FieldKind);
+
 /// One corner's state, as configured locally. Only the solo setup writes this
 /// resource; a networked table is read from the roster's seats instead.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -124,15 +153,55 @@ pub struct ChosenVariants(pub Variants);
 #[derive(Resource, Debug, Clone, Default)]
 pub struct LobbyStatus(pub String);
 
+/// The room-name editor.
+///
+/// Editing is *modal*: while any editor holds the keyboard every other key is
+/// suppressed, because the alternative is that typing a room named "solo"
+/// starts a game on the `s`. A mode is the smaller evil here, and `Esc` always
+/// leaves it.
+#[derive(Resource, Default)]
+pub struct RoomEdit {
+    pub active: bool,
+    /// What has been typed so far. Only committed to [`RoomId`] on Enter, so an
+    /// abandoned edit cannot leave the socket pointing somewhere unintended.
+    pub buffer: String,
+    /// Why the last commit was refused, shown beneath the field.
+    pub error: String,
+    /// Set for the rest of the frame in which the field handled a keypress.
+    ///
+    /// Closing the field is not enough on its own. The lobby systems are
+    /// `.chain()`ed, so `handle_buttons` runs *after* `edit_room` in the same
+    /// frame: committing with Enter cleared `active`, and the very same Enter
+    /// then fell through and started the game.
+    ///
+    /// A run condition cannot see "this frame's input was already used", so the
+    /// editor records it. Cleared at the top of each `edit_*` run.
+    pub consumed_input: bool,
+}
+
+/// The player-name editor. Same modal pattern as [`RoomEdit`] — including the
+/// input-consumption flag — but committing writes the display name and
+/// re-greets peers rather than reopening a socket.
+#[derive(Resource, Default)]
+pub struct NameEdit {
+    pub active: bool,
+    pub buffer: String,
+    pub error: String,
+    pub consumed_input: bool,
+}
+
 pub fn plugin(app: &mut App) {
     // The room comes from the URL — a share link lands you in the sender's
     // lobby, and a bare page is redirected to a fresh generated room so the
     // address bar is always shareable. Native builds read `CCHKRS_ROOM` and
-    // simply generate when it is unset. The room is never edited afterwards.
+    // simply generate when it is unset. Either may then be edited in the lobby:
+    // the room field accepts with Enter and rewrites the URL, the name field
+    // applies its own button.
     let room = crate::web::room_from_url().unwrap_or_else(crate::web::random_room);
     crate::web::share_room(&room);
     app.insert_resource(room)
-        // The session's pet name is drawn at boot and never changed.
+        // The session's pet name is drawn at boot and can be changed in the
+        // lobby.
         .insert_resource(NetState {
             name: crate::web::petname(),
             ..NetState::default()
@@ -143,6 +212,8 @@ pub fn plugin(app: &mut App) {
         .init_resource::<SectorArt>()
         .init_resource::<ChosenVariants>()
         .init_resource::<LobbyStatus>()
+        .init_resource::<RoomEdit>()
+        .init_resource::<NameEdit>()
         .add_systems(
             OnEnter(AppState::Lobby),
             // The wedge art must exist before the star can reference it.
@@ -158,14 +229,20 @@ pub fn plugin(app: &mut App) {
                 (
                     elect_host,
                     pump_socket,
-                    select_corner,
-                    handle_buttons,
+                    // The editors run first, and the lobby goes deaf while a
+                    // field holds the keyboard: typing a name must not also
+                    // start a game on the Enter that commits it.
+                    (edit_room, edit_name),
+                    focus_input_fields.run_if(not_editing),
+                    (select_corner, handle_buttons).run_if(not_editing),
+                    apply_name,
                     broadcast_cursor,
                 )
                     .chain()
                     .run_if(in_state(AppState::Lobby)),
                 (
                     sync_button_styles,
+                    sync_input_styles,
                     // Host-only and solo-only rows fold away for the players
                     // who could not use them; the corner rows follow the
                     // selection.
@@ -178,6 +255,8 @@ pub fn plugin(app: &mut App) {
                         sync_corner_styles,
                         draw_corner_labels,
                         draw_roster,
+                        draw_room,
+                        draw_name,
                         sync_remote_cursors,
                     )
                         .chain(),
@@ -186,6 +265,17 @@ pub fn plugin(app: &mut App) {
                     .run_if(in_state(AppState::Lobby)),
             ),
         );
+}
+
+/// Whether a field has the keyboard.
+///
+/// While an editor is active its keys belong to the field, and the game's own
+/// shortcuts would fire on the Enter that commits it — so the systems that
+/// read the keyboard stand down. The consumption flag keeps even the closing
+/// frame deaf (see [`RoomEdit`]), and the flag is single-frame, so a finished
+/// edit never leaves the lobby silent.
+pub fn not_editing(room: Res<RoomEdit>, name: Res<NameEdit>) -> bool {
+    !room.active && !room.consumed_input && !name.active && !name.consumed_input
 }
 
 /// Paint every non-petal button: selected mode, hover, press.
@@ -240,6 +330,46 @@ fn sync_button_styles(
     }
 }
 
+/// Paint the text inputs: a focused field gets a green border and a darker
+/// well so it is obvious the keyboard is captured; an unfocused one brightens
+/// its border on hover, so the box reads as clickable.
+fn sync_input_styles(
+    room: Res<RoomEdit>,
+    name: Res<NameEdit>,
+    mut inputs: Query<(
+        &Interaction,
+        &TextInput,
+        &mut BackgroundColor,
+        &mut BorderColor,
+    )>,
+) {
+    for (interaction, input, mut bg, mut border) in inputs.iter_mut() {
+        let focused = match input.0 {
+            FieldKind::Room => room.active,
+            FieldKind::Name => name.active,
+        };
+        let border_colour = if focused {
+            CHOSEN
+        } else {
+            match interaction {
+                Interaction::Hovered => HOVER,
+                _ => Color::srgb(0.35, 0.35, 0.40),
+            }
+        };
+        let well = if focused {
+            Color::srgb(0.15, 0.15, 0.19)
+        } else {
+            IDLE
+        };
+        if bg.0 != well {
+            bg.0 = well;
+        }
+        if border.top != border_colour {
+            *border = BorderColor::all(border_colour);
+        }
+    }
+}
+
 /// Fold rows away for the players who could only press them to be refused:
 /// host-only rows (Start, the house rules, seating an engine) vanish for
 /// guests, and the solo presets vanish once the room is shared.
@@ -285,6 +415,90 @@ fn button(parent: &mut ChildSpawnerCommands, label: &str, tag: LobbyButton) {
         ));
 }
 
+/// One labelled input row: the label, the text input box, and what closes it —
+/// the focusing key for the room, the Apply button and focusing key for the
+/// name. Enter commits, Esc leaves; visuals follow in [`sync_input_styles`].
+fn field_row(
+    parent: &mut ChildSpawnerCommands,
+    label: &str,
+    kind: FieldKind,
+    key: &str,
+    apply: bool,
+) {
+    parent
+        .spawn(Node {
+            column_gap: Val::Px(10.0),
+            align_items: AlignItems::Center,
+            ..default()
+        })
+        .with_children(|row| {
+            row.spawn((
+                Text::new(label),
+                TextFont {
+                    font_size: FontSize::Px(14.0),
+                    ..default()
+                },
+                TextColor(Color::srgb(0.62, 0.62, 0.68)),
+            ));
+            input_box(row, kind);
+            if apply {
+                row.spawn((
+                    Button,
+                    Node {
+                        padding: UiRect::axes(Val::Px(10.0), Val::Px(6.0)),
+                        border_radius: BorderRadius::all(Val::Px(5.0)),
+                        ..default()
+                    },
+                    BackgroundColor(IDLE),
+                    ApplyName,
+                ))
+                .with_child((
+                    Text::new("Apply"),
+                    TextFont {
+                        font_size: FontSize::Px(14.0),
+                        ..default()
+                    },
+                    TextColor(Color::srgb(0.9, 0.9, 0.92)),
+                ));
+            }
+            row.spawn((
+                Text::new(key),
+                TextFont {
+                    font_size: FontSize::Px(14.0),
+                    ..default()
+                },
+                TextColor(Color::srgb(0.62, 0.62, 0.68)),
+            ));
+        });
+}
+
+/// A text input box, shared by every field row.
+fn input_box(parent: &mut ChildSpawnerCommands, kind: FieldKind) {
+    parent
+        .spawn((
+            Button,
+            Node {
+                width: Val::Px(240.0),
+                padding: UiRect::axes(Val::Px(10.0), Val::Px(6.0)),
+                border: UiRect::all(Val::Px(1.0)),
+                border_radius: BorderRadius::all(Val::Px(5.0)),
+                ..default()
+            },
+            BackgroundColor(IDLE),
+            BorderColor::all(Color::srgb(0.35, 0.35, 0.40)),
+            TextInput(kind),
+        ))
+        .with_child((
+            Text::new(String::new()),
+            TextFont {
+                font_size: FontSize::Px(14.0),
+                ..default()
+            },
+            TextColor(Color::srgb(0.9, 0.9, 0.92)),
+            InputText(kind),
+        ));
+}
+
 /// The shared palette. `CHOSEN` marks the button whose mode is active, with
 /// its own hover and press.
 pub(crate) const IDLE: Color = Color::srgb(0.22, 0.22, 0.27);
@@ -298,7 +512,7 @@ pub(crate) const CHOSEN_DOWN: Color = Color::srgb(0.16, 0.37, 0.23);
 /// left, every control on the right. Side by side the columns stay short
 /// enough to fit a 600px-tall window by construction, which a single stacked
 /// column never could.
-fn spawn(mut commands: Commands, art: Res<SectorArt>, net: Res<NetState>, room: Res<RoomId>) {
+fn spawn(mut commands: Commands, art: Res<SectorArt>) {
     commands
         .spawn((
             Node {
@@ -345,33 +559,35 @@ fn spawn(mut commands: Commands, art: Res<SectorArt>, net: Res<NetState>, room: 
                 ..default()
             })
             .with_children(|col| {
-                // The room you are in and the name you go by — both fixed for
-                // the session, so they are baked in at spawn: the room because
-                // the page's link is the invitation, the name because the
-                // roster shows it.
-                header(col, "Room");
+                // Who I am and where I am: the room to join or share, and the
+                // name the roster shows. Both are typed — on desktop they are
+                // the only way in — so each row is a real text field.
+                header(col, "General");
+
+                // The room field. Enter joins: the loopback to the socket is
+                // a lobby re-enter, which also rewrites the page URL (web).
+                field_row(col, "Room", FieldKind::Room, "R", false);
                 col.spawn((
-                    Text::new(format!("{} - you are {}", room.0, net.name)),
+                    Text::new(String::new()),
                     TextFont {
                         font_size: FontSize::Px(14.0),
                         ..default()
                     },
-                    TextColor(Color::srgb(0.88, 0.88, 0.9)),
+                    TextColor(Color::srgb(0.85, 0.35, 0.35)),
+                    InputError(FieldKind::Room),
                 ));
-                col.spawn(Node {
-                    column_gap: Val::Px(10.0),
-                    ..default()
-                })
-                .with_children(|hint| {
-                    hint.spawn((
-                        Text::new("Share this page's link to invite players."),
-                        TextFont {
-                            font_size: FontSize::Px(13.0),
-                            ..default()
-                        },
-                        TextColor(Color::srgb(0.62, 0.62, 0.68)),
-                    ));
-                });
+
+                // The player-name field, same pattern; Apply commits it.
+                field_row(col, "Name", FieldKind::Name, "N", true);
+                col.spawn((
+                    Text::new(String::new()),
+                    TextFont {
+                        font_size: FontSize::Px(14.0),
+                        ..default()
+                    },
+                    TextColor(Color::srgb(0.85, 0.35, 0.35)),
+                    InputError(FieldKind::Name),
+                ));
 
                 header(col, "Table");
                 // Presets are shortcuts for the symmetric setups; they fill the
@@ -1702,6 +1918,342 @@ pub fn handle_buttons(
             }
             StartDecision::Refuse(why) => status.0 = why,
         }
+    }
+}
+
+/// What a keypress does to an editor.
+///
+/// Returned rather than applied so the decision is testable without a window;
+/// the `edit_*` systems are the thin performers.
+#[derive(Debug, PartialEq, Eq)]
+pub enum EditAction {
+    /// Add to the buffer.
+    Insert(char),
+    Backspace,
+    /// Commit the buffer.
+    Commit,
+    /// Abandon the edit.
+    Cancel,
+    /// Not for the editor.
+    Ignore,
+}
+
+/// Classify one keypress during editing.
+///
+/// `text` is [`bevy::input::keyboard::KeyboardInput::text`], which respects
+/// the keyboard layout — reading `key_code` alone would give a US-layout guess.
+pub fn edit_action(key: KeyCode, text: Option<&str>) -> EditAction {
+    match key {
+        KeyCode::Enter | KeyCode::NumpadEnter => return EditAction::Commit,
+        KeyCode::Escape => return EditAction::Cancel,
+        KeyCode::Backspace => return EditAction::Backspace,
+        _ => {}
+    }
+    // A single character only: `text` can hold two when a dead key did not
+    // combine.
+    match text.and_then(|t| {
+        let mut chars = t.chars();
+        chars.next().filter(|_| chars.next().is_none())
+    }) {
+        // Control characters arrive here as text on some platforms.
+        Some(c) if !c.is_control() => EditAction::Insert(c),
+        _ => EditAction::Ignore,
+    }
+}
+
+/// Focus an input box: by clicking it, or with its key (`R` room, `N` name).
+/// Focusing one field unfocuses the others; each is seeded with its current
+/// value, so a small change does not mean retyping the whole thing.
+///
+/// Runs only while no field holds the keyboard — the modal rule. Leaving a
+/// field (Enter, Esc, or the name's Apply) is what frees the keys again.
+fn focus_input_fields(
+    buttons: Query<(&Interaction, &TextInput), Changed<Interaction>>,
+    keys: Res<ButtonInput<KeyCode>>,
+    room: Res<RoomId>,
+    net: Res<NetState>,
+    mut room_edit: ResMut<RoomEdit>,
+    mut name_edit: ResMut<NameEdit>,
+    mut status: ResMut<LobbyStatus>,
+) {
+    let mut clicked: Option<FieldKind> = None;
+    for (interaction, input) in buttons.iter() {
+        if *interaction == Interaction::Pressed {
+            clicked = Some(input.0);
+        }
+    }
+
+    let focus_room = clicked == Some(FieldKind::Room) || keys.just_pressed(KeyCode::KeyR);
+    let focus_name = clicked == Some(FieldKind::Name) || keys.just_pressed(KeyCode::KeyN);
+    if !focus_room && !focus_name {
+        return;
+    }
+
+    room_edit.active = focus_room;
+    name_edit.active = focus_name && !focus_room;
+    if focus_room {
+        room_edit.buffer = room.0.clone();
+        room_edit.error.clear();
+    }
+    if focus_name {
+        name_edit.buffer = if net.name.is_empty() {
+            String::new()
+        } else {
+            net.name.clone()
+        };
+        name_edit.error.clear();
+    }
+    // The key (or click) that opened a field belongs to it, not to the
+    // systems chained after this one.
+    room_edit.consumed_input = true;
+    name_edit.consumed_input = true;
+    status.0 = "Editing. Enter accepts, Esc cancels.".into();
+}
+
+/// Apply the room-name editor's keypresses, and rejoin on commit.
+///
+/// Changing the room means **reopening the socket**: the room is baked into the
+/// signaling URL, so editing [`RoomId`] alone would change the label and
+/// nothing else. Dropping `MatchboxSocket` makes `open_socket` run again when
+/// the room change re-enters the lobby, and [`NetState::leave_room`] discards
+/// everything the old room's socket told us. On the web the new room is
+/// written into the page URL, so the address bar always points where this peer
+/// actually is.
+pub fn edit_room(
+    mut commands: Commands,
+    mut keys: MessageReader<KeyboardInput>,
+    mut edit: ResMut<RoomEdit>,
+    mut room: ResMut<RoomId>,
+    mut net: ResMut<NetState>,
+    mut status: ResMut<LobbyStatus>,
+    mut next_state: ResMut<NextState<AppState>>,
+) {
+    // Only ever true for the remainder of the frame that set it.
+    edit.consumed_input = false;
+
+    if !edit.active {
+        // Drain regardless: a buffered keypress from before the field opened
+        // must not appear in it later.
+        keys.clear();
+        return;
+    }
+
+    for event in keys.read() {
+        if event.state != ButtonState::Pressed {
+            continue;
+        }
+        // Whatever this key turns out to mean, it belonged to the field. Set
+        // before the match so that closing the field below cannot let the same
+        // press through to `handle_buttons` later in the chain.
+        edit.consumed_input = true;
+        match edit_action(event.key_code, event.text.as_deref()) {
+            EditAction::Insert(c) => {
+                if edit.buffer.chars().count() < RoomId::MAX_LEN {
+                    edit.buffer.push(c);
+                    edit.error.clear();
+                }
+            }
+            EditAction::Backspace => {
+                edit.buffer.pop();
+                edit.error.clear();
+            }
+            EditAction::Cancel => {
+                edit.active = false;
+                edit.buffer.clear();
+                edit.error.clear();
+            }
+            EditAction::Commit => match RoomId::parse(&edit.buffer) {
+                Ok(parsed) => {
+                    edit.active = false;
+                    edit.error.clear();
+                    if parsed == *room {
+                        // Same room: rejoining would drop the peers already
+                        // here for no reason.
+                        status.0 = format!("Already in room \"{}\".", room.0);
+                        continue;
+                    }
+                    info!(from = %room.0, to = %parsed.0, "changing room");
+                    *room = parsed;
+                    // Publish the new room in the URL, so the address always
+                    // points where this peer is. No-op on native.
+                    crate::web::share_room(&room);
+                    net.leave_room();
+                    status.0 = format!("Joining room \"{}\"...", room.0);
+                    // Drop the old socket and re-enter the lobby, which reopens
+                    // it against the new room.
+                    commands.remove_resource::<MatchboxSocket>();
+                    next_state.set(AppState::Lobby);
+                }
+                Err(why) => edit.error = why.to_string(),
+            },
+            EditAction::Ignore => {}
+        }
+    }
+}
+
+/// Commit a name editor: trim and reject the empty string like [`RoomId::parse`]
+/// does for rooms. On success the display name changes and everyone is
+/// re-greeted, because the roster is only ever exchanged on Hello — a rename
+/// without a re-greet would leave every peer looking at the old name.
+///
+/// Shared by [`edit_name`] and [`apply_name`], so the keyboard and the button
+/// cannot drift apart.
+fn commit_name(edit: &mut NameEdit, net: &mut NetState, status: &mut LobbyStatus) {
+    let trimmed = edit.buffer.trim().to_string();
+    if trimmed.is_empty() {
+        edit.error = "A name cannot be empty.".into();
+    } else {
+        edit.active = false;
+        if trimmed != net.name {
+            net.name = trimmed;
+            net.greeted.clear();
+            status.0 = "Name updated.".into();
+        }
+        edit.buffer.clear();
+    }
+}
+
+/// Apply the name editor's keypresses. Same classification as the room field,
+/// but committing writes the display name and re-greets instead of reopening a
+/// socket.
+pub fn edit_name(
+    mut keys: MessageReader<KeyboardInput>,
+    mut edit: ResMut<NameEdit>,
+    mut net: ResMut<NetState>,
+    mut status: ResMut<LobbyStatus>,
+) {
+    edit.consumed_input = false;
+
+    if !edit.active {
+        keys.clear();
+        return;
+    }
+
+    for event in keys.read() {
+        if event.state != ButtonState::Pressed {
+            continue;
+        }
+        edit.consumed_input = true;
+        match edit_action(event.key_code, event.text.as_deref()) {
+            EditAction::Insert(c) => {
+                if edit.buffer.chars().count() < RoomId::MAX_LEN {
+                    edit.buffer.push(c);
+                    edit.error.clear();
+                }
+            }
+            EditAction::Backspace => {
+                edit.buffer.pop();
+                edit.error.clear();
+            }
+            EditAction::Cancel => {
+                edit.active = false;
+                edit.buffer.clear();
+                edit.error.clear();
+            }
+            EditAction::Commit => commit_name(&mut edit, &mut net, &mut status),
+            EditAction::Ignore => {}
+        }
+    }
+}
+
+/// The name row's Apply button.
+///
+/// This is what the button is *for*: a click commits the focused edit. To type
+/// you must first focus the field, so a click on a never-focused field just
+/// focuses it (seeding the buffer with the current name) — the next Apply, or
+/// Enter, applies. One modal at a time: while the room field holds the
+/// keyboard, Apply stands down.
+pub fn apply_name(
+    buttons: Query<(&Interaction, &ApplyName), Changed<Interaction>>,
+    room_edit: Res<RoomEdit>,
+    mut name_edit: ResMut<NameEdit>,
+    mut net: ResMut<NetState>,
+    mut status: ResMut<LobbyStatus>,
+) {
+    if room_edit.active
+        || !buttons
+            .iter()
+            .any(|(interaction, _)| *interaction == Interaction::Pressed)
+    {
+        return;
+    }
+
+    if name_edit.active {
+        name_edit.consumed_input = true;
+        commit_name(&mut name_edit, &mut net, &mut status);
+    } else {
+        name_edit.active = true;
+        name_edit.buffer = net.name.clone();
+        name_edit.error.clear();
+        name_edit.consumed_input = true;
+        status.0 = "Editing the name - press Apply when done.".into();
+    }
+}
+
+/// Draw the room input: the buffer with a caret while focused, the current
+/// room otherwise; any commit error shows on the line beneath.
+fn draw_room(
+    room: Res<RoomId>,
+    edit: Res<RoomEdit>,
+    mut values: Query<(&mut Text, &InputText)>,
+    mut errors: Query<(&mut Text, &InputError), Without<InputText>>,
+) {
+    if !room.is_changed() && !edit.is_changed() {
+        return;
+    }
+    for (mut text, kind) in &mut values {
+        if kind.0 != FieldKind::Room {
+            continue;
+        }
+        **text = if edit.active {
+            format!("{}_", edit.buffer)
+        } else {
+            room.0.clone()
+        };
+    }
+    for (mut text, kind) in &mut errors {
+        if kind.0 != FieldKind::Room {
+            continue;
+        }
+        **text = if edit.active && !edit.error.is_empty() {
+            edit.error.clone()
+        } else {
+            String::new()
+        };
+    }
+}
+
+/// Draw the name input, same caret-and-error pattern as the room input.
+fn draw_name(
+    net: Res<NetState>,
+    edit: Res<NameEdit>,
+    mut values: Query<(&mut Text, &InputText)>,
+    mut errors: Query<(&mut Text, &InputError), Without<InputText>>,
+) {
+    if !net.is_changed() && !edit.is_changed() {
+        return;
+    }
+    for (mut text, kind) in &mut values {
+        if kind.0 != FieldKind::Name {
+            continue;
+        }
+        **text = if edit.active {
+            format!("{}_", edit.buffer)
+        } else if net.name.is_empty() {
+            "(unnamed)".into()
+        } else {
+            net.name.clone()
+        };
+    }
+    for (mut text, kind) in &mut errors {
+        if kind.0 != FieldKind::Name {
+            continue;
+        }
+        **text = if edit.active && !edit.error.is_empty() {
+            edit.error.clone()
+        } else {
+            String::new()
+        };
     }
 }
 

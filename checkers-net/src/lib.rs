@@ -185,6 +185,22 @@ pub struct NetState {
 }
 
 impl NetState {
+    /// Drop everything the current room's socket established — peers, id, host
+    /// flag, seats, sequence counters — but keep the player's own name, which
+    /// identifies the player rather than the session. Joining a new room must
+    /// not arrive already believing this peer hosts it, or drop the new room's
+    /// first moves as duplicates.
+    ///
+    /// The lobby calls this when the player changes rooms; the name survives
+    /// so it goes on identifying its owner in the new roster.
+    pub fn leave_room(&mut self) {
+        let name = std::mem::take(&mut self.name);
+        *self = Self {
+            name,
+            ..Self::default()
+        };
+    }
+
     /// Am I the sequencing authority? True for the host, and for a solo peer so
     /// that a single player can start before anyone else joins.
     pub fn sequences(&self) -> bool {
@@ -438,6 +454,36 @@ mod tests {
     fn my_player_is_none_until_the_host_assigns_a_seat() {
         let net = NetState::default();
         assert!(net.my_player().is_none(), "no id and no seats yet");
+    }
+
+    /// Leaving the room must forget everything the old room's socket
+    /// established but the player's own name, which belongs to the player.
+    #[test]
+    fn leaving_a_room_forgets_everything_but_the_name() {
+        let mut net = NetState {
+            is_host: true,
+            next_seq: 12,
+            last_applied_seq: Some(11),
+            name: "ada".into(),
+            seats: vec![Seat {
+                peer: "p".into(),
+                name: "p".into(),
+                player: Some(0),
+                engine: false,
+            }],
+            ..NetState::default()
+        };
+
+        net.leave_room();
+
+        assert_eq!(net.name, "ada", "the player's name is not per-room");
+        assert!(!net.is_host, "host status belongs to the old room");
+        assert!(net.seats.is_empty(), "seats were assigned by the old host");
+        assert!(net.peers.is_empty());
+        assert_eq!(net.my_id, None, "the id came from the old socket");
+        assert_eq!(net.next_seq, 0);
+        assert_eq!(net.last_applied_seq, None, "or the first move looks stale");
+        assert!(net.greeted.is_empty());
     }
 }
 
