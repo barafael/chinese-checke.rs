@@ -2375,7 +2375,7 @@ fn sync_corner_styles(
         };
         // Selection lights the wedge strongly, the cursor resting on it mildly.
         let factor = if selected.0 == Some(petal.0) {
-            1.25
+            1.5
         } else if hovered.0 == Some(petal.0) {
             1.15
         } else {
