@@ -1706,6 +1706,9 @@ fn ai_take_turn(
             session.message = "Game abandoned: mutual deadlock".to_string();
             pace.result_logged = true;
             session.game.abandon();
+            checkers_bevy::net::log_outcome(
+                session.game.outcome().expect("abandoning sets an outcome"),
+            );
         }
     }
 

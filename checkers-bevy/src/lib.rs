@@ -796,6 +796,7 @@ impl Session {
         self.selection = Selection::None;
         self.message = format!("Player {} resigned", who.index());
         crate::move_log::log(&format!("# p{} resigns", who.index()));
+        crate::net::log_outcome(self.game.outcome().expect("resigning sets an outcome"));
     }
 
     /// Commit the staged move — a single step, or a chain of hops. The move is

@@ -1260,7 +1260,9 @@ pub fn elect_host(socket: Option<ResMut<MatchboxSocket>>, mut net: ResMut<NetSta
 
     if net.is_host && !was_host {
         net.next_seq = net.last_applied_seq.map_or(0, |s| s + 1);
-        info!("became host");
+        info!(name = %net.name, "became host");
+    } else if !net.is_host && was_host {
+        info!("relinquished the host");
     }
 }
 
@@ -1340,11 +1342,15 @@ pub fn pump_socket(socket: Option<ResMut<MatchboxSocket>>, lobby: LobbyWorld) {
             name: net.name.clone(),
         };
         broadcast(&mut socket, &unacquainted, &hello);
-        // The host's own seat is not created by a Hello it never receives.
-        if net.sequences() {
-            let name = net.name.clone();
-            seat_for(&mut net, &me, &name);
+        // The host's own seat is created here, by the Hello it never
+        // receives. A re-greet is also a rename: the host edited its name and
+        // cleared `greeted`, so the existing seat must follow suit — guests
+        // ignore a Hello (only the sequencer acts on one), and nothing else
+        // would republish the roster with the new name.
+        if net.sequences() && sync_host_seat(&mut net, &me) {
+            publish_roster(&mut socket, &net, &peers);
         }
+        info!(name = %net.name, greeted = unacquainted.len(), "greeted the room");
         net.greeted.extend(unacquainted);
     }
 
@@ -1355,6 +1361,7 @@ pub fn pump_socket(socket: Option<ResMut<MatchboxSocket>>, lobby: LobbyWorld) {
         };
         match msg {
             NetMsg::Hello { name } => {
+                info!(%from, %name, "peer greeted the room");
                 if net.sequences() {
                     // A repeat Hello from a known peer is a rename, not a
                     // duplicate join: the name field re-greets precisely so
@@ -1398,6 +1405,11 @@ pub fn pump_socket(socket: Option<ResMut<MatchboxSocket>>, lobby: LobbyWorld) {
                                     }
                                     seat.player = Some(corner);
                                     status.0 = format!("{} claimed corner {corner}.", seat.name);
+                                    info!(
+                                        name = %seat.name,
+                                        corner,
+                                        "claimed a corner",
+                                    );
                                 }
                             }
                         }
@@ -1487,6 +1499,10 @@ pub fn pump_socket(socket: Option<ResMut<MatchboxSocket>>, lobby: LobbyWorld) {
                 net.seats = seats;
                 variants.0.forbid_foreign_camps = forbid_foreign_camps;
                 next_state.set(AppState::InGame);
+                info!(
+                    seated = net.seats.len(),
+                    "received Start - entering the game",
+                );
             }
             // Moves cannot arrive before the game starts, but a late duplicate
             // from a previous game in the same room could. Ignore rather than
@@ -1525,6 +1541,24 @@ fn seat_for(net: &mut NetState, peer: &str, name: &str) {
         player: None,
         engine: false,
     });
+}
+
+/// Mirror the host's current name into its own seat. The host's seat is only
+/// ever *created* by its own greet; on a re-greet — a rename within the room —
+/// it must be updated by hand, because guests ignore the host's Hello, so
+/// nobody else would republish the roster. Modelling the room, not the
+/// host's seat, is the caller's: return whether the roster changed and must
+/// be broadcast.
+fn sync_host_seat(net: &mut NetState, me: &str) -> bool {
+    let Some(seat) = net.seats.iter_mut().find(|s| s.peer == me) else {
+        seat_for(net, me, &net.name.clone());
+        return false;
+    };
+    if seat.name != net.name {
+        seat.name = net.name.clone();
+        return true;
+    }
+    false
 }
 
 /// Seat an engine at a specific corner: a roster entry no peer commands,
@@ -1909,8 +1943,12 @@ pub fn handle_buttons(
 
     if start {
         match start_decision(&net, &table) {
-            StartDecision::Solo => next_state.set(AppState::InGame),
+            StartDecision::Solo => {
+                info!("starting a solo game");
+                next_state.set(AppState::InGame);
+            }
             StartDecision::Multiplayer => {
+                info!(players = net.peers.len() + 1, "starting a shared game");
                 if let Some(s) = socket.as_mut() {
                     broadcast(s, &net.peers, &start_message(&net, variants.0));
                 }
@@ -2485,6 +2523,11 @@ pub fn apply_seats(
     mut session: ResMut<Session>,
 ) {
     *session = deal_session(&net, &table, variants.0);
+    info!(
+        players = session.players.len(),
+        engines = session.ai_players.len(),
+        "round dealt",
+    );
 }
 
 #[cfg(test)]
@@ -2500,6 +2543,47 @@ mod tests {
             player,
             engine: false,
         }
+    }
+
+    /// The host's rename must reach its own seat and republish the roster:
+    /// guests ignore a Hello, so no other path carries a renamed host.
+    #[test]
+    fn a_host_rename_updates_its_own_seat() {
+        let mut net = NetState {
+            name: "new-host".into(),
+            seats: vec![seat("host", Some(0))],
+            ..NetState::default()
+        };
+        assert!(sync_host_seat(&mut net, "host"), "a rename republishes");
+        assert_eq!(net.seats[0].peer, "host");
+        assert_eq!(net.seats[0].name, "new-host");
+    }
+
+    /// On the host's first greet its seat does not exist yet (the host never
+    /// receives its own Hello), so it must be added — without a republish,
+    /// which only a rename deserves.
+    #[test]
+    fn a_hosts_first_greet_creates_its_own_seat() {
+        let mut net = NetState {
+            name: "ada".into(),
+            ..NetState::default()
+        };
+        assert!(!sync_host_seat(&mut net, "host"));
+        assert_eq!(net.seats.len(), 1);
+        assert_eq!(net.seats[0].peer, "host");
+        assert_eq!(net.seats[0].name, "ada");
+    }
+
+    /// An idle room re-greets nobody and nothing changes: no republish.
+    #[test]
+    fn an_unchanged_name_reports_no_change() {
+        let mut net = NetState {
+            name: "host".into(),
+            seats: vec![seat("host", Some(0))],
+            ..NetState::default()
+        };
+        assert!(!sync_host_seat(&mut net, "host"));
+        assert_eq!(net.seats[0].name, "host");
     }
 
     /// A lone device with no peers deals whatever corners it configured.
