@@ -1021,22 +1021,70 @@ fn label_pos(i: usize) -> Vec2 {
     (v[0] + v[1] + v[2]) / 3.0
 }
 
-/// The six wedge textures, rasterized once on first lobby entry: white where
-/// the wedge is, transparent elsewhere, so the [`ImageNode`] tint paints the
-/// colour and the hover and selection shading stay a colour write.
+/// The star's textures, rasterized once on first lobby entry.
 #[derive(Resource, Default)]
-struct SectorArt(Option<[Handle<Image>; 6]>);
+struct SectorArt(Option<SectorImages>);
+
+struct SectorImages {
+    /// Each wedge, white where the wedge is and transparent elsewhere, so the
+    /// [`ImageNode`] tint paints its colour and hover stays a colour write.
+    fills: [Handle<Image>; 6],
+    /// Each wedge's selection outline, in its own colours, shown untinted.
+    outlines: [Handle<Image>; 6],
+}
+
+/// The selection outline's two bands, in texture pixels: a dark outer band
+/// and a light inner one, so the ring reads on every wedge colour — the dark
+/// empty wedges and the white corner alike.
+const OUTLINE_DARK: f32 = 2.0;
+const OUTLINE_LIGHT: f32 = 3.0;
 
 /// Rasterize corner `i`'s wedge into a full-star-size RGBA texture.
 fn sector_image(i: usize) -> Image {
+    let v = wedge_vertices(i);
+    star_image(|p| point_in_triangle(p, v).then_some([255, 255, 255, 255]))
+}
+
+/// Rasterize corner `i`'s selection outline: the two-tone band just *inside*
+/// the wedge's edges, so it never spills onto the neighbours the wedge
+/// touches at its corners.
+fn outline_image(i: usize) -> Image {
+    let v = wedge_vertices(i);
+    star_image(|p| {
+        if !point_in_triangle(p, v) {
+            return None;
+        }
+        let d = edge_distance(p, v);
+        if d < OUTLINE_DARK {
+            Some([0, 0, 0, 255])
+        } else if d < OUTLINE_DARK + OUTLINE_LIGHT {
+            Some([255, 255, 255, 255])
+        } else {
+            None
+        }
+    })
+}
+
+/// How far `p` is from the nearest edge of the triangle `v`.
+fn edge_distance(p: Vec2, v: [Vec2; 3]) -> f32 {
+    (0..3)
+        .map(|k| {
+            let (a, b) = (v[k], v[(k + 1) % 3]);
+            cross(a, b, p).abs() / a.distance(b)
+        })
+        .fold(f32::INFINITY, f32::min)
+}
+
+/// A full-star-size RGBA texture, painted pixel by pixel: `paint` gives a
+/// pixel centre its colour, or `None` for transparent.
+fn star_image(paint: impl Fn(Vec2) -> Option<[u8; 4]>) -> Image {
     let (w, h) = (STAR_W as u32, STAR_H as u32);
     let mut data = vec![0u8; (w * h * 4) as usize];
-    let v = wedge_vertices(i);
     for y in 0..h {
         for x in 0..w {
-            if point_in_triangle(Vec2::new(x as f32 + 0.5, y as f32 + 0.5), v) {
+            if let Some(rgba) = paint(Vec2::new(x as f32 + 0.5, y as f32 + 0.5)) {
                 let o = ((y * w + x) * 4) as usize;
-                data[o..o + 4].copy_from_slice(&[255, 255, 255, 255]);
+                data[o..o + 4].copy_from_slice(&rgba);
             }
         }
     }
@@ -1058,8 +1106,10 @@ fn ensure_sector_art(mut art: ResMut<SectorArt>, mut images: ResMut<Assets<Image
     if art.0.is_some() {
         return;
     }
-    let handles = std::array::from_fn(|i| images.add(sector_image(i)));
-    art.0 = Some(handles);
+    art.0 = Some(SectorImages {
+        fills: std::array::from_fn(|i| images.add(sector_image(i))),
+        outlines: std::array::from_fn(|i| images.add(outline_image(i))),
+    });
 }
 
 /// The eight offsets the label's black border copies take around the white
@@ -1134,10 +1184,18 @@ fn outlined_copy(stack: &mut ChildSpawnerCommands, offset: Vec2, font_size: f32,
 /// angular, against [`sector_at`] — and the middle stays empty, which is what
 /// makes the star read as a star.
 fn star(parent: &mut ChildSpawnerCommands, art: &SectorArt) {
-    let handles = art
+    let art = art
         .0
         .as_ref()
         .expect("sector art is built before the lobby spawns");
+    let full_star = || Node {
+        position_type: PositionType::Absolute,
+        left: Val::Px(0.0),
+        top: Val::Px(0.0),
+        width: Val::Px(STAR_W),
+        height: Val::Px(STAR_H),
+        ..default()
+    };
     parent
         .spawn(Node {
             width: Val::Px(STAR_W),
@@ -1158,21 +1216,26 @@ fn star(parent: &mut ChildSpawnerCommands, art: &SectorArt) {
                 StarHit,
                 RelativeCursorPosition::default(),
             ));
-            for (i, handle) in handles.iter().enumerate() {
+            for (i, handle) in art.fills.iter().enumerate() {
                 node.spawn((
-                    Node {
-                        position_type: PositionType::Absolute,
-                        left: Val::Px(0.0),
-                        top: Val::Px(0.0),
-                        width: Val::Px(STAR_W),
-                        height: Val::Px(STAR_H),
-                        ..default()
-                    },
+                    full_star(),
                     ImageNode {
                         image: handle.clone(),
                         ..default()
                     },
                     CornerPetal(i),
+                ));
+            }
+            // Over the fills, under the labels; only the selected one shows.
+            for (i, handle) in art.outlines.iter().enumerate() {
+                node.spawn((
+                    full_star(),
+                    ImageNode {
+                        image: handle.clone(),
+                        ..default()
+                    },
+                    Visibility::Hidden,
+                    CornerOutline(i),
                 ));
             }
             for i in 0..6 {
@@ -1198,6 +1261,10 @@ fn star(parent: &mut ChildSpawnerCommands, art: &SectorArt) {
             }
         });
 }
+
+/// One wedge's selection outline, visible while its corner is selected.
+#[derive(Component)]
+struct CornerOutline(usize);
 
 /// Marker on the star's single hit area: the whole container is one button,
 /// and clicks are resolved to a corner by angle, not by rectangles.
@@ -2353,14 +2420,20 @@ fn draw_roster(
     **text = out;
 }
 
-/// Keep the star's petals in step with the table/roster: colour, selection
-/// ring, state line.
+/// Keep the star's petals in step with the table/roster: the wedge's colour,
+/// lifted under the cursor, and the outline around the selected one.
+///
+/// Selection is an outline rather than a brighter fill. Brightening scaled
+/// each channel and clipped it, which shifted the hue — the yellow corner
+/// turned pure yellow, another corner cyan — and left no headroom on the
+/// white corner, where selected and hovered looked the same.
 fn sync_corner_styles(
     net: Res<NetState>,
     table: Res<Table>,
     selected: Res<SelectedCorner>,
     hovered: Res<HoveredCorner>,
     mut petals: Query<(&CornerPetal, &mut ImageNode)>,
+    mut outlines: Query<(&CornerOutline, &mut Visibility)>,
 ) {
     for (petal, mut img) in petals.iter_mut() {
         let p = Player::new(petal.0 as u8).expect("corner indices are below six");
@@ -2369,17 +2442,23 @@ fn sync_corner_styles(
         } else {
             IDLE
         };
-        // Selection lights the wedge strongly, the cursor resting on it mildly.
-        let factor = if selected.0 == Some(petal.0) {
-            1.5
-        } else if hovered.0 == Some(petal.0) {
-            1.15
+        let colour = if hovered.0 == Some(petal.0) {
+            lift(base)
         } else {
-            1.0
+            base
         };
-        let colour = shade(base, factor);
         if img.color != colour {
             img.color = colour;
+        }
+    }
+    for (outline, mut visibility) in &mut outlines {
+        let wanted = if selected.0 == Some(outline.0) {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+        if *visibility != wanted {
+            *visibility = wanted;
         }
     }
 }
@@ -2435,17 +2514,10 @@ fn draw_corner_labels(
     }
 }
 
-/// Brighten or darken a colour for hover and press. Done on the sRGB byte
-/// scale, which keeps the luminance of a piece colour looking like itself.
-fn shade(c: Color, factor: f32) -> Color {
-    let rgba = c.to_srgba();
-    let (r, g, b, a) = (rgba.red, rgba.green, rgba.blue, rgba.alpha);
-    Color::srgba(
-        (r * factor).min(1.0),
-        (g * factor).min(1.0),
-        (b * factor).min(1.0),
-        a,
-    )
+/// Lift a wedge's colour under the cursor: a step toward white on the sRGB
+/// scale, which keeps the colour itself rather than shifting its hue.
+fn lift(c: Color) -> Color {
+    Color::Srgba(c.to_srgba().mix(&Srgba::WHITE, 0.15))
 }
 
 /// The camps that sit down in the current room: which corners are filled,
@@ -3029,6 +3101,44 @@ mod tests {
         };
         assert_eq!(alpha_at(mid), 255);
         assert_eq!(alpha_at(centre), 0);
+    }
+
+    /// The selection outline is a band just inside the wedge's edges: there
+    /// right inside each edge, clear in the middle and outside the wedge.
+    #[test]
+    fn the_outline_rings_the_inside_of_the_wedge() {
+        let image = outline_image(0);
+        let Some(data) = &image.data else {
+            panic!("the outline texture keeps its pixel data");
+        };
+        let alpha_at = |p: Vec2| -> u8 {
+            let (x, y) = (p.x as u32, p.y as u32);
+            data[((y * STAR_W as u32 + x) * 4 + 3) as usize]
+        };
+        let v = wedge_vertices(0);
+        let mid = (v[0] + v[1] + v[2]) / 3.0;
+        assert_eq!(alpha_at(mid), 0, "the middle of the wedge stays clear");
+        for k in 0..3 {
+            let edge_mid = (v[k] + v[(k + 1) % 3]) / 2.0;
+            let inward = (mid - edge_mid).normalize();
+            assert_eq!(alpha_at(edge_mid + inward), 255, "edge {k} is outlined");
+            assert_eq!(
+                alpha_at(edge_mid - inward * 3.0),
+                0,
+                "the outline stays inside edge {k}"
+            );
+        }
+    }
+
+    /// Hovering keeps a wedge's colour: every channel moves toward white by
+    /// the same share, so the channels keep their order and nothing clips.
+    #[test]
+    fn hover_lifts_without_shifting_the_hue() {
+        let base = Color::srgb(0.95, 0.72, 0.20);
+        let lifted = lift(base).to_srgba();
+        assert!(lifted.red > 0.95 && lifted.green > 0.72 && lifted.blue > 0.20);
+        assert!(lifted.red > lifted.green && lifted.green > lifted.blue);
+        assert!(lifted.red < 1.0, "nothing clips to full");
     }
 
     /// Solo: a wedge click only selects; the sidebar buttons configure.
