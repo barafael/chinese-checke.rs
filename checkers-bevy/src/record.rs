@@ -148,6 +148,11 @@ impl GameRecord {
                             .ok_or_else(|| RecordFault::Players(line.to_string()))?;
                         list.push(Player::new(idx).expect("checked above"));
                     }
+                    // A game needs a player: the replay would otherwise panic
+                    // composing an empty game instead of refusing the record.
+                    if list.is_empty() {
+                        return Err(RecordFault::Players(line.to_string()));
+                    }
                     players = Some(list);
                 }
                 "variants" => {
@@ -294,6 +299,31 @@ mod tests {
 
         let bad_rules = GameRecord::from_text("cchkrs 3\nplayers 0 3\nvariants banana\nmoves 0\n");
         assert!(matches!(bad_rules, Err(RecordFault::Rules(_))));
+
+        let empty_players = GameRecord::from_text("cchkrs 3\nplayers\nmoves 0\n");
+        assert!(matches!(empty_players, Err(RecordFault::Players(_))));
+    }
+
+    /// Once the game is over no wire move resolves, however legal it looks:
+    /// the winner's pieces still have moves, and playing one would panic. So a
+    /// record with moves after the ending is refused, and a move the host
+    /// receives after the ending is dropped.
+    #[test]
+    fn nothing_resolves_after_the_game_is_over() {
+        let mut session = crate::Session::new(Seating::Two);
+        let wire = WireMove::from_move(&session.game.legal_moves()[0]);
+        assert!(session.resolve(&wire).is_some(), "legal while the game runs");
+
+        session.game.abandon();
+        assert!(
+            session.resolve(&wire).is_none(),
+            "an abandoned game takes no more moves"
+        );
+
+        let mut resigned = crate::Session::new(Seating::Two);
+        let turn = resigned.game.turn();
+        resigned.game.resign(turn);
+        assert!(resigned.resolve(&wire).is_none(), "nor does a resigned one");
     }
 
     /// The rules a round was played under must survive the record: a text

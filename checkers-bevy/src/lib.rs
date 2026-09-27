@@ -499,7 +499,13 @@ impl Session {
         session.game.set_variants(record.variants);
         session.ai_players = record.ai_players.clone();
         for (ply, wire) in record.moves.iter().take(up_to).enumerate() {
-            let Some(mv) = wire.resolve(&session.game.legal_moves()) else {
+            if session.game.is_over() {
+                return Err(RecordFault::Replay {
+                    ply,
+                    why: "the game was already over".into(),
+                });
+            }
+            let Some(mv) = session.resolve(wire) else {
                 let kind = if wire.jump { "jump" } else { "step" };
                 return Err(RecordFault::Replay {
                     ply,
@@ -515,12 +521,25 @@ impl Session {
                 });
             };
             session.commit(&mv);
-            crate::net::after_turn(&mut session);
+            // Settled silently: the passes and the ending were logged when they
+            // happened, and a viewer step or a resume must not tell them again.
+            crate::net::settle(&mut session);
         }
         // The record was replayed for state, not for show: nothing about a
         // resumption should fire the opponent-move animation on load.
         session.last_move = None;
         Ok(session)
+    }
+
+    /// Resolve a move that arrived as a wire move — from the host or from a
+    /// record — against the rules. `None` when the rules reject it, and always
+    /// once the game is over: [`Game::legal_moves`] still lists the winner's
+    /// moves after the winning one, and playing one would panic.
+    pub fn resolve(&self, wire: &WireMove) -> Option<GameMove> {
+        if self.game.is_over() {
+            return None;
+        }
+        wire.resolve(&self.game.legal_moves())
     }
 
     /// The player this peer controls, if any.

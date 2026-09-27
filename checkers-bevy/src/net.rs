@@ -105,7 +105,7 @@ fn sequence_and_broadcast(
     // Reject before spending a sequence number: an illegal move must not
     // consume one, or peers would see a gap and could not tell a dropped
     // message from a rejected one.
-    if wire.resolve(&session.game.legal_moves()).is_none() {
+    if session.resolve(&wire).is_none() {
         warn!(?wire, "refusing to sequence a move the rules reject");
         return;
     }
@@ -117,14 +117,14 @@ fn sequence_and_broadcast(
 }
 
 /// Apply a sequenced move, if it is new and legal.
-fn apply(net: &mut NetState, session: &mut Session, seq: u32, wire: WireMove) {
+pub(crate) fn apply(net: &mut NetState, session: &mut Session, seq: u32, wire: WireMove) {
     if net.is_duplicate(seq) {
         return;
     }
 
     // The rules, not the sender, decide. A peer that is behind — or lying —
     // cannot push the game into a state the specification disallows.
-    let Some(mv) = wire.resolve(&session.game.legal_moves()) else {
+    let Some(mv) = session.resolve(&wire) else {
         warn!(?wire, seq, "dropping a sequenced move the rules reject");
         return;
     };
@@ -160,7 +160,7 @@ fn log_move(net: &NetState, mover: Player, wire: &WireMove, seq: Option<u32>) {
 /// silently swallowing moves.
 pub(crate) fn apply_outbox_directly(session: &mut Session) {
     for mv in std::mem::take(&mut session.outbox) {
-        if session.game.legal_moves().contains(&mv) {
+        if !session.game.is_over() && session.game.legal_moves().contains(&mv) {
             let mover = session.game.turn();
             session.commit(&mv);
             session.selection = crate::Selection::None;
@@ -181,26 +181,33 @@ pub(crate) fn apply_outbox_directly(session: &mut Session) {
 }
 
 /// Audit the new position and pass over players with no legal move. The game's
-/// end, however it came about, is logged here — the one point every path
+/// end, however it came about, is logged here — the one point every live path
 /// through a round reaches afterwards.
 pub fn after_turn(session: &mut Session) {
+    for stuck in settle(session) {
+        info!(player = stuck.index() + 1, "no legal move - passes");
+    }
+    if let Some(outcome) = session.game.outcome() {
+        log_outcome(outcome);
+    }
+}
+
+/// [`after_turn`] without the story: audit, then pass over every player with
+/// no legal move, and return who passed. Rebuilding a session from a record
+/// settles each move this way, so replaying a round does not log its passes
+/// and its ending a second time.
+pub fn settle(session: &mut Session) -> Vec<Player> {
     audit(session.game.position(), &session.players);
 
-    if session.game.is_over() {
-        return;
-    }
-
+    let mut passed = Vec::new();
     while !session.game.is_over() && session.game.legal_moves().is_empty() {
         let stuck = session.game.turn();
         session.game.pass();
         session.stats.passes += 1;
         session.message = format!("{} - player {} passed", session.message, stuck.index());
-        info!(player = stuck.index() + 1, "no legal move - passes");
+        passed.push(stuck);
     }
-
-    if let Some(outcome) = session.game.outcome() {
-        log_outcome(outcome);
-    }
+    passed
 }
 
 /// Log how the game ended. Called once from every path that ends the game —
@@ -218,5 +225,28 @@ pub fn log_outcome(outcome: checkers_core::rules::Outcome) {
         checkers_core::rules::Outcome::Abandoned => {
             info!("game over: abandoned - the race stalled");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::setup::Seating;
+
+    /// A move that reaches a finished game — sequenced by the host, or still
+    /// in the local outbox — is dropped. The winner's pieces still have moves
+    /// after the winning one, and playing one would panic the game.
+    #[test]
+    fn a_move_after_the_end_is_dropped() {
+        let mut session = Session::new(Seating::Two);
+        let mv = session.game.legal_moves()[0].clone();
+        session.game.abandon();
+
+        let mut net = NetState::default();
+        apply(&mut net, &mut session, 0, WireMove::from_move(&mv));
+        session.outbox.push(mv);
+        apply_outbox_directly(&mut session);
+
+        assert!(session.history().is_empty(), "no move entered the round");
     }
 }
