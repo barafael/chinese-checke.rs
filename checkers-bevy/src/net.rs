@@ -17,7 +17,12 @@ use crate::{AppState, Session, audit};
 /// Fold the socket's peer changes into [`NetState`]: connected peers are
 /// added, disconnected ones dropped. Shared by the in-game pump and the
 /// lobby's host election so the two can never disagree on who is present.
-pub(crate) fn sync_peers(socket: &mut MatchboxSocket, net: &mut NetState) {
+///
+/// Takes the resource rather than a plain `&mut NetState`, and writes only
+/// when a peer actually came or went: this runs every frame, and marking the
+/// state changed every frame left the lobby's change-driven redraws nothing
+/// to skip.
+pub(crate) fn sync_peers(socket: &mut MatchboxSocket, net: &mut ResMut<NetState>) {
     for (peer, state) in socket.update_peers() {
         match state {
             PeerState::Connected => {

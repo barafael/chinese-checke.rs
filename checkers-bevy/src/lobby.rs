@@ -1269,20 +1269,26 @@ pub fn elect_host(socket: Option<ResMut<MatchboxSocket>>, mut net: ResMut<NetSta
 
     crate::net::sync_peers(&mut socket, &mut net);
 
-    if net.my_id.is_none() {
-        net.my_id = socket.id();
+    // Read before writing, here and below: this runs every frame, and a write
+    // marks the state changed for every system that redraws on a change.
+    if net.my_id.is_none()
+        && let Some(id) = socket.id()
+    {
+        net.my_id = Some(id);
     }
     let Some(me) = net.my_id else {
         return;
     };
 
-    let was_host = net.is_host;
-    net.is_host = net.peers.iter().all(|p| me.to_string() < p.to_string());
-
-    if net.is_host && !was_host {
+    let is_host = net.peers.iter().all(|p| me.to_string() < p.to_string());
+    if is_host == net.is_host {
+        return;
+    }
+    net.is_host = is_host;
+    if is_host {
         net.next_seq = net.last_applied_seq.map_or(0, |s| s + 1);
         info!(name = %net.name, "became host");
-    } else if !net.is_host && was_host {
+    } else {
         info!("relinquished the host");
     }
 }
@@ -1340,12 +1346,13 @@ pub fn pump_socket(socket: Option<ResMut<MatchboxSocket>>, lobby: LobbyWorld) {
 
     // The host prunes seats whose peer has left the mesh: a refresh (or a
     // crashed tab) mints a fresh peer id, so the old seat would otherwise sit
-    // in the roster forever, and the list only ever grew. Publish only on an
-    // actual change, so an idle room costs nothing.
-    if net.sequences() {
-        let before = net.seats.clone();
+    // in the roster forever, and the list only ever grew. Checked before it
+    // writes, and published only on an actual change, so an idle room costs
+    // nothing — not even a changed `NetState`.
+    if net.sequences() && has_departed(&net) {
+        let seats = net.seats.len();
         prune_departed(&mut net);
-        if net.seats != before {
+        if net.seats.len() != seats {
             publish_roster(&mut socket, &net, &peers);
         }
     }
@@ -1561,13 +1568,27 @@ fn seated(net: &NetState) -> usize {
 /// Pure, so the rule is testable without a socket; the host runs it every
 /// lobby frame.
 fn prune_departed(net: &mut NetState) {
-    let me = net.my_id.as_ref().map(|id| id.to_string());
-    net.seats.retain(|s| {
-        s.engine
-            || Some(&s.peer) == me.as_ref()
-            || net.peers.iter().any(|p| p.to_string() == s.peer)
-    });
+    let me = net.my_id.map(|id| id.to_string());
+    net.seats
+        .retain(|s| seat_present(s, me.as_deref(), &net.peers));
     net.greeted.retain(|p| net.peers.contains(p));
+}
+
+/// Whether [`prune_departed`] would change anything.
+fn has_departed(net: &NetState) -> bool {
+    let me = net.my_id.map(|id| id.to_string());
+    net.seats
+        .iter()
+        .any(|s| !seat_present(s, me.as_deref(), &net.peers))
+        || net.greeted.iter().any(|p| !net.peers.contains(p))
+}
+
+/// Whether a seat's owner is still in the room: an engine (the host's own),
+/// this peer itself, or a connected peer.
+fn seat_present(seat: &Seat, me: Option<&str>, peers: &[PeerId]) -> bool {
+    seat.engine
+        || Some(seat.peer.as_str()) == me
+        || peers.iter().any(|p| p.to_string() == seat.peer)
 }
 
 /// Add a seat if this peer has none. A new seat claims nothing; the corner is
@@ -2274,8 +2295,10 @@ fn draw_roster(
     table: Res<Table>,
     status: Res<LobbyStatus>,
     mut text: Query<&mut Text, With<RosterText>>,
+    fresh: Query<(), Added<RosterText>>,
 ) {
-    if !net.is_changed() && !table.is_changed() && !status.is_changed() {
+    // A rebuilt lobby is drawn whether or not anything changed meanwhile.
+    if !net.is_changed() && !table.is_changed() && !status.is_changed() && fresh.is_empty() {
         return;
     }
     let Ok(mut text) = text.single_mut() else {
@@ -2372,8 +2395,10 @@ fn draw_corner_labels(
     lines: Query<(&CornerText, &Children)>,
     boxes: Query<&Children>,
     mut texts: Query<&mut Text>,
+    fresh: Query<(), Added<CornerText>>,
 ) {
-    if !net.is_changed() && !table.is_changed() {
+    // A rebuilt lobby is drawn whether or not anything changed meanwhile.
+    if !net.is_changed() && !table.is_changed() && fresh.is_empty() {
         return;
     }
     let solo = net.peers.is_empty();
@@ -3072,6 +3097,50 @@ mod tests {
             "greeting memory of the departed is dropped"
         );
         assert!(net.greeted.contains(&here));
+    }
+
+    /// An idle room has nobody to prune, so the host's per-frame check leaves
+    /// the roster untouched; a peer that leaves is noticed.
+    #[test]
+    fn only_a_departure_triggers_the_prune() {
+        let mut net = NetState::default();
+        let me = PeerId(uuid::Uuid::from_u128(1));
+        let here = PeerId(uuid::Uuid::from_u128(3));
+        net.my_id = Some(me);
+        net.peers = vec![here];
+        net.greeted = vec![here];
+        net.seats = vec![
+            seat(&me.to_string(), Some(0)),
+            seat(&here.to_string(), Some(3)),
+            Seat {
+                engine: true,
+                ..seat("engine-0", Some(4))
+            },
+        ];
+        assert!(!has_departed(&net), "everyone here is still here");
+
+        net.peers.clear();
+        assert!(has_departed(&net), "the peer that left must be pruned");
+    }
+
+    /// A rebuilt lobby shows its roster at once, even when nothing changed
+    /// since the last draw — as when a round ends and the lobby is spawned
+    /// anew over a roster that has been quiet all along.
+    #[test]
+    fn a_rebuilt_roster_is_drawn_without_a_change() {
+        let mut world = World::new();
+        world.init_resource::<NetState>();
+        world.init_resource::<Table>();
+        world.init_resource::<LobbyStatus>();
+        let draw = world.register_system(draw_roster);
+        world.run_system(draw).expect("first draw");
+        world.run_system(draw).expect("an idle draw");
+
+        let text = world.spawn((Text::default(), RosterText)).id();
+        world.run_system(draw).expect("the draw after the rebuild");
+
+        let drawn = world.get::<Text>(text).expect("the roster text");
+        assert!(!drawn.0.is_empty(), "the fresh roster was left blank");
     }
 
     /// Shared: clicking a claimed corner selects it — yours, another
