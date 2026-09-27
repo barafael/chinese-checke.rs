@@ -527,41 +527,42 @@ fn apply_style(
 ///
 /// Everything a completed round hands back to the lobby: the entities it
 /// spawned (board, pieces, highlights, traces, HUD, game-over card), a live
-/// record viewer if one is open, and the style the teardown resets. One
-/// parameter in place of nine, exactly the [`crate::draw::DrawContext`] deal.
+/// record viewer if one is open, and the style the teardown resets.
+///
+/// The entities are one query, not one per marker: a trace dot is both a
+/// [`TraceMarker`] and a [`BoardVisual`], and two queries despawned it twice
+/// — a warning per dot on every trip back to the lobby. An `Or` yields each
+/// entity once, whatever markers it carries.
 #[derive(SystemParam)]
 struct RoundWorld<'w, 's> {
     commands: Commands<'w, 's>,
-    visuals: Query<'w, 's, Entity, (With<BoardVisual>, Without<Camera>)>,
-    pieces: Query<'w, 's, Entity, With<PieceMarker>>,
-    highlights: Query<'w, 's, Entity, With<Overlay>>,
-    traces: Query<'w, 's, Entity, With<TraceMarker>>,
-    hud: Query<'w, 's, Entity, With<HudUi>>,
-    over: Query<'w, 's, Entity, With<GameOverUi>>,
+    owned: Query<'w, 's, Entity, RoundOwned>,
     viewer: Option<ResMut<'w, replay::ReplayView>>,
     applied: ResMut<'w, AppliedStyle>,
 }
 
+/// Every entity a round owns, whatever markers it carries — the camera
+/// excepted, which the lobby keeps using.
+type RoundOwned = (
+    Or<(
+        With<BoardVisual>,
+        With<PieceMarker>,
+        With<Overlay>,
+        With<TraceMarker>,
+        With<HudUi>,
+        With<GameOverUi>,
+    )>,
+    Without<Camera>,
+);
+
 fn exit_round_teardown(world: RoundWorld) {
     let RoundWorld {
         mut commands,
-        visuals,
-        pieces,
-        highlights,
-        traces,
-        hud,
-        over,
+        owned,
         viewer,
         mut applied,
     } = world;
-    for e in visuals
-        .iter()
-        .chain(pieces.iter())
-        .chain(highlights.iter())
-        .chain(traces.iter())
-        .chain(hud.iter())
-        .chain(over.iter())
-    {
+    for e in owned.iter() {
         commands.entity(e).despawn();
     }
     if viewer.is_some() {
@@ -1768,7 +1769,8 @@ mod tests {
         let hole = world.spawn((HoleMarker, BoardVisual)).id();
         let piece = world.spawn(PieceMarker).id();
         let dot = world.spawn(Overlay).id();
-        let trace = world.spawn(TraceMarker).id();
+        // The trace carries both markers, as `replay::sync_trace` spawns it.
+        let trace = world.spawn((TraceMarker, BoardVisual)).id();
         let hud = world.spawn(HudUi).id();
         let card = world.spawn(GameOverUi).id();
 
