@@ -115,6 +115,18 @@ impl AiPace {
         best
     }
 
+    /// Whether the stall detector watches this table: only when every seated
+    /// camp is an engine this device drives — the demo it exists for. A human
+    /// seat takes as long as it takes, and the engines around it are not
+    /// stalling; ending such a round after a normal game's worth of engine
+    /// moves would end a race someone is still running.
+    fn watches(session: &Session) -> bool {
+        session
+            .players
+            .iter()
+            .all(|p| session.ai_players.contains(p))
+    }
+
     /// Count one move just emitted by [`Self::advance`] and consult the stall
     /// detector. Returns `Some(Abandon)` once the leading side has gone a
     /// whole window without a new progress record, or the game has run past a
@@ -158,17 +170,20 @@ impl AiPace {
             return Action::Wait;
         }
 
-        let Some(mv) = ai.choose_move_for(&session.game, seat) else {
+        let action = match ai.choose_move_for(&session.game, seat) {
+            Some(mv) => Action::Play(mv),
             // No legal move: forfeit the turn, at the same measured pace.
-            if session.game.legal_moves().is_empty() {
-                self.schedule(now);
-                return self.after_move(session).unwrap_or(Action::Pass);
-            }
-            return Action::Wait;
+            None if session.game.legal_moves().is_empty() => Action::Pass,
+            None => return Action::Wait,
         };
 
         self.schedule(now);
-        self.after_move(session).unwrap_or(Action::Play(mv))
+        if Self::watches(session)
+            && let Some(abandon) = self.after_move(session)
+        {
+            return abandon;
+        }
+        action
     }
 }
 
@@ -256,6 +271,42 @@ mod tests {
         };
         let out = pace.after_move(&session).expect("the ceiling trips");
         assert!(matches!(out, Action::Abandon(_)), "expected abandonment");
+    }
+
+    /// A table with a human seat is never abandoned: one human against five
+    /// engines reaches the hard ceiling in a normal game, and the race is
+    /// still on.
+    #[test]
+    fn a_table_with_a_human_is_never_abandoned() {
+        let mut session = Session::new(Seating::Two);
+        // Player 0 is the engine and on turn; player 3 is a person.
+        session.ai_players = vec![Player::ALL[0]];
+        let mut pace = AiPace {
+            total_plies: MAX_MOVES,
+            plies_stalled: STALL_WINDOW,
+            ..AiPace::default()
+        };
+        let mut ai = Ai::new(AiConfig::strength(1));
+        let out = pace.advance(&mut session, &mut ai, Duration::ZERO);
+        assert!(
+            matches!(out, Action::Play(_)),
+            "the engine plays on past the ceiling: got {out:?}"
+        );
+    }
+
+    /// An engine-only table past the ceiling is abandoned through `advance`,
+    /// not only through the detector itself.
+    #[test]
+    fn an_engine_only_table_past_the_ceiling_is_abandoned() {
+        let mut session = Session::new(Seating::Two);
+        session.ai_players = vec![Player::ALL[0], Player::ALL[3]];
+        let mut pace = AiPace {
+            total_plies: MAX_MOVES,
+            ..AiPace::default()
+        };
+        let mut ai = Ai::new(AiConfig::strength(1));
+        let out = pace.advance(&mut session, &mut ai, Duration::ZERO);
+        assert!(matches!(out, Action::Abandon(_)), "got {out:?}");
     }
 
     /// A player who keeps playing without making progress trips the window

@@ -395,6 +395,11 @@ pub struct Session {
     /// "watches by choice" from hotseat's "moves everyone", which are both
     /// `local_player: None`.
     pub spectating: bool,
+    /// Whether the round was dealt from a shared room's roster rather than the
+    /// local table. Decided once, at the deal: the peers present *now* say
+    /// nothing about the round being played — a room can empty mid-game, and
+    /// a solo round can follow a shared one whose seats linger in the roster.
+    pub shared: bool,
     /// Moves this peer has committed but that are not yet applied. Submitted
     /// by [`net::pump`] for sequencing; solo play takes the same path.
     pub outbox: Vec<GameMove>,
@@ -452,6 +457,7 @@ impl Session {
             message: "Click one of your pieces".into(),
             local_player: None,
             spectating: false,
+            shared: false,
             outbox: Vec::new(),
             ai_players: Vec::new(),
             stats: GameStats::default(),
@@ -540,6 +546,21 @@ impl Session {
             return None;
         }
         wire.resolve(&self.game.legal_moves())
+    }
+
+    /// The lobby name of whoever plays `p` — in a shared round only. A solo
+    /// round has no roster: seats still in [`checkers_net::NetState`] are left
+    /// over from an earlier shared round, and naming a local corner after them
+    /// would be wrong.
+    pub fn roster_name<'n>(&self, net: &'n checkers_net::NetState, p: Player) -> Option<&'n str> {
+        if !self.shared {
+            return None;
+        }
+        net.seats
+            .iter()
+            .find(|s| s.player == Some(u32::from(p.index())))
+            .map(|s| s.name.as_str())
+            .filter(|n| !n.is_empty())
     }
 
     /// The player this peer controls, if any.

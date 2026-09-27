@@ -34,6 +34,7 @@ use checkers_core::geometry::{Coord, all_holes, camp_of, on_board};
 use checkers_core::law::{LAWS, verify_all};
 use checkers_core::position::{Player, Position};
 use checkers_core::rules::Outcome;
+use bevy_matchbox::prelude::MatchboxSocket;
 use checkers_net::NetState;
 use std::collections::HashMap;
 
@@ -890,9 +891,9 @@ fn handle_keys(keys: Res<ButtonInput<KeyCode>>, play: PlayContext) {
         // The message names what was actually cleared, jump or selection.
         session.cancel();
     }
-    // A networked round is shared state; only the host restarts it, from the
+    // A shared round is shared state; only the host restarts it, from the
     // lobby. Solo, `R` just deals the configured table afresh.
-    if keys.just_pressed(KeyCode::KeyR) && net.peers.is_empty() {
+    if keys.just_pressed(KeyCode::KeyR) && !session.shared {
         *session = lobby::deal_session(&net, &table, variants.0);
         session.message = "New game".into();
     }
@@ -1176,7 +1177,6 @@ fn sync_highlights(
 /// reach every peer over the wire, which it does not yet.
 fn sync_buttons(
     session: Res<Session>,
-    net: Res<NetState>,
     viewer: Option<Res<replay::ReplayView>>,
     mut buttons: Query<(
         &Interaction,
@@ -1197,10 +1197,10 @@ fn sync_buttons(
                 | ControlButton::Open
                 | ControlButton::Replay
         ) {
-            // Record controls are local-mode, like resign: a networked round
-            // is shared state, and one peer's save would say nothing about
-            // the rest of the table.
-            if net.seats.is_empty() {
+            // Record controls are local-mode, like resign: a shared round is
+            // shared state, and one peer's save would say nothing about the
+            // rest of the table.
+            if !session.shared {
                 Visibility::Inherited
             } else {
                 Visibility::Hidden
@@ -1301,7 +1301,7 @@ fn sync_turn_indicator(
             let label = if session.local_player() == Some(active) {
                 "Your home base - you to move".to_string()
             } else {
-                let who = player_label(&net, active);
+                let who = player_label(&net, &session, active);
                 let waiting = if session.local_player().is_some() {
                     " (waiting)"
                 } else {
@@ -1317,14 +1317,11 @@ fn sync_turn_indicator(
     **text = label;
 }
 
-/// The player's lobby name if known, else "Player N".
-fn player_label(net: &NetState, p: Player) -> String {
-    net.seats
-        .iter()
-        .find(|s| s.player == Some(u32::from(p.index())))
-        .map(|s| s.name.clone())
-        .filter(|n| !n.is_empty())
-        .unwrap_or_else(|| format!("Player {}", p.index()))
+/// The player's lobby name in a shared round, else "Player N".
+fn player_label(net: &NetState, session: &Session, p: Player) -> String {
+    session
+        .roster_name(net, p)
+        .map_or_else(|| format!("Player {}", p.index()), str::to_string)
 }
 
 /// Rings around the active player's home camp, so the base whose turn it is
@@ -1420,7 +1417,7 @@ fn sync_game_over(
             let title = if session.local_player() == Some(p) {
                 "You win!".to_string()
             } else {
-                format!("{} wins!", player_label(&net, p))
+                format!("{} wins!", player_label(&net, &session, p))
             };
             (title, player_colour(p))
         }
@@ -1428,7 +1425,7 @@ fn sync_game_over(
             let title = if session.local_player() == Some(p) {
                 "You resign.".to_string()
             } else {
-                format!("{} resigns.", player_label(&net, p))
+                format!("{} resigns.", player_label(&net, &session, p))
             };
             (title, player_colour(p))
         }
@@ -1490,7 +1487,7 @@ fn sync_game_over(
                     let i = p.index() as usize;
                     let mut line = format!(
                         "{}:  {} moves  ({} by jump)",
-                        player_label(&net, p),
+                        player_label(&net, &session, p),
                         session.stats.moves[i],
                         session.stats.jumps[i]
                     );
@@ -1540,7 +1537,7 @@ fn sync_game_over(
                         Text::new(format!(
                             "Longest jump: {} hops ({})",
                             session.stats.longest_jump,
-                            player_label(&net, by)
+                            player_label(&net, &session, by)
                         )),
                         TextFont {
                             font_size: FontSize::Px(14.0),
@@ -1662,6 +1659,8 @@ fn ai_take_turn(
     mut pace: ResMut<AiPace>,
     time: Res<Time>,
     replay_state: Res<replay::Replay>,
+    mut socket: Option<ResMut<MatchboxSocket>>,
+    net: Res<NetState>,
 ) {
     // The driver only has opinions about a move once the previous execution
     // has finished flying — see `Replay::busy`.
@@ -1696,19 +1695,15 @@ fn ai_take_turn(
             session.selection = Selection::None;
             checkers_bevy::net::after_turn(&mut session);
         }
-        // A headless stall neither side can resolve: log it honestly and end
-        // the game — the stalled race is what the watcher tuned in for.
+        // An engine-only race neither side can resolve: log it honestly and
+        // end the game — for every peer watching, too.
         Action::Abandon(reason) => {
             checkers_bevy::move_log::log(&format!(
                 "# game abandoned: {reason} after {} moves",
                 session.stats.total_moves()
             ));
-            session.message = "Game abandoned: mutual deadlock".to_string();
             pace.result_logged = true;
-            session.game.abandon();
-            checkers_bevy::net::log_outcome(
-                session.game.outcome().expect("abandoning sets an outcome"),
-            );
+            checkers_bevy::net::abandon_round(&mut session, socket.as_deref_mut(), &net);
         }
     }
 

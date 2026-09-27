@@ -1507,7 +1507,7 @@ pub fn pump_socket(socket: Option<ResMut<MatchboxSocket>>, lobby: LobbyWorld) {
             // Moves cannot arrive before the game starts, but a late duplicate
             // from a previous game in the same room could. Ignore rather than
             // mis-apply.
-            NetMsg::Move(_) | NetMsg::Sequenced { .. } => {}
+            NetMsg::Move(_) | NetMsg::Sequenced { .. } | NetMsg::Abandon => {}
         }
     }
 }
@@ -2524,6 +2524,8 @@ pub fn deal_session(net: &NetState, table: &Table, variants: Variants) -> Sessio
     session.ai_players = ai;
     session.local_player = local_player;
     session.spectating = spectating;
+    // The same test `deal_for` used to pick the roster over the table.
+    session.shared = !net.peers.is_empty();
     session.message = wording;
     session
 }
@@ -2896,6 +2898,38 @@ mod tests {
         assert!(ai.is_empty(), "the local table is ignored in a shared room");
         assert_eq!(local, Some(Player::ALL[0]));
         assert!(!spectating);
+    }
+
+    /// A round remembers whether it was dealt from a shared room, and only a
+    /// shared round names its players after the roster. After the guests of a
+    /// shared round leave, the host's own seat and its engines linger in the
+    /// roster — a solo round dealt then must not borrow their names, nor hide
+    /// the solo controls.
+    #[test]
+    fn only_a_shared_round_reads_the_roster() {
+        let mut net = NetState::default();
+        let me = PeerId(uuid::Uuid::from_u128(1));
+        net.my_id = Some(me);
+        net.peers = vec![me, fake_peer()];
+        net.is_host = true;
+        net.seats = vec![seat(&me.to_string(), Some(0)), seat("grace", Some(3))];
+        let mut table = Table::default();
+        table.0[0] = CornerState::Human;
+        table.0[3] = CornerState::Human;
+
+        let shared = deal_session(&net, &table, Variants::default());
+        assert!(shared.shared);
+        assert_eq!(shared.roster_name(&net, Player::ALL[3]), Some("grace"));
+
+        // The guests leave; their seats may linger until the next prune.
+        net.peers.clear();
+        let solo = deal_session(&net, &table, Variants::default());
+        assert!(!solo.shared);
+        assert_eq!(
+            solo.roster_name(&net, Player::ALL[3]),
+            None,
+            "a solo corner is not named after a leftover seat"
+        );
     }
 
     fn fake_peer() -> PeerId {

@@ -806,6 +806,69 @@ fn a_finished_round_rematches_over_the_same_socket() {
     log("PASS: two rematches over one socket, one of them from the game-over card.");
 }
 
+/// A stalled engine-only race ends on every peer. Only the host drives the
+/// engines, so only the host can call the stall; its guests end the round
+/// when the host's `Abandon` arrives, instead of waiting for a move that is
+/// never coming.
+#[test]
+#[ignore = "runs live WebRTC peers on an in-process signaling server"]
+fn an_abandoned_engine_race_ends_everywhere() {
+    use bevy::ecs::system::RunSystemOnce;
+    use checkers_core::rules::Outcome;
+
+    let port = start_signaling_server();
+    let room = fresh_room("abandon");
+    let mut apps = vec![instance("A", &room, port), instance("B", &room, port)];
+
+    let connected = wait_for(&mut apps, Duration::from_secs(45), |apps| {
+        apps.iter().all(|a| net(a).peers.len() == 1) && apps.iter().any(|a| net(a).is_host)
+    });
+    assert!(connected, "never connected: {}", describe(&apps));
+    assert!(
+        wait_roster_agreement(&mut apps, Duration::from_secs(30)),
+        "the greetings never settled: {}",
+        describe(&apps)
+    );
+    let host_i = apps.iter().position(|a| net(a).is_host).expect("a host");
+    let guest_i = 1 - host_i;
+
+    choose(&mut apps[host_i], CornerCommand::Cpu, 0);
+    choose(&mut apps[host_i], CornerCommand::Cpu, 3);
+    assert!(
+        wait_players(&mut apps, &[0, 3], Duration::from_secs(30)),
+        "the engines were never seated: {}",
+        describe(&apps)
+    );
+    press(&mut apps[host_i], KeyCode::Enter);
+    assert!(
+        wait_in_game(&mut apps, Duration::from_secs(30)),
+        "the race never started: {}",
+        describe(&apps)
+    );
+
+    // What the host's engine driver does when the stall detector trips.
+    apps[host_i]
+        .world_mut()
+        .run_system_once(
+            |mut session: ResMut<Session>,
+             mut socket: Option<ResMut<MatchboxSocket>>,
+             net: Res<NetState>| {
+                checkers_bevy::net::abandon_round(&mut session, socket.as_deref_mut(), &net);
+            },
+        )
+        .expect("the abandonment runs");
+
+    let ended = wait_for(&mut apps, Duration::from_secs(10), |apps| {
+        apps[guest_i].world().resource::<Session>().game.outcome() == Some(Outcome::Abandoned)
+    });
+    assert!(
+        ended,
+        "the guest never learned the race was abandoned: {}",
+        describe(&apps)
+    );
+    log("PASS: the host's abandonment ended the round on the guest too.");
+}
+
 fn session_text(session: &Session) -> String {
     let players: Vec<u32> = session
         .players

@@ -111,6 +111,12 @@ pub fn pump(
                     warn!("a Start arrived while this round is still running; ignoring it");
                 }
             }
+            // The host's engines stalled this round; end it here too.
+            NetMsg::Abandon => {
+                if !session.game.is_over() {
+                    end_stalled(&mut session);
+                }
+            }
             // A guest cannot sequence, and the rest is lobby furniture.
             NetMsg::Move(_)
             | NetMsg::Claim(_)
@@ -160,18 +166,14 @@ pub(crate) fn apply(net: &mut NetState, session: &mut Session, seq: u32, wire: W
     session.commit(&mv);
     net.last_applied_seq = Some(seq);
     session.selection = crate::Selection::None;
-    log_move(net, mover, &wire, Some(seq));
+    log_move(net, session, mover, &wire, Some(seq));
     after_turn(session);
 }
 
 /// A move was played. `seq` is the host's sequence number in shared games;
-/// solo play has none. The name comes from the roster, empty in hotseat play.
-fn log_move(net: &NetState, mover: Player, wire: &WireMove, seq: Option<u32>) {
-    let name: String = net
-        .seats
-        .iter()
-        .find(|s| s.player == Some(mover.index() as u32))
-        .map_or_else(String::new, |s| s.name.clone());
+/// solo play has none. The name comes from the roster, empty in solo play.
+fn log_move(net: &NetState, session: &Session, mover: Player, wire: &WireMove, seq: Option<u32>) {
+    let name = session.roster_name(net, mover).unwrap_or_default();
     info!(
         move_seq = seq,
         player = mover.index() + 1,
@@ -235,6 +237,25 @@ pub fn settle(session: &mut Session) -> Vec<Player> {
         passed.push(stuck);
     }
     passed
+}
+
+/// End a stalled engine-only race: here, and in a shared round for every peer
+/// too. Only the host drives engines, so only the host can tell the race has
+/// stalled; its guests end the round when its [`NetMsg::Abandon`] arrives.
+pub fn abandon_round(session: &mut Session, socket: Option<&mut MatchboxSocket>, net: &NetState) {
+    end_stalled(session);
+    if session.shared
+        && let Some(socket) = socket
+    {
+        broadcast(socket, &net.peers, &NetMsg::Abandon);
+    }
+}
+
+fn end_stalled(session: &mut Session) {
+    session.game.abandon();
+    session.selection = crate::Selection::None;
+    session.message = "Game abandoned: the race stalled".to_string();
+    log_outcome(session.game.outcome().expect("abandoning sets an outcome"));
 }
 
 /// Log how the game ended. Called once from every path that ends the game —

@@ -140,6 +140,11 @@ pub enum NetMsg {
         seats: Vec<Seat>,
         forbid_foreign_camps: bool,
     },
+    /// Host -> all: the engines stalled an engine-only race and the host
+    /// abandoned it. Only the host drives engines, so only it can tell; a
+    /// guest never told would wait for a move that is not coming. Sent on the
+    /// channel the moves travel, so it lands after the last of them.
+    Abandon,
 }
 
 pub fn encode(msg: &NetMsg) -> Option<Box<[u8]>> {
