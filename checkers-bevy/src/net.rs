@@ -174,10 +174,22 @@ pub(crate) fn apply(net: &mut NetState, session: &mut Session, seq: u32, wire: W
     log_move(
         mover,
         session.roster_name(net, mover).unwrap_or_default(),
-        &mv,
+        &flown(session, &mv),
         Some(seq),
     );
     after_turn(session);
+}
+
+/// The move just committed, with the route it flew. A move from the wire
+/// resolves against the legal moves, which name only a jump's two ends;
+/// `commit` rebuilds the route — the same one on every peer, and the one the
+/// flight animates — into [`Session::last_move`]. Logging that keeps a jump's
+/// hops in the story.
+fn flown(session: &Session, mv: &Move) -> Move {
+    Move {
+        route: session.last_move.as_ref().map(|last| last.path.clone()),
+        ..mv.clone()
+    }
 }
 
 /// A move was played. `seq` is the host's sequence number in shared games;
@@ -201,7 +213,7 @@ pub(crate) fn apply_outbox_directly(session: &mut Session) {
             let mover = session.game.turn();
             session.commit(&mv);
             session.selection = crate::Selection::None;
-            log_move(mover, "", &mv, None);
+            log_move(mover, "", &flown(session, &mv), None);
             after_turn(session);
         }
     }
@@ -294,5 +306,32 @@ mod tests {
         apply_outbox_directly(&mut session);
 
         assert!(session.history().is_empty(), "no move entered the round");
+    }
+
+    /// A jump that arrived over the wire is logged with its hops: the wire and
+    /// the legal moves carry only its two ends, so the story used to read
+    /// "jump (0,0) -> (4,0)" for a two-hop chain.
+    #[test]
+    fn a_wire_jump_is_logged_with_its_hops() {
+        let (position, origin) = checkers_core::rules::two_hop_position();
+        let mut session = Session::for_players(
+            &[Player::ALL[0], Player::ALL[1]],
+            checkers_core::rules::Variants::default(),
+        );
+        session.game = checkers_core::rules::Game::compose(
+            position,
+            Player::ALL[0],
+            &[Player::ALL[0], Player::ALL[1]],
+        );
+        let wire = WireMove {
+            origin: (origin.q, origin.r),
+            destination: (origin.q + 4, origin.r),
+            jump: true,
+        };
+        let mv = session.resolve(&wire).expect("the two-hop jump is legal");
+        session.commit(&mv);
+
+        let line = crate::move_log::describe(&flown(&session, &mv));
+        assert!(line.contains("via (2,0)"), "the hop is missing: {line}");
     }
 }
