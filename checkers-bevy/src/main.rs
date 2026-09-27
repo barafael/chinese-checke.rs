@@ -1573,14 +1573,18 @@ fn sync_game_over(
                             },
                             TextColor(Color::srgb(0.9, 0.9, 0.92)),
                         ));
-                        row.spawn((
-                            Text::new("R deals a new game"),
-                            TextFont {
-                                font_size: FontSize::Px(13.0),
-                                ..default()
-                            },
-                            TextColor(Color::srgb(0.62, 0.62, 0.68)),
-                        ));
+                        // `R` re-deals a solo table only; a shared round is
+                        // restarted by the host, from the lobby.
+                        if !session.shared {
+                            row.spawn((
+                                Text::new("R deals a new game"),
+                                TextFont {
+                                    font_size: FontSize::Px(13.0),
+                                    ..default()
+                                },
+                                TextColor(Color::srgb(0.62, 0.62, 0.68)),
+                            ));
+                        }
                     });
             });
         });
@@ -1623,10 +1627,12 @@ fn sync_status(
         _ => String::new(),
     };
 
+    // `R` re-deals a solo table only; a shared round is restarted by the host.
+    let restart = if session.shared { "" } else { "R restarts, " };
     **text = format!(
         "{header}{staged}\n{}\n{} laws checked at startup  |  invariants checked each turn  |  style: {}\n\
          Click a piece, then a highlighted hole. Jumps chain one hop at a time.\n\
-         Enter confirms, Backspace cancels, U undoes a hop, R restarts, V switches the board style, T hides this.",
+         Enter confirms, Backspace cancels, U undoes a hop, {restart}V switches the board style, T hides this.",
         session.message,
         LAWS.len(),
         style.label(),
