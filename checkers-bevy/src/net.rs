@@ -8,7 +8,7 @@
 
 use bevy::prelude::*;
 use bevy_matchbox::prelude::*;
-use checkers_core::position::{MoveKind as GameMoveKind, Player};
+use checkers_core::position::{Move, Player};
 use checkers_net::{CH_RELIABLE, NetMsg, NetState, WireMove, broadcast, decode, send_to};
 
 use crate::lobby::{ChosenVariants, accept_start};
@@ -166,21 +166,24 @@ pub(crate) fn apply(net: &mut NetState, session: &mut Session, seq: u32, wire: W
     session.commit(&mv);
     net.last_applied_seq = Some(seq);
     session.selection = crate::Selection::None;
-    log_move(net, session, mover, &wire, Some(seq));
+    log_move(
+        mover,
+        session.roster_name(net, mover).unwrap_or_default(),
+        &mv,
+        Some(seq),
+    );
     after_turn(session);
 }
 
 /// A move was played. `seq` is the host's sequence number in shared games;
-/// solo play has none. The name comes from the roster, empty in solo play.
-fn log_move(net: &NetState, session: &Session, mover: Player, wire: &WireMove, seq: Option<u32>) {
-    let name = session.roster_name(net, mover).unwrap_or_default();
+/// solo play has none. `name` is the roster's, empty in solo play. Players
+/// are numbered from 0, as the lobby, `moves.log` and the record number them.
+fn log_move(mover: Player, name: &str, mv: &Move, seq: Option<u32>) {
     info!(
         move_seq = seq,
-        player = mover.index() + 1,
+        player = mover.index(),
         name = %name,
-        kind = if wire.jump { "jump" } else { "step" },
-        from = %format!("({},{})", wire.origin.0, wire.origin.1),
-        to = %format!("({},{})", wire.destination.0, wire.destination.1),
+        mv = %crate::move_log::describe(mv),
         "move applied",
     );
 }
@@ -193,17 +196,7 @@ pub(crate) fn apply_outbox_directly(session: &mut Session) {
             let mover = session.game.turn();
             session.commit(&mv);
             session.selection = crate::Selection::None;
-            info!(
-                player = mover.index() + 1,
-                kind = if mv.kind == GameMoveKind::Jump {
-                    "jump"
-                } else {
-                    "step"
-                },
-                from = %format!("({},{})", mv.origin.q, mv.origin.r),
-                to = %format!("({},{})", mv.destination.q, mv.destination.r),
-                "move applied",
-            );
+            log_move(mover, "", &mv, None);
             after_turn(session);
         }
     }
@@ -214,7 +207,7 @@ pub(crate) fn apply_outbox_directly(session: &mut Session) {
 /// through a round reaches afterwards.
 pub fn after_turn(session: &mut Session) {
     for stuck in settle(session) {
-        info!(player = stuck.index() + 1, "no legal move - passes");
+        info!(player = stuck.index(), "no legal move - passes");
     }
     if let Some(outcome) = session.game.outcome() {
         log_outcome(outcome);
@@ -264,10 +257,10 @@ fn end_stalled(session: &mut Session) {
 pub fn log_outcome(outcome: checkers_core::rules::Outcome) {
     match outcome {
         checkers_core::rules::Outcome::Winner(p) => {
-            info!(player = p.index() + 1, "game over: filled the target camp");
+            info!(player = p.index(), "game over: filled the target camp");
         }
         checkers_core::rules::Outcome::Resigned(p) => {
-            info!(player = p.index() + 1, "game over: resigned");
+            info!(player = p.index(), "game over: resigned");
         }
         checkers_core::rules::Outcome::Draw => info!("game over: draw - everyone is blocked"),
         checkers_core::rules::Outcome::Abandoned => {

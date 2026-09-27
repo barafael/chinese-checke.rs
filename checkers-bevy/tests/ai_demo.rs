@@ -9,7 +9,7 @@
 
 use checkers_ai::{Ai, AiConfig};
 use checkers_bevy::Session;
-use checkers_bevy::ai::describe;
+use checkers_bevy::move_log::describe;
 use checkers_bevy::ai::{Action, AiPace, MOVE_INTERVAL};
 use checkers_bevy::setup::Seating;
 use checkers_core::audit::audit_position;

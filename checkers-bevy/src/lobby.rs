@@ -1231,8 +1231,7 @@ pub fn start_decision(net: &NetState, table: &Table) -> StartDecision {
         );
     }
 
-    let seated: Vec<&Seat> = net.seats.iter().filter(|s| s.player.is_some()).collect();
-    if seated.len() < 2 {
+    if seated(net) < 2 {
         return StartDecision::Refuse(
             "At least two corners must be claimed before the game can start.".into(),
         );
@@ -1526,10 +1525,13 @@ pub(crate) fn accept_start(
     net.seats = seats;
     variants.0.forbid_foreign_camps = forbid_foreign_camps;
     next_state.set(AppState::InGame);
-    info!(
-        seated = net.seats.len(),
-        "received Start - entering the game",
-    );
+    info!(seated = seated(net), "received Start - entering the game");
+}
+
+/// How many seats hold a corner: the players of the round the roster would
+/// deal. Spectators have seats too, and are not counted.
+fn seated(net: &NetState) -> usize {
+    net.seats.iter().filter(|s| s.player.is_some()).count()
 }
 
 /// Drop seats whose peer has left the room, and greeting memory of peers that
@@ -1968,7 +1970,7 @@ pub fn handle_buttons(
                 next_state.set(AppState::InGame);
             }
             StartDecision::Multiplayer => {
-                info!(players = net.peers.len() + 1, "starting a shared game");
+                info!(players = seated(&net), "starting a shared game");
                 if let Some(s) = socket.as_mut() {
                     broadcast(s, &net.peers, &start_message(&net, variants.0));
                 }

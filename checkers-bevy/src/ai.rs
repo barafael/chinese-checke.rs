@@ -12,7 +12,7 @@
 use crate::Session;
 use bevy::ecs::resource::Resource;
 use checkers_ai::Ai;
-use checkers_core::position::{Move, MoveKind};
+use checkers_core::position::Move;
 use std::time::Duration;
 
 /// Minimum wall-clock spacing between two committed moves. A flight longer
@@ -185,28 +185,6 @@ impl AiPace {
         }
         action
     }
-}
-
-/// Describe a move the way the log reads it.
-pub fn describe(mv: &Move) -> String {
-    let kind = match mv.kind {
-        MoveKind::Step => "step",
-        MoveKind::Jump => "jump",
-    };
-    let mut out = format!(
-        "{kind} ({},{}) -> ({},{})",
-        mv.origin.q, mv.origin.r, mv.destination.q, mv.destination.r
-    );
-    if let Some(route) = &mv.route
-        && route.len() > 2
-    {
-        let via: Vec<String> = route[1..route.len() - 1]
-            .iter()
-            .map(|c| format!("({},{})", c.q, c.r))
-            .collect();
-        out.push_str(&format!(" via {}", via.join(", ")));
-    }
-    out
 }
 
 #[cfg(test)]

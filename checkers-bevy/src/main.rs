@@ -1679,13 +1679,13 @@ fn ai_take_turn(
                 "{}. p{} {}",
                 move_no,
                 seat,
-                checkers_bevy::ai::describe(&mv)
+                checkers_bevy::move_log::describe(&mv)
             );
             checkers_bevy::move_log::log(&line);
             session.message = format!(
                 "Player {} (computer): {}",
                 seat,
-                checkers_bevy::ai::describe(&mv)
+                checkers_bevy::move_log::describe(&mv)
             );
             session.outbox.push(mv);
         }
