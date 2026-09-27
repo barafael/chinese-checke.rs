@@ -89,10 +89,24 @@ const PET_NAMES: &[&str] = &[
     "puffin", "badger", "marten", "vole",
 ];
 
-/// The pet name this session goes by. Drawn once per launch; the player cannot
-/// and need not change it.
+/// The pet name a session starts with, drawn once per launch. The lobby's
+/// name field changes it.
 pub fn petname() -> String {
     PET_NAMES[(fresh_seed() % PET_NAMES.len() as u64) as usize].to_string()
+}
+
+/// A pet name none of `taken` goes by — for a peer whose name clashed with
+/// someone already in the room. Numbered once every pet name is taken.
+pub fn petname_avoiding(taken: &[&str]) -> String {
+    let free: Vec<&str> = PET_NAMES
+        .iter()
+        .copied()
+        .filter(|name| !taken.contains(name))
+        .collect();
+    if free.is_empty() {
+        return format!("{}-{}", petname(), fresh_seed() % 1000);
+    }
+    free[(fresh_seed() % free.len() as u64) as usize].to_string()
 }
 
 /// A seed that differs between processes and between calls.
@@ -257,6 +271,17 @@ mod tests {
 
     /// A pet name is one word off the list; two launches need not differ (the
     /// list is short), but the name must always be one the roster can show.
+    #[test]
+    fn a_clash_draws_a_free_name() {
+        let taken: Vec<&str> = PET_NAMES.iter().copied().filter(|n| *n != "otter").collect();
+        for _ in 0..50 {
+            assert_eq!(petname_avoiding(&taken), "otter", "the one free name");
+        }
+        let everything: Vec<&str> = PET_NAMES.to_vec();
+        let numbered = petname_avoiding(&everything);
+        assert!(!everything.contains(&numbered.as_str()), "got {numbered}");
+    }
+
     #[test]
     fn petnames_come_from_the_list() {
         let name = petname();

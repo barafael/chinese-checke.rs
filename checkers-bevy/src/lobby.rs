@@ -154,6 +154,13 @@ pub struct ChosenVariants(pub Variants);
 #[derive(Resource, Debug, Clone, Default)]
 pub struct LobbyStatus(pub String);
 
+/// A guest's corner claim (or release, `Some(None)`) that the host has not
+/// answered yet. The answer is the host's next roster that settles it, and
+/// the status line says how it went — without this, "Claiming corner 3..."
+/// stayed on screen long after the corner was granted.
+#[derive(Resource, Debug, Clone, Copy, Default)]
+pub struct PendingClaim(pub Option<Option<u32>>);
+
 /// Which field holds the keyboard, and what has been typed into it.
 ///
 /// Editing is *modal*: while a field is focused every key belongs to it and
@@ -225,6 +232,7 @@ pub fn plugin(app: &mut App) {
         .init_resource::<SectorArt>()
         .init_resource::<ChosenVariants>()
         .init_resource::<LobbyStatus>()
+        .init_resource::<PendingClaim>()
         .init_resource::<checkers_net::Signaling>()
         .add_plugins(fields_plugin)
         .add_systems(
@@ -244,6 +252,9 @@ pub fn plugin(app: &mut App) {
                 (
                     elect_host,
                     pump_socket,
+                    // After the roster is fresh: a name that clashes with an
+                    // earlier peer's is replaced before anyone sees two.
+                    settle_name_clash,
                     // The lobby's own clicks stand down while a field holds
                     // the keyboard; its keys are already the field's.
                     focus_input_fields.run_if(not_editing),
@@ -1371,6 +1382,7 @@ pub fn elect_host(socket: Option<ResMut<MatchboxSocket>>, mut net: ResMut<NetSta
 pub struct LobbyWorld<'w, 's> {
     pub net: ResMut<'w, NetState>,
     pub status: ResMut<'w, LobbyStatus>,
+    pub pending: ResMut<'w, PendingClaim>,
     pub variants: ResMut<'w, ChosenVariants>,
     pub selected: ResMut<'w, SelectedCorner>,
     pub table: ResMut<'w, Table>,
@@ -1392,6 +1404,7 @@ pub fn pump_socket(socket: Option<ResMut<MatchboxSocket>>, lobby: LobbyWorld) {
     let LobbyWorld {
         mut net,
         mut status,
+        mut pending,
         mut variants,
         mut next_state,
         state,
@@ -1519,7 +1532,17 @@ pub fn pump_socket(socket: Option<ResMut<MatchboxSocket>>, lobby: LobbyWorld) {
                 }
             }
             // Guests take the host's roster verbatim; it is the only authority.
-            NetMsg::Roster(seats) => net.seats = seats,
+            // A roster that settles this peer's claim answers it on the status
+            // line.
+            NetMsg::Roster(seats) => {
+                net.seats = seats;
+                if let Some(claim) = pending.0
+                    && let Some(answer) = claim_answer(&net, claim)
+                {
+                    status.0 = answer;
+                    pending.0 = None;
+                }
+            }
             // The host's rule switch, live. The host is the only authority, so
             // a sequencing peer ignores its own echo; guests take it verbatim.
             NetMsg::Variants {
@@ -1602,6 +1625,51 @@ pub fn pump_socket(socket: Option<ResMut<MatchboxSocket>>, lobby: LobbyWorld) {
             NetMsg::Move(_) | NetMsg::Sequenced { .. } | NetMsg::Abandon => {}
         }
     }
+}
+
+/// Whether another peer in the room already goes by `name`. Engines are called
+/// "Engine" and are not peers, so they never clash.
+fn name_taken(net: &NetState, name: &str) -> bool {
+    let me = net.my_id.map(|id| id.to_string());
+    net.seats
+        .iter()
+        .any(|s| !s.engine && Some(&s.peer) != me.as_ref() && s.name == name)
+}
+
+/// Keep names unique in the room: the roster, the corner labels and the
+/// cursors could not tell two peers of one name apart.
+///
+/// A rename to a taken name is refused (see `commit_name`), but pet names are
+/// drawn before peers meet, so two can clash on joining. The peer with the
+/// larger id then draws a free pet name and re-greets, so the host's roster
+/// follows. The host has the smallest id and never has to give way, and of
+/// two guests exactly one does.
+pub fn settle_name_clash(mut net: ResMut<NetState>, mut status: ResMut<LobbyStatus>) {
+    let Some(name) = clash_rename(&net) else {
+        return;
+    };
+    status.0 = format!(
+        "Someone here was already called \"{}\" - you are \"{name}\" now.",
+        net.name
+    );
+    info!(from = %net.name, to = %name, "renamed to settle a name clash");
+    net.name = name;
+    net.greeted.clear();
+}
+
+/// The name to switch to when an earlier peer — one with a smaller id —
+/// already goes by this peer's name; `None` while the name is this peer's
+/// alone. Reads only, so an idle room leaves `NetState` untouched.
+fn clash_rename(net: &NetState) -> Option<String> {
+    let me = net.my_id?.to_string();
+    let clash = net
+        .seats
+        .iter()
+        .any(|s| !s.engine && s.peer < me && s.name == net.name);
+    clash.then(|| {
+        let taken: Vec<&str> = net.seats.iter().map(|s| s.name.as_str()).collect();
+        crate::web::petname_avoiding(&taken)
+    })
 }
 
 /// Take the host's `Start`: the final roster and the house rules, then deal the
@@ -1782,6 +1850,7 @@ pub fn sector_click(net: &NetState, sector: usize) -> SectorClick {
 fn send_claim(
     socket: &mut MatchboxSocket,
     net: &mut NetState,
+    pending: &mut PendingClaim,
     claim: Option<u32>,
     me: &str,
 ) -> String {
@@ -1790,15 +1859,37 @@ fn send_claim(
             seat.player = claim;
         }
         publish_roster(socket, net, &net.peers);
+        pending.0 = None;
         return match claim {
             Some(c) => format!("You hold corner {c}."),
             None => "Corner released.".into(),
         };
     }
     broadcast(socket, &net.peers, &NetMsg::Claim(claim));
+    // Answered by the host's roster; see `claim_answer`.
+    pending.0 = Some(claim);
     match claim {
         Some(c) => format!("Claiming corner {c}..."),
         None => "Releasing my corner...".into(),
+    }
+}
+
+/// Whether this roster settles a guest's pending claim, and how to say so.
+///
+/// `None` while the roster says nothing either way: a roster the host sent
+/// for someone else's change can arrive before the host has even seen this
+/// claim, so only a roster that grants it — or shows the corner held by
+/// someone else, which the host will not undo — is an answer.
+pub fn claim_answer(net: &NetState, claim: Option<u32>) -> Option<String> {
+    let mine = net.my_seat().and_then(|s| s.player);
+    match claim {
+        Some(c) if mine == Some(c) => Some(format!("You hold corner {c}.")),
+        Some(c) => net
+            .seats
+            .iter()
+            .find(|s| s.player == Some(c))
+            .map(|holder| format!("Corner {c} went to {}.", holder.name)),
+        None => mine.is_none().then(|| "Corner released.".into()),
     }
 }
 
@@ -1815,6 +1906,7 @@ pub fn select_corner(
     mut net: ResMut<NetState>,
     mut selected: ResMut<SelectedCorner>,
     mut status: ResMut<LobbyStatus>,
+    mut pending: ResMut<PendingClaim>,
 ) {
     for (interaction, rel) in hit.iter_mut() {
         if *interaction != Interaction::Pressed {
@@ -1828,7 +1920,7 @@ pub fn select_corner(
             SectorClick::Select(i) => selected.0 = Some(i),
             SectorClick::Claim(c) => {
                 if let Some(s) = socket.as_mut() {
-                    status.0 = send_claim(s, &mut net, Some(c), &me);
+                    status.0 = send_claim(s, &mut net, &mut pending, Some(c), &me);
                 }
                 // The claimed corner is the selected one: the very next
                 // Computer / Cancel Seat press acts on it without a second
@@ -1959,6 +2051,7 @@ pub fn handle_buttons(
         mut selected,
         mut variants,
         mut status,
+        mut pending,
         mut next_state,
         ..
     } = lobby;
@@ -2009,7 +2102,7 @@ pub fn handle_buttons(
             }
             Ok(CornerEffect::Claim(claim)) => {
                 if let Some(s) = socket.as_mut() {
-                    status.0 = send_claim(s, &mut net, claim, &me);
+                    status.0 = send_claim(s, &mut net, &mut pending, claim, &me);
                 }
             }
             Ok(CornerEffect::AddEngine(c)) => {
@@ -2274,6 +2367,9 @@ fn commit_name(buffer: &str, targets: &mut FieldTargets) -> Result<(), String> {
     let trimmed = buffer.trim();
     if trimmed.is_empty() {
         return Err("A name cannot be empty.".into());
+    }
+    if name_taken(&targets.net, trimmed) {
+        return Err(format!("Someone here is already called \"{trimmed}\"."));
     }
     if trimmed != targets.net.name {
         targets.net.name = trimmed.to_string();
@@ -3004,6 +3100,7 @@ mod tests {
         world.insert_resource(net);
         world.insert_resource(SelectedCorner(None));
         world.init_resource::<LobbyStatus>();
+        world.init_resource::<PendingClaim>();
         world.init_resource::<ButtonInput<KeyCode>>();
 
         // A press on corner 1's centroid — free, so a claim.
@@ -3207,6 +3304,79 @@ mod tests {
             "greeting memory of the departed is dropped"
         );
         assert!(net.greeted.contains(&here));
+    }
+
+    /// A guest's claim is answered by the roster that settles it — granted,
+    /// or the corner held by someone else — and by no other: a roster the
+    /// host sent for another change may arrive before the claim was seen.
+    #[test]
+    fn a_roster_answers_a_pending_claim() {
+        let me = PeerId(uuid::Uuid::from_u128(2));
+        let mut net = NetState {
+            my_id: Some(me),
+            seats: vec![seat(&me.to_string(), None), seat("ada", Some(0))],
+            ..NetState::default()
+        };
+        assert_eq!(claim_answer(&net, Some(3)), None, "not answered yet");
+        assert_eq!(
+            claim_answer(&net, Some(0)).as_deref(),
+            Some("Corner 0 went to ada.")
+        );
+        assert_eq!(
+            claim_answer(&net, None).as_deref(),
+            Some("Corner released.")
+        );
+
+        net.seats[0].player = Some(3);
+        assert_eq!(
+            claim_answer(&net, Some(3)).as_deref(),
+            Some("You hold corner 3.")
+        );
+        assert_eq!(claim_answer(&net, None), None, "still holding it");
+    }
+
+    /// Two peers who drew the same pet name: the one with the larger id gives
+    /// way, to a name nobody here has; the other — the host, whenever it is
+    /// involved — keeps its own. Engines never clash.
+    #[test]
+    fn the_later_of_two_same_named_peers_gives_way() {
+        let host = PeerId(uuid::Uuid::from_u128(1));
+        let guest = PeerId(uuid::Uuid::from_u128(2));
+        let roster = vec![seat(&host.to_string(), None), seat(&guest.to_string(), None)]
+            .into_iter()
+            .map(|s| Seat {
+                name: "gecko".into(),
+                ..s
+            })
+            .collect::<Vec<_>>();
+
+        let guest_net = NetState {
+            my_id: Some(guest),
+            name: "gecko".into(),
+            seats: roster.clone(),
+            ..NetState::default()
+        };
+        let renamed = clash_rename(&guest_net).expect("the guest gives way");
+        assert_ne!(renamed, "gecko");
+
+        let host_net = NetState {
+            my_id: Some(host),
+            name: "gecko".into(),
+            seats: roster,
+            ..NetState::default()
+        };
+        assert_eq!(clash_rename(&host_net), None, "the host keeps its name");
+
+        let engine_net = NetState {
+            my_id: Some(guest),
+            name: "Engine".into(),
+            seats: vec![Seat {
+                engine: true,
+                ..seat("engine-0", Some(4))
+            }],
+            ..NetState::default()
+        };
+        assert_eq!(clash_rename(&engine_net), None, "engines are not peers");
     }
 
     /// An idle room has nobody to prune, so the host's per-frame check leaves

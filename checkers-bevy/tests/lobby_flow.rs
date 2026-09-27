@@ -44,6 +44,7 @@ fn app() -> App {
         .init_resource::<ChosenVariants>()
         .init_resource::<checkers_net::NetState>()
         .init_resource::<checkers_bevy::lobby::LobbyStatus>()
+        .init_resource::<checkers_bevy::lobby::PendingClaim>()
         .add_systems(
             Update,
             (

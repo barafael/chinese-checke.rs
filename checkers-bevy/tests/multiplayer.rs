@@ -101,6 +101,7 @@ fn instance(name: &str, room: &RoomId, port: u16) -> App {
         .init_resource::<ChosenVariants>()
         .init_resource::<NetState>()
         .init_resource::<checkers_bevy::lobby::LobbyStatus>()
+        .init_resource::<checkers_bevy::lobby::PendingClaim>()
         .add_systems(OnEnter(AppState::Lobby), checkers_net::open_socket)
         .add_systems(
             Update,
@@ -111,6 +112,7 @@ fn instance(name: &str, room: &RoomId, port: u16) -> App {
             (
                 checkers_bevy::lobby::elect_host,
                 checkers_bevy::lobby::pump_socket,
+                checkers_bevy::lobby::settle_name_clash,
                 checkers_bevy::lobby::select_corner,
                 checkers_bevy::lobby::handle_buttons,
             )
@@ -867,6 +869,62 @@ fn an_abandoned_engine_race_ends_everywhere() {
         describe(&apps)
     );
     log("PASS: the host's abandonment ended the round on the guest too.");
+}
+
+fn status(app: &App) -> String {
+    app.world()
+        .resource::<checkers_bevy::lobby::LobbyStatus>()
+        .0
+        .clone()
+}
+
+/// Two instances that drew the same name end up with two names, the host
+/// keeping its own; and a guest's claim is answered on its status line once
+/// the host's roster grants it, instead of reading "Claiming..." forever.
+#[test]
+#[ignore = "runs live WebRTC peers on an in-process signaling server"]
+fn a_shared_name_is_settled_and_a_claim_answered() {
+    let port = start_signaling_server();
+    let room = fresh_room("clash");
+    let mut apps = vec![instance("gecko", &room, port), instance("gecko", &room, port)];
+
+    let connected = wait_for(&mut apps, Duration::from_secs(45), |apps| {
+        apps.iter().all(|a| net(a).peers.len() == 1) && apps.iter().any(|a| net(a).is_host)
+    });
+    assert!(connected, "never connected: {}", describe(&apps));
+    let host_i = apps.iter().position(|a| net(a).is_host).expect("a host");
+    let guest_i = 1 - host_i;
+
+    let settled = wait_for(&mut apps, Duration::from_secs(30), |apps| {
+        let names: Vec<Vec<&str>> = apps
+            .iter()
+            .map(|a| {
+                let mut n: Vec<&str> = net(a).seats.iter().map(|s| s.name.as_str()).collect();
+                n.sort_unstable();
+                n
+            })
+            .collect();
+        names[0].len() == 2 && names[0][0] != names[0][1] && names[0] == names[1]
+    });
+    assert!(settled, "the clash was never settled: {}", describe(&apps));
+    assert_eq!(net(&apps[host_i]).name, "gecko", "the host keeps its name");
+    assert_ne!(net(&apps[guest_i]).name, "gecko", "the guest gives way");
+    log(&format!(
+        "[clash] the guest is now {}",
+        net(&apps[guest_i]).name
+    ));
+
+    choose(&mut apps[guest_i], CornerCommand::Human, 3);
+    let answered = wait_for(&mut apps, Duration::from_secs(30), |apps| {
+        status(&apps[guest_i]) == "You hold corner 3."
+    });
+    assert!(
+        answered,
+        "the claim was never answered: status {:?}, {}",
+        status(&apps[guest_i]),
+        describe(&apps)
+    );
+    log("PASS: the name clash was settled and the guest's claim answered.");
 }
 
 fn session_text(session: &Session) -> String {

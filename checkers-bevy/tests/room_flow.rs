@@ -13,8 +13,8 @@ use bevy::prelude::*;
 use bevy::state::app::StatesPlugin;
 use checkers_bevy::AppState;
 use checkers_bevy::lobby::{
-    ApplyName, EditAction, FieldEdit, FieldKind, LobbyStatus, NAME_MAX_LEN, SelectedCorner,
-    apply_name, edit_action, fields_plugin, not_editing, select_corner,
+    ApplyName, EditAction, FieldEdit, FieldKind, LobbyStatus, NAME_MAX_LEN, PendingClaim,
+    SelectedCorner, apply_name, edit_action, fields_plugin, not_editing, select_corner,
 };
 use checkers_bevy::sound::{self, SoundOn};
 use checkers_net::{NetState, RoomId, Seat};
@@ -359,7 +359,9 @@ fn leaving_the_lobby_closes_the_field() {
 /// handled cannot also be seen by the systems that run after it.
 fn chained_app() -> App {
     let mut app = app();
-    app.init_resource::<SelectedCorner>().add_systems(
+    app.init_resource::<SelectedCorner>()
+        .init_resource::<PendingClaim>()
+        .add_systems(
         Update,
         // The *real* run condition, not a copy of it. An inline duplicate here
         // made an earlier version of this test pass with the guard removed
@@ -536,6 +538,27 @@ fn applying_with_the_field_open_commits() {
     let edit = app.world().resource::<FieldEdit>();
     assert_eq!(edit.focus, Some(FieldKind::Name), "an empty name is refused");
     assert!(!edit.error.is_empty(), "the refusal must be explained");
+}
+
+/// A name someone else in the room already has is refused: the roster, the
+/// corner labels and the cursors could not tell the two apart.
+#[test]
+fn a_name_already_here_is_refused() {
+    let mut app = app();
+    app.world_mut().resource_mut::<NetState>().seats = vec![Seat {
+        peer: "someone-else".into(),
+        name: "ada".into(),
+        player: None,
+        engine: false,
+    }];
+    open_name(&mut app);
+    type_into(&mut app, "ada");
+    press(&mut app, KeyCode::Enter, None);
+
+    let edit = app.world().resource::<FieldEdit>();
+    assert_eq!(edit.focus, Some(FieldKind::Name), "the field stays open");
+    assert!(edit.error.contains("already"), "error: {}", edit.error);
+    assert_ne!(app.world().resource::<NetState>().name, "ada");
 }
 
 /// An empty name must be refused, keeping the field and what was typed, rather
