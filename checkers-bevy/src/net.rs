@@ -11,7 +11,8 @@ use bevy_matchbox::prelude::*;
 use checkers_core::position::{MoveKind as GameMoveKind, Player};
 use checkers_net::{CH_RELIABLE, NetMsg, NetState, WireMove, broadcast, decode, send_to};
 
-use crate::{Session, audit};
+use crate::lobby::{ChosenVariants, accept_start};
+use crate::{AppState, Session, audit};
 
 /// Fold the socket's peer changes into [`NetState`]: connected peers are
 /// added, disconnected ones dropped. Shared by the in-game pump and the
@@ -36,10 +37,17 @@ pub(crate) fn sync_peers(socket: &mut MatchboxSocket, net: &mut NetState) {
 }
 
 /// Drain the outbox, then apply whatever arrived.
+///
+/// The socket outlives the round, and peers leave a finished round when they
+/// choose, so the host may already be back in the lobby while this peer still
+/// shows the game-over card: its roster changes and its rematch `Start` arrive
+/// here, and are taken exactly as the lobby would take them.
 pub fn pump(
     socket: Option<ResMut<MatchboxSocket>>,
     mut net: ResMut<NetState>,
     mut session: ResMut<Session>,
+    mut variants: ResMut<ChosenVariants>,
+    mut next_state: ResMut<NextState<AppState>>,
 ) {
     let Some(mut socket) = socket else {
         // No socket at all: apply locally so the game is still playable. Only
@@ -82,14 +90,33 @@ pub fn pump(
                 sequence_and_broadcast(&mut socket, &mut net, &mut session, &peers, wire);
             }
             NetMsg::Sequenced { seq, mv } => apply(&mut net, &mut session, seq, mv),
-            // A guest cannot sequence, and lobby traffic is over.
+            // The host is back in the lobby: guests take its roster verbatim,
+            // as the lobby does.
+            NetMsg::Roster(seats) => net.seats = seats,
+            // The host dealt a rematch. Re-entering the game tears this round
+            // down and deals the new one from the roster.
+            NetMsg::Start {
+                seats,
+                forbid_foreign_camps,
+            } => {
+                if session.game.is_over() {
+                    accept_start(
+                        &mut net,
+                        &mut variants,
+                        &mut next_state,
+                        seats,
+                        forbid_foreign_camps,
+                    );
+                } else {
+                    warn!("a Start arrived while this round is still running; ignoring it");
+                }
+            }
+            // A guest cannot sequence, and the rest is lobby furniture.
             NetMsg::Move(_)
             | NetMsg::Claim(_)
             | NetMsg::Hello { .. }
-            | NetMsg::Roster(_)
             | NetMsg::Cursor { .. }
-            | NetMsg::Variants { .. }
-            | NetMsg::Start { .. } => {}
+            | NetMsg::Variants { .. } => {}
         }
     }
 }

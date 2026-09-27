@@ -38,7 +38,7 @@ use bevy_matchbox::prelude::*;
 use checkers_bevy::lobby::{ChosenVariants, CornerCommand, LobbyButton, SelectedCorner, Table};
 use checkers_bevy::{AppState, Session};
 use checkers_core::position::Player;
-use checkers_net::{NetState, RoomId};
+use checkers_net::{NetState, RoomId, Signaling};
 
 /// A local full-mesh signaling server, on a free loopback port. Runs on its
 /// own tokio runtime in a background thread, exactly like `matchbox_server`;
@@ -82,29 +82,30 @@ fn fresh_room(label: &str) -> RoomId {
 
 /// One headless instance: a real app, a real socket, the lobby's own systems.
 ///
-/// The socket is opened with exactly the builder [`checkers_net::open_socket`]
-/// uses, only pointed at the in-process server. The state machine is the app's:
-/// lobby systems run while in the lobby, and entering the game runs
-/// [`checkers_bevy::lobby::apply_seats`] on the `OnEnter` transition.
+/// The socket is opened by the app's own [`checkers_net::open_socket`] on
+/// entering the lobby, pointed at the in-process server through
+/// [`Signaling`]. The state machine is the app's: lobby systems run while in
+/// the lobby, entering the game runs [`checkers_bevy::lobby::apply_seats`] on
+/// the `OnEnter` transition, and the game's own [`checkers_bevy::net::pump`]
+/// runs while in it.
 fn instance(name: &str, room: &RoomId, port: u16) -> App {
     let mut app = App::new();
-    let url = format!("ws://127.0.0.1:{port}/{}", room.0);
     app.add_plugins((MinimalPlugins, InputPlugin, StatesPlugin))
         .init_state::<AppState>()
         .insert_state(AppState::Lobby)
+        .insert_resource(room.clone())
+        .insert_resource(Signaling(format!("ws://127.0.0.1:{port}")))
         .init_resource::<Session>()
         .init_resource::<Table>()
         .init_resource::<SelectedCorner>()
         .init_resource::<ChosenVariants>()
         .init_resource::<NetState>()
         .init_resource::<checkers_bevy::lobby::LobbyStatus>()
-        .add_systems(Startup, move |mut commands: Commands| {
-            let socket: MatchboxSocket = WebRtcSocketBuilder::new(url.clone())
-                .reconnect_attempts(None)
-                .add_reliable_channel()
-                .into();
-            commands.insert_resource(socket);
-        })
+        .add_systems(OnEnter(AppState::Lobby), checkers_net::open_socket)
+        .add_systems(
+            Update,
+            checkers_bevy::net::pump.run_if(in_state(AppState::InGame)),
+        )
         .add_systems(
             Update,
             (
@@ -678,6 +679,131 @@ fn a_spectator_watches_the_pair() {
         session_text(watcher)
     ));
     log("PASS: a spectator observes the pair and receives the same game.");
+}
+
+/// This instance's own id, as its socket reports it.
+fn socket_id(app: &mut App) -> Option<PeerId> {
+    app.world_mut().resource_mut::<MatchboxSocket>().id()
+}
+
+/// End the round in one instance, as a win, a draw or an abandonment would.
+fn finish_round(app: &mut App) {
+    app.world_mut().resource_mut::<Session>().game.abandon();
+}
+
+fn back_to_lobby(app: &mut App) {
+    app.world_mut()
+        .resource_mut::<NextState<AppState>>()
+        .set(AppState::Lobby);
+}
+
+/// A finished round rematches over the socket it was played on.
+///
+/// Returning to the lobby used to open a second socket: a fresh peer id nobody
+/// else knew, while every peer kept addressing the dead one. Here both peers
+/// finish a round, come back, and the host deals again — the ids must be the
+/// ones the round was played with, and the corners carry over. Then the guest
+/// lingers on the game-over card while the host deals a third round: the
+/// host's `Start` must reach it in the game and pull it in.
+#[test]
+#[ignore = "runs live WebRTC peers on an in-process signaling server"]
+fn a_finished_round_rematches_over_the_same_socket() {
+    let port = start_signaling_server();
+    let room = fresh_room("rematch");
+    let mut apps = vec![instance("A", &room, port), instance("B", &room, port)];
+
+    let connected = wait_for(&mut apps, Duration::from_secs(45), |apps| {
+        apps.iter().all(|a| net(a).peers.len() == 1) && apps.iter().any(|a| net(a).is_host)
+    });
+    assert!(connected, "never connected: {}", describe(&apps));
+    assert!(
+        wait_roster_agreement(&mut apps, Duration::from_secs(30)),
+        "the greetings never settled: {}",
+        describe(&apps)
+    );
+    let host_i = apps.iter().position(|a| net(a).is_host).expect("a host");
+    let guest_i = 1 - host_i;
+
+    choose(&mut apps[host_i], CornerCommand::Human, 0);
+    choose(&mut apps[guest_i], CornerCommand::Human, 3);
+    assert!(
+        wait_players(&mut apps, &[0, 3], Duration::from_secs(30)),
+        "the claims never settled: {}",
+        describe(&apps)
+    );
+    press(&mut apps[host_i], KeyCode::Enter);
+    assert!(
+        wait_in_game(&mut apps, Duration::from_secs(30)),
+        "the first round never started: {}",
+        describe(&apps)
+    );
+
+    let ids: Vec<Option<PeerId>> = apps.iter_mut().map(socket_id).collect();
+    let peers: Vec<Vec<PeerId>> = apps.iter().map(|a| net(a).peers.clone()).collect();
+    log(&format!("[round 1] ids {ids:?}; both in the game"));
+
+    // Both finish and come back.
+    for app in apps.iter_mut() {
+        finish_round(app);
+        back_to_lobby(app);
+    }
+    assert!(
+        wait_for(&mut apps, Duration::from_secs(10), |apps| apps
+            .iter()
+            .all(|a| !in_game(a))),
+        "never returned to the lobby: {}",
+        describe(&apps)
+    );
+    for (i, app) in apps.iter_mut().enumerate() {
+        assert_eq!(socket_id(app), ids[i], "instance {i} opened a new socket");
+        assert_eq!(net(app).my_id, ids[i], "instance {i} forgot its id");
+        assert_eq!(net(app).peers, peers[i], "instance {i} lost its peer");
+    }
+    assert_eq!(
+        roster_players(net(&apps[host_i])),
+        vec![0, 3],
+        "the corners carry over into the rematch"
+    );
+
+    press(&mut apps[host_i], KeyCode::Enter);
+    assert!(
+        wait_for(&mut apps, Duration::from_secs(30), |apps| apps
+            .iter()
+            .all(|a| in_game(a) && !a.world().resource::<Session>().game.is_over())),
+        "the rematch never started everywhere: {}",
+        describe(&apps)
+    );
+    log("[round 2] the rematch dealt on both peers");
+
+    // The guest lingers on the game-over card; only the host goes back.
+    for app in apps.iter_mut() {
+        finish_round(app);
+    }
+    back_to_lobby(&mut apps[host_i]);
+    assert!(
+        wait_for(&mut apps, Duration::from_secs(10), |apps| !in_game(
+            &apps[host_i]
+        )),
+        "the host never returned: {}",
+        describe(&apps)
+    );
+    press(&mut apps[host_i], KeyCode::Enter);
+    assert!(
+        wait_for(&mut apps, Duration::from_secs(30), |apps| apps
+            .iter()
+            .all(|a| in_game(a) && !a.world().resource::<Session>().game.is_over())),
+        "the host's Start never pulled the lingering guest in: {}",
+        describe(&apps)
+    );
+    for (i, app) in apps.iter().enumerate() {
+        let session = app.world().resource::<Session>();
+        assert_eq!(
+            session.players,
+            [Player::ALL[0], Player::ALL[3]],
+            "instance {i} dealt the wrong corners"
+        );
+    }
+    log("PASS: two rematches over one socket, one of them from the game-over card.");
 }
 
 fn session_text(session: &Session) -> String {

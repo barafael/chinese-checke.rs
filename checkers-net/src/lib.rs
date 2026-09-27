@@ -301,14 +301,50 @@ impl RoomId {
     }
 }
 
-pub fn open_socket(mut commands: Commands, room: Res<RoomId>) {
-    let url = format!("{SIGNALING_SERVER}/{}", room.0);
+/// Where peers find each other: [`SIGNALING_SERVER`] unless something else is
+/// inserted. A resource, so the multiplayer tests run the app's own
+/// [`open_socket`] against an in-process server.
+#[derive(Resource, Clone, Debug)]
+pub struct Signaling(pub String);
+
+impl Default for Signaling {
+    fn default() -> Self {
+        Self(SIGNALING_SERVER.to_string())
+    }
+}
+
+/// Open the room's socket, unless one is already open.
+///
+/// The socket lives as long as the room, not as long as the lobby screen:
+/// coming back from a game keeps it, so the peer ids, the roster and the host
+/// are what they were and a rematch is one Enter away. A socket opened on
+/// every lobby entry minted a new peer id each time, and peers went on
+/// addressing the old one. Only [`close_socket`] — a room change — makes the
+/// next lobby entry open a fresh one.
+pub fn open_socket(
+    mut commands: Commands,
+    room: Res<RoomId>,
+    signaling: Res<Signaling>,
+    socket: Option<Res<MatchboxSocket>>,
+) {
+    if socket.is_some() {
+        return;
+    }
+    let url = format!("{}/{}", signaling.0, room.0);
     info!(%url, "opening matchbox socket");
     commands.insert_resource(MatchboxSocket::from(
         WebRtcSocketBuilder::new(url)
             .reconnect_attempts(None)
             .add_reliable_channel(),
     ));
+}
+
+/// Leave the room: drop its socket and everything the socket established. One
+/// step, so a new socket can never inherit the old room's peers, id or host
+/// flag — the next [`open_socket`] starts from a clean [`NetState`].
+pub fn close_socket(commands: &mut Commands, net: &mut NetState) {
+    commands.remove_resource::<MatchboxSocket>();
+    net.leave_room();
 }
 
 /// Send to one peer on the reliable channel.

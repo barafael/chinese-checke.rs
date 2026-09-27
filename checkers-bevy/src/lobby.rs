@@ -214,9 +214,12 @@ pub fn plugin(app: &mut App) {
         .init_resource::<LobbyStatus>()
         .init_resource::<RoomEdit>()
         .init_resource::<NameEdit>()
+        .init_resource::<checkers_net::Signaling>()
         .add_systems(
             OnEnter(AppState::Lobby),
-            // The wedge art must exist before the star can reference it.
+            // The socket opens once per room, not once per lobby entry:
+            // `open_socket` is a no-op while one is open. The wedge art must
+            // exist before the star can reference it.
             (checkers_net::open_socket, ensure_sector_art, spawn).chain(),
         )
         .add_systems(OnExit(AppState::Lobby), despawn)
@@ -1494,22 +1497,39 @@ pub fn pump_socket(socket: Option<ResMut<MatchboxSocket>>, lobby: LobbyWorld) {
             NetMsg::Start {
                 seats,
                 forbid_foreign_camps,
-                ..
-            } => {
-                net.seats = seats;
-                variants.0.forbid_foreign_camps = forbid_foreign_camps;
-                next_state.set(AppState::InGame);
-                info!(
-                    seated = net.seats.len(),
-                    "received Start - entering the game",
-                );
-            }
+            } => accept_start(
+                &mut net,
+                &mut variants,
+                &mut next_state,
+                seats,
+                forbid_foreign_camps,
+            ),
             // Moves cannot arrive before the game starts, but a late duplicate
             // from a previous game in the same room could. Ignore rather than
             // mis-apply.
             NetMsg::Move(_) | NetMsg::Sequenced { .. } => {}
         }
     }
+}
+
+/// Take the host's `Start`: the final roster and the house rules, then deal the
+/// round. Shared by the lobby's pump and the game's, because the socket
+/// outlives the round: a peer still looking at the last game-over card is
+/// pulled into the rematch exactly like one waiting in the lobby.
+pub(crate) fn accept_start(
+    net: &mut NetState,
+    variants: &mut ChosenVariants,
+    next_state: &mut NextState<AppState>,
+    seats: Vec<Seat>,
+    forbid_foreign_camps: bool,
+) {
+    net.seats = seats;
+    variants.0.forbid_foreign_camps = forbid_foreign_camps;
+    next_state.set(AppState::InGame);
+    info!(
+        seated = net.seats.len(),
+        "received Start - entering the game",
+    );
 }
 
 /// Drop seats whose peer has left the room, and greeting memory of peers that
@@ -2052,11 +2072,10 @@ fn focus_input_fields(
 ///
 /// Changing the room means **reopening the socket**: the room is baked into the
 /// signaling URL, so editing [`RoomId`] alone would change the label and
-/// nothing else. Dropping `MatchboxSocket` makes `open_socket` run again when
-/// the room change re-enters the lobby, and [`NetState::leave_room`] discards
-/// everything the old room's socket told us. On the web the new room is
-/// written into the page URL, so the address bar always points where this peer
-/// actually is.
+/// nothing else. [`checkers_net::close_socket`] drops the socket together with
+/// everything it told us, and re-entering the lobby opens a fresh one against
+/// the new room. On the web the new room is written into the page URL, so the
+/// address bar always points where this peer actually is.
 pub fn edit_room(
     mut commands: Commands,
     mut keys: MessageReader<KeyboardInput>,
@@ -2115,11 +2134,10 @@ pub fn edit_room(
                     // Publish the new room in the URL, so the address always
                     // points where this peer is. No-op on native.
                     crate::web::share_room(&room);
-                    net.leave_room();
                     status.0 = format!("Joining room \"{}\"...", room.0);
-                    // Drop the old socket and re-enter the lobby, which reopens
-                    // it against the new room.
-                    commands.remove_resource::<MatchboxSocket>();
+                    // Leave the old room and re-enter the lobby, which opens a
+                    // socket against the new one.
+                    checkers_net::close_socket(&mut commands, &mut net);
                     next_state.set(AppState::Lobby);
                 }
                 Err(why) => edit.error = why.to_string(),
