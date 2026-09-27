@@ -14,8 +14,8 @@
 //! The room and the player's name are typed — on desktop they are the only way
 //! in. The room field accepts with Enter, which rewrites the page URL (on the
 //! web) and reopens the socket against the new room; the name field applies
-//! with its button. Editing is modal: while a field holds the keyboard, the
-//! rest of the lobby listens to nothing else. The host is the peer with the
+//! with its button. Editing is modal: while a field holds the keyboard, no
+//! other system in the app sees a key. The host is the peer with the
 //! lexicographically smallest `PeerId`, recomputed every frame so host loss
 //! self-heals. The host owns the roster: guests announce themselves with
 //! [`NetMsg::Hello`] and claim with [`NetMsg::Claim`]; everything else is the
@@ -26,6 +26,7 @@ use bevy::asset::RenderAssetUsages;
 use bevy::ecs::system::SystemParam;
 use bevy::image::Image;
 use bevy::input::ButtonState;
+use bevy::input::InputSystems;
 use bevy::input::keyboard::KeyboardInput;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
@@ -95,7 +96,7 @@ pub struct CornerText(pub usize);
 struct RosterText;
 
 /// Which editor an on-screen text input drives.
-#[derive(Component, Clone, Copy, PartialEq, Eq)]
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FieldKind {
     Room,
     Name,
@@ -153,41 +154,53 @@ pub struct ChosenVariants(pub Variants);
 #[derive(Resource, Debug, Clone, Default)]
 pub struct LobbyStatus(pub String);
 
-/// The room-name editor.
+/// Which field holds the keyboard, and what has been typed into it.
 ///
-/// Editing is *modal*: while any editor holds the keyboard every other key is
-/// suppressed, because the alternative is that typing a room named "solo"
-/// starts a game on the `s`. A mode is the smaller evil here, and `Esc` always
-/// leaves it.
+/// Editing is *modal*: while a field is focused every key belongs to it and
+/// the rest of the app hears none of them, because the alternative is that
+/// typing a room named "solo" starts a game on the `s`. A mode is the smaller
+/// evil here, and `Esc` always leaves it. Only one field can hold the
+/// keyboard, so one editor serves both.
 #[derive(Resource, Default)]
-pub struct RoomEdit {
-    pub active: bool,
-    /// What has been typed so far. Only committed to [`RoomId`] on Enter, so an
-    /// abandoned edit cannot leave the socket pointing somewhere unintended.
+pub struct FieldEdit {
+    /// The field being edited; `None` while the keyboard belongs to the lobby.
+    pub focus: Option<FieldKind>,
+    /// What has been typed so far. Only committed on Enter, so an abandoned
+    /// edit cannot leave the socket pointing somewhere unintended.
     pub buffer: String,
     /// Why the last commit was refused, shown beneath the field.
     pub error: String,
-    /// Set for the rest of the frame in which the field handled a keypress.
-    ///
-    /// Closing the field is not enough on its own. The lobby systems are
-    /// `.chain()`ed, so `handle_buttons` runs *after* `edit_room` in the same
-    /// frame: committing with Enter cleared `active`, and the very same Enter
-    /// then fell through and started the game.
-    ///
-    /// A run condition cannot see "this frame's input was already used", so the
-    /// editor records it. Cleared at the top of each `edit_*` run.
-    pub consumed_input: bool,
 }
 
-/// The player-name editor. Same modal pattern as [`RoomEdit`] — including the
-/// input-consumption flag — but committing writes the display name and
-/// re-greets peers rather than reopening a socket.
-#[derive(Resource, Default)]
-pub struct NameEdit {
-    pub active: bool,
-    pub buffer: String,
-    pub error: String,
-    pub consumed_input: bool,
+impl FieldEdit {
+    /// Focus `kind`, seeded with its current value, so a small change does not
+    /// mean retyping the whole thing.
+    pub fn open(&mut self, kind: FieldKind, value: &str) {
+        self.focus = Some(kind);
+        self.buffer = value.to_string();
+        self.error.clear();
+    }
+
+    /// Leave the field, dropping whatever was typed.
+    pub fn close(&mut self) {
+        self.focus = None;
+        self.buffer.clear();
+        self.error.clear();
+    }
+}
+
+/// Long enough for a name, short enough for a roster line and a corner label.
+pub const NAME_MAX_LEN: usize = 24;
+
+impl FieldKind {
+    /// The most characters the field accepts: typing stops at the limit rather
+    /// than being told afterwards that it was all too long.
+    pub fn max_len(self) -> usize {
+        match self {
+            FieldKind::Room => RoomId::MAX_LEN,
+            FieldKind::Name => NAME_MAX_LEN,
+        }
+    }
 }
 
 pub fn plugin(app: &mut App) {
@@ -212,9 +225,8 @@ pub fn plugin(app: &mut App) {
         .init_resource::<SectorArt>()
         .init_resource::<ChosenVariants>()
         .init_resource::<LobbyStatus>()
-        .init_resource::<RoomEdit>()
-        .init_resource::<NameEdit>()
         .init_resource::<checkers_net::Signaling>()
+        .add_plugins(fields_plugin)
         .add_systems(
             OnEnter(AppState::Lobby),
             // The socket opens once per room, not once per lobby entry:
@@ -232,10 +244,8 @@ pub fn plugin(app: &mut App) {
                 (
                     elect_host,
                     pump_socket,
-                    // The editors run first, and the lobby goes deaf while a
-                    // field holds the keyboard: typing a name must not also
-                    // start a game on the Enter that commits it.
-                    (edit_room, edit_name),
+                    // The lobby's own clicks stand down while a field holds
+                    // the keyboard; its keys are already the field's.
                     focus_input_fields.run_if(not_editing),
                     (select_corner, handle_buttons).run_if(not_editing),
                     apply_name,
@@ -258,8 +268,7 @@ pub fn plugin(app: &mut App) {
                         sync_corner_styles,
                         draw_corner_labels,
                         draw_roster,
-                        draw_room,
-                        draw_name,
+                        draw_fields,
                         sync_remote_cursors,
                     )
                         .chain(),
@@ -270,15 +279,29 @@ pub fn plugin(app: &mut App) {
         );
 }
 
-/// Whether a field has the keyboard.
-///
-/// While an editor is active its keys belong to the field, and the game's own
-/// shortcuts would fire on the Enter that commits it — so the systems that
-/// read the keyboard stand down. The consumption flag keeps even the closing
-/// frame deaf (see [`RoomEdit`]), and the flag is single-frame, so a finished
-/// edit never leaves the lobby silent.
-pub fn not_editing(room: Res<RoomEdit>, name: Res<NameEdit>) -> bool {
-    !room.active && !room.consumed_input && !name.active && !name.consumed_input
+/// The text fields' editor, registered as the app runs it. Its own plugin so
+/// the field tests run this exact registration rather than a copy of it.
+pub fn fields_plugin(app: &mut App) {
+    app.init_resource::<FieldEdit>()
+        // A field left open when the game starts must not come back focused,
+        // swallowing the lobby's keys until someone thinks to press Esc.
+        .add_systems(OnExit(AppState::Lobby), close_field)
+        // The focused field reads its keys before anything else can: right
+        // after Bevy turns the window's key messages into `ButtonInput`, so
+        // the presses it takes are gone before `Update` runs.
+        .add_systems(
+            PreUpdate,
+            edit_field
+                .after(InputSystems)
+                .run_if(in_state(AppState::Lobby)),
+        );
+}
+
+/// Whether the lobby has the keyboard (and the mouse) to itself: no field is
+/// focused. Keys typed into a field never reach `Update` at all (see
+/// [`edit_field`]); this keeps the lobby's clicks from acting mid-edit too.
+pub fn not_editing(edit: Res<FieldEdit>) -> bool {
+    edit.focus.is_none()
 }
 
 /// Paint every non-petal button: selected mode, hover, press.
@@ -337,8 +360,7 @@ fn sync_button_styles(
 /// well so it is obvious the keyboard is captured; an unfocused one brightens
 /// its border on hover, so the box reads as clickable.
 fn sync_input_styles(
-    room: Res<RoomEdit>,
-    name: Res<NameEdit>,
+    edit: Res<FieldEdit>,
     mut inputs: Query<(
         &Interaction,
         &TextInput,
@@ -347,10 +369,7 @@ fn sync_input_styles(
     )>,
 ) {
     for (interaction, input, mut bg, mut border) in inputs.iter_mut() {
-        let focused = match input.0 {
-            FieldKind::Room => room.active,
-            FieldKind::Name => name.active,
-        };
+        let focused = edit.focus == Some(input.0);
         let border_colour = if focused {
             CHOSEN
         } else {
@@ -2021,9 +2040,8 @@ pub fn edit_action(key: KeyCode, text: Option<&str>) -> EditAction {
     }
 }
 
-/// Focus an input box: by clicking it, or with its key (`R` room, `N` name).
-/// Focusing one field unfocuses the others; each is seeded with its current
-/// value, so a small change does not mean retyping the whole thing.
+/// Focus an input box: by clicking it, or with its key (`R` room, `N` name),
+/// seeded with its current value.
 ///
 /// Runs only while no field holds the keyboard — the modal rule. Leaving a
 /// field (Enter, Esc, or the name's Apply) is what frees the keys again.
@@ -2032,45 +2050,110 @@ fn focus_input_fields(
     keys: Res<ButtonInput<KeyCode>>,
     room: Res<RoomId>,
     net: Res<NetState>,
-    mut room_edit: ResMut<RoomEdit>,
-    mut name_edit: ResMut<NameEdit>,
+    mut edit: ResMut<FieldEdit>,
     mut status: ResMut<LobbyStatus>,
 ) {
-    let mut clicked: Option<FieldKind> = None;
-    for (interaction, input) in buttons.iter() {
-        if *interaction == Interaction::Pressed {
-            clicked = Some(input.0);
-        }
-    }
+    let clicked = buttons
+        .iter()
+        .find(|(interaction, _)| **interaction == Interaction::Pressed)
+        .map(|(_, input)| input.0);
 
-    let focus_room = clicked == Some(FieldKind::Room) || keys.just_pressed(KeyCode::KeyR);
-    let focus_name = clicked == Some(FieldKind::Name) || keys.just_pressed(KeyCode::KeyN);
-    if !focus_room && !focus_name {
+    let kind = if clicked == Some(FieldKind::Room) || keys.just_pressed(KeyCode::KeyR) {
+        FieldKind::Room
+    } else if clicked == Some(FieldKind::Name) || keys.just_pressed(KeyCode::KeyN) {
+        FieldKind::Name
+    } else {
         return;
-    }
-
-    room_edit.active = focus_room;
-    name_edit.active = focus_name && !focus_room;
-    if focus_room {
-        room_edit.buffer = room.0.clone();
-        room_edit.error.clear();
-    }
-    if focus_name {
-        name_edit.buffer = if net.name.is_empty() {
-            String::new()
-        } else {
-            net.name.clone()
-        };
-        name_edit.error.clear();
-    }
-    // The key (or click) that opened a field belongs to it, not to the
-    // systems chained after this one.
-    room_edit.consumed_input = true;
-    name_edit.consumed_input = true;
+    };
+    let value = match kind {
+        FieldKind::Room => room.0.as_str(),
+        FieldKind::Name => net.name.as_str(),
+    };
+    edit.open(kind, value);
     status.0 = "Editing. Enter accepts, Esc cancels.".into();
 }
 
-/// Apply the room-name editor's keypresses, and rejoin on commit.
+/// What committing a field writes: the room (and the socket bound to it), the
+/// player's name, the status line, and the state that re-enters the lobby.
+#[derive(SystemParam)]
+pub struct FieldTargets<'w, 's> {
+    commands: Commands<'w, 's>,
+    room: ResMut<'w, RoomId>,
+    net: ResMut<'w, NetState>,
+    status: ResMut<'w, LobbyStatus>,
+    next_state: ResMut<'w, NextState<AppState>>,
+}
+
+/// Apply the focused field's keypresses.
+///
+/// Runs in `PreUpdate`, just after Bevy turns the window's key messages into
+/// [`ButtonInput`], and while a field is focused it clears that resource's
+/// presses — so no system that runs later sees a key typed into the field:
+/// not the lobby's Enter and digits, and not the app-wide sound toggle. That
+/// includes the frame the field closes on, so the Enter that commits a room
+/// does not also start the game.
+///
+/// A field that closes stops reading: keys typed after the Enter or Esc in the
+/// same frame were typed into a field that no longer exists.
+pub fn edit_field(
+    mut messages: MessageReader<KeyboardInput>,
+    mut keys: ResMut<ButtonInput<KeyCode>>,
+    mut edit: ResMut<FieldEdit>,
+    mut targets: FieldTargets,
+) {
+    let Some(kind) = edit.focus else {
+        // Drain regardless: a keypress from before the field opened must not
+        // appear in it later.
+        messages.clear();
+        return;
+    };
+    keys.clear();
+
+    let mut closed = false;
+    for event in messages.read() {
+        if event.state != ButtonState::Pressed {
+            continue;
+        }
+        match edit_action(event.key_code, event.text.as_deref()) {
+            EditAction::Insert(c) => {
+                if edit.buffer.chars().count() < kind.max_len() {
+                    edit.buffer.push(c);
+                    edit.error.clear();
+                }
+            }
+            EditAction::Backspace => {
+                edit.buffer.pop();
+                edit.error.clear();
+            }
+            EditAction::Cancel => edit.close(),
+            EditAction::Commit => commit(&mut edit, &mut targets),
+            EditAction::Ignore => {}
+        }
+        if edit.focus.is_none() {
+            closed = true;
+            break;
+        }
+    }
+    if closed {
+        messages.clear();
+    }
+}
+
+/// Commit the focused field. It closes on success; on a refusal it stays open
+/// with the reason beneath it and what was typed intact, to be corrected.
+fn commit(edit: &mut FieldEdit, targets: &mut FieldTargets) {
+    let result = match edit.focus {
+        Some(FieldKind::Room) => commit_room(&edit.buffer, targets),
+        Some(FieldKind::Name) => commit_name(&edit.buffer, targets),
+        None => return,
+    };
+    match result {
+        Ok(()) => edit.close(),
+        Err(why) => edit.error = why,
+    }
+}
+
+/// Change the room, and rejoin.
 ///
 /// Changing the room means **reopening the socket**: the room is baked into the
 /// signaling URL, so editing [`RoomId`] alone would change the label and
@@ -2078,240 +2161,110 @@ fn focus_input_fields(
 /// everything it told us, and re-entering the lobby opens a fresh one against
 /// the new room. On the web the new room is written into the page URL, so the
 /// address bar always points where this peer actually is.
-pub fn edit_room(
-    mut commands: Commands,
-    mut keys: MessageReader<KeyboardInput>,
-    mut edit: ResMut<RoomEdit>,
-    mut room: ResMut<RoomId>,
-    mut net: ResMut<NetState>,
-    mut status: ResMut<LobbyStatus>,
-    mut next_state: ResMut<NextState<AppState>>,
-) {
-    // Only ever true for the remainder of the frame that set it.
-    edit.consumed_input = false;
-
-    if !edit.active {
-        // Drain regardless: a buffered keypress from before the field opened
-        // must not appear in it later.
-        keys.clear();
-        return;
+fn commit_room(buffer: &str, targets: &mut FieldTargets) -> Result<(), String> {
+    let parsed = RoomId::parse(buffer).map_err(|why| why.to_string())?;
+    if parsed == *targets.room {
+        // Same room: rejoining would drop the peers already here for no
+        // reason.
+        targets.status.0 = format!("Already in room \"{}\".", targets.room.0);
+        return Ok(());
     }
-
-    for event in keys.read() {
-        if event.state != ButtonState::Pressed {
-            continue;
-        }
-        // Whatever this key turns out to mean, it belonged to the field. Set
-        // before the match so that closing the field below cannot let the same
-        // press through to `handle_buttons` later in the chain.
-        edit.consumed_input = true;
-        match edit_action(event.key_code, event.text.as_deref()) {
-            EditAction::Insert(c) => {
-                if edit.buffer.chars().count() < RoomId::MAX_LEN {
-                    edit.buffer.push(c);
-                    edit.error.clear();
-                }
-            }
-            EditAction::Backspace => {
-                edit.buffer.pop();
-                edit.error.clear();
-            }
-            EditAction::Cancel => {
-                edit.active = false;
-                edit.buffer.clear();
-                edit.error.clear();
-            }
-            EditAction::Commit => match RoomId::parse(&edit.buffer) {
-                Ok(parsed) => {
-                    edit.active = false;
-                    edit.error.clear();
-                    if parsed == *room {
-                        // Same room: rejoining would drop the peers already
-                        // here for no reason.
-                        status.0 = format!("Already in room \"{}\".", room.0);
-                        continue;
-                    }
-                    info!(from = %room.0, to = %parsed.0, "changing room");
-                    *room = parsed;
-                    // Publish the new room in the URL, so the address always
-                    // points where this peer is. No-op on native.
-                    crate::web::share_room(&room);
-                    status.0 = format!("Joining room \"{}\"...", room.0);
-                    // Leave the old room and re-enter the lobby, which opens a
-                    // socket against the new one.
-                    checkers_net::close_socket(&mut commands, &mut net);
-                    next_state.set(AppState::Lobby);
-                }
-                Err(why) => edit.error = why.to_string(),
-            },
-            EditAction::Ignore => {}
-        }
-    }
+    info!(from = %targets.room.0, to = %parsed.0, "changing room");
+    *targets.room = parsed;
+    crate::web::share_room(&targets.room);
+    targets.status.0 = format!("Joining room \"{}\"...", targets.room.0);
+    checkers_net::close_socket(&mut targets.commands, &mut targets.net);
+    targets.next_state.set(AppState::Lobby);
+    Ok(())
 }
 
-/// Commit a name editor: trim and reject the empty string like [`RoomId::parse`]
-/// does for rooms. On success the display name changes and everyone is
-/// re-greeted, because the roster is only ever exchanged on Hello — a rename
-/// without a re-greet would leave every peer looking at the old name.
-///
-/// Shared by [`edit_name`] and [`apply_name`], so the keyboard and the button
-/// cannot drift apart.
-fn commit_name(edit: &mut NameEdit, net: &mut NetState, status: &mut LobbyStatus) {
-    let trimmed = edit.buffer.trim().to_string();
+/// Change the display name: trimmed, and refused when empty like
+/// [`RoomId::parse`] refuses an empty room. Everyone is re-greeted, because the
+/// roster is only ever exchanged on Hello — a rename without a re-greet would
+/// leave every peer looking at the old name.
+fn commit_name(buffer: &str, targets: &mut FieldTargets) -> Result<(), String> {
+    let trimmed = buffer.trim();
     if trimmed.is_empty() {
-        edit.error = "A name cannot be empty.".into();
-    } else {
-        edit.active = false;
-        if trimmed != net.name {
-            net.name = trimmed;
-            net.greeted.clear();
-            status.0 = "Name updated.".into();
-        }
-        edit.buffer.clear();
+        return Err("A name cannot be empty.".into());
     }
-}
-
-/// Apply the name editor's keypresses. Same classification as the room field,
-/// but committing writes the display name and re-greets instead of reopening a
-/// socket.
-pub fn edit_name(
-    mut keys: MessageReader<KeyboardInput>,
-    mut edit: ResMut<NameEdit>,
-    mut net: ResMut<NetState>,
-    mut status: ResMut<LobbyStatus>,
-) {
-    edit.consumed_input = false;
-
-    if !edit.active {
-        keys.clear();
-        return;
+    if trimmed != targets.net.name {
+        targets.net.name = trimmed.to_string();
+        targets.net.greeted.clear();
+        targets.status.0 = "Name updated.".into();
     }
-
-    for event in keys.read() {
-        if event.state != ButtonState::Pressed {
-            continue;
-        }
-        edit.consumed_input = true;
-        match edit_action(event.key_code, event.text.as_deref()) {
-            EditAction::Insert(c) => {
-                if edit.buffer.chars().count() < RoomId::MAX_LEN {
-                    edit.buffer.push(c);
-                    edit.error.clear();
-                }
-            }
-            EditAction::Backspace => {
-                edit.buffer.pop();
-                edit.error.clear();
-            }
-            EditAction::Cancel => {
-                edit.active = false;
-                edit.buffer.clear();
-                edit.error.clear();
-            }
-            EditAction::Commit => commit_name(&mut edit, &mut net, &mut status),
-            EditAction::Ignore => {}
-        }
-    }
+    Ok(())
 }
 
 /// The name row's Apply button.
 ///
-/// This is what the button is *for*: a click commits the focused edit. To type
+/// This is what the button is *for*: a click commits the focused name. To type
 /// you must first focus the field, so a click on a never-focused field just
 /// focuses it (seeding the buffer with the current name) — the next Apply, or
 /// Enter, applies. One modal at a time: while the room field holds the
 /// keyboard, Apply stands down.
 pub fn apply_name(
     buttons: Query<(&Interaction, &ApplyName), Changed<Interaction>>,
-    room_edit: Res<RoomEdit>,
-    mut name_edit: ResMut<NameEdit>,
-    mut net: ResMut<NetState>,
-    mut status: ResMut<LobbyStatus>,
+    mut edit: ResMut<FieldEdit>,
+    mut targets: FieldTargets,
 ) {
-    if room_edit.active
-        || !buttons
-            .iter()
-            .any(|(interaction, _)| *interaction == Interaction::Pressed)
+    if !buttons
+        .iter()
+        .any(|(interaction, _)| *interaction == Interaction::Pressed)
     {
         return;
     }
-
-    if name_edit.active {
-        name_edit.consumed_input = true;
-        commit_name(&mut name_edit, &mut net, &mut status);
-    } else {
-        name_edit.active = true;
-        name_edit.buffer = net.name.clone();
-        name_edit.error.clear();
-        name_edit.consumed_input = true;
-        status.0 = "Editing the name - press Apply when done.".into();
+    match edit.focus {
+        Some(FieldKind::Room) => {}
+        Some(FieldKind::Name) => commit(&mut edit, &mut targets),
+        None => {
+            edit.open(FieldKind::Name, &targets.net.name);
+            targets.status.0 = "Editing the name - press Apply when done.".into();
+        }
     }
 }
 
-/// Draw the room input: the buffer with a caret while focused, the current
-/// room otherwise; any commit error shows on the line beneath.
-fn draw_room(
+/// Leave any focused field. Runs on leaving the lobby: a field still open when
+/// the game starts would otherwise come back focused.
+pub fn close_field(mut edit: ResMut<FieldEdit>) {
+    if edit.focus.is_some() {
+        edit.close();
+    }
+}
+
+/// Draw both input boxes: the buffer with a caret in the focused one, the
+/// current value in the other, and a refusal beneath the focused one.
+///
+/// Compares before it writes instead of asking whether anything changed, so
+/// the boxes are right on the first frame of a rebuilt lobby too.
+fn draw_fields(
     room: Res<RoomId>,
-    edit: Res<RoomEdit>,
-    mut values: Query<(&mut Text, &InputText)>,
-    mut errors: Query<(&mut Text, &InputError), Without<InputText>>,
-) {
-    if !room.is_changed() && !edit.is_changed() {
-        return;
-    }
-    for (mut text, kind) in &mut values {
-        if kind.0 != FieldKind::Room {
-            continue;
-        }
-        **text = if edit.active {
-            format!("{}_", edit.buffer)
-        } else {
-            room.0.clone()
-        };
-    }
-    for (mut text, kind) in &mut errors {
-        if kind.0 != FieldKind::Room {
-            continue;
-        }
-        **text = if edit.active && !edit.error.is_empty() {
-            edit.error.clone()
-        } else {
-            String::new()
-        };
-    }
-}
-
-/// Draw the name input, same caret-and-error pattern as the room input.
-fn draw_name(
     net: Res<NetState>,
-    edit: Res<NameEdit>,
+    edit: Res<FieldEdit>,
     mut values: Query<(&mut Text, &InputText)>,
     mut errors: Query<(&mut Text, &InputError), Without<InputText>>,
 ) {
-    if !net.is_changed() && !edit.is_changed() {
-        return;
-    }
     for (mut text, kind) in &mut values {
-        if kind.0 != FieldKind::Name {
-            continue;
-        }
-        **text = if edit.active {
+        let wanted = if edit.focus == Some(kind.0) {
             format!("{}_", edit.buffer)
-        } else if net.name.is_empty() {
-            "(unnamed)".into()
         } else {
-            net.name.clone()
+            match kind.0 {
+                FieldKind::Room => room.0.clone(),
+                FieldKind::Name => net.name.clone(),
+            }
         };
+        if **text != wanted {
+            **text = wanted;
+        }
     }
     for (mut text, kind) in &mut errors {
-        if kind.0 != FieldKind::Name {
-            continue;
-        }
-        **text = if edit.active && !edit.error.is_empty() {
-            edit.error.clone()
+        let wanted = if edit.focus == Some(kind.0) {
+            edit.error.as_str()
         } else {
-            String::new()
+            ""
         };
+        if text.as_str() != wanted {
+            **text = wanted.to_string();
+        }
     }
 }
 

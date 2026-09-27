@@ -76,7 +76,7 @@ impl Sounds {
 
 /// `M` mutes and unmutes. Registered outside the game states: sound is a
 /// whole-app setting.
-fn toggle(keys: Res<ButtonInput<KeyCode>>, mut on: ResMut<SoundOn>) {
+pub fn toggle(keys: Res<ButtonInput<KeyCode>>, mut on: ResMut<SoundOn>) {
     if keys.just_pressed(KeyCode::KeyM) {
         on.0 = !on.0;
     }

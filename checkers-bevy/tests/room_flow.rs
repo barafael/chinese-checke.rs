@@ -13,11 +13,19 @@ use bevy::prelude::*;
 use bevy::state::app::StatesPlugin;
 use checkers_bevy::AppState;
 use checkers_bevy::lobby::{
-    ApplyName, EditAction, LobbyStatus, NameEdit, RoomEdit, SelectedCorner, apply_name,
-    edit_action, edit_name, edit_room, not_editing, select_corner,
+    ApplyName, EditAction, FieldEdit, FieldKind, LobbyStatus, NAME_MAX_LEN, SelectedCorner,
+    apply_name, edit_action, fields_plugin, not_editing, select_corner,
 };
+use checkers_bevy::sound::{self, SoundOn};
 use checkers_net::{NetState, RoomId, Seat};
 
+/// How many times the lobby has been entered — where the app opens the room's
+/// socket.
+#[derive(Resource, Default)]
+struct LobbyEntries(u32);
+
+/// The fields as the app registers them ([`fields_plugin`]), over the
+/// resources they commit to.
 fn app() -> App {
     let mut app = App::new();
     app.add_plugins((MinimalPlugins, InputPlugin, StatesPlugin))
@@ -25,38 +33,91 @@ fn app() -> App {
         // The app boots into the menu; these tests exercise lobby fields.
         .insert_state(AppState::Lobby)
         .insert_resource(RoomId::parse("room-1").expect("a valid room parses"))
-        .init_resource::<RoomEdit>()
-        // `not_editing` reads every editor.
-        .init_resource::<NameEdit>()
         .init_resource::<NetState>()
         .init_resource::<LobbyStatus>()
-        .add_systems(Update, edit_room.run_if(in_state(AppState::Lobby)));
+        .init_resource::<LobbyEntries>()
+        .add_systems(
+            OnEnter(AppState::Lobby),
+            |mut entries: ResMut<LobbyEntries>| entries.0 += 1,
+        )
+        .add_plugins(fields_plugin);
+    // The first frame enters the lobby the app boots into.
+    app.update();
     app
 }
 
-/// Send a keypress as the window does, with layout-aware text.
-fn press(app: &mut App, key: KeyCode, text: Option<&str>) {
-    app.world_mut().write_message(KeyboardInput {
+fn lobby_entries(app: &App) -> u32 {
+    app.world().resource::<LobbyEntries>().0
+}
+
+/// The key a character is typed with, for the letters that mean something
+/// elsewhere in the app; any other character comes from an innocent key.
+fn key_of(c: char) -> KeyCode {
+    match c {
+        'm' => KeyCode::KeyM,
+        's' => KeyCode::KeyS,
+        'r' => KeyCode::KeyR,
+        'n' => KeyCode::KeyN,
+        '3' => KeyCode::Digit3,
+        _ => KeyCode::KeyA,
+    }
+}
+
+/// A keypress message as the window sends it, with layout-aware text.
+fn key_message(key: KeyCode, text: Option<&str>) -> KeyboardInput {
+    KeyboardInput {
         key_code: key,
         logical_key: Key::Character("x".into()),
         state: ButtonState::Pressed,
         text: text.map(Into::into),
         repeat: false,
         window: Entity::PLACEHOLDER,
-    });
+    }
+}
+
+/// Send a keypress and run a frame.
+///
+/// Message only, never `ButtonInput::press`: `InputPlugin` derives the
+/// resource from the message in `PreUpdate`, exactly as for the window, so one
+/// message feeds both the field (which reads messages) and every system that
+/// reads the resource.
+fn press(app: &mut App, key: KeyCode, text: Option<&str>) {
+    app.world_mut().write_message(key_message(key, text));
     app.update();
 }
 
 fn type_into(app: &mut App, text: &str) {
     for c in text.chars() {
-        press(app, KeyCode::KeyA, Some(&c.to_string()));
+        press(app, key_of(c), Some(&c.to_string()));
     }
 }
 
+/// Several keypresses arriving in one frame, as a fast typist's do.
+fn one_frame(app: &mut App, keys: &[(KeyCode, Option<&str>)]) {
+    for (key, text) in keys {
+        app.world_mut().write_message(key_message(*key, *text));
+    }
+    app.update();
+}
+
+fn open(app: &mut App, kind: FieldKind) {
+    app.world_mut().resource_mut::<FieldEdit>().open(kind, "");
+}
+
 fn open_room(app: &mut App) {
-    let mut edit = app.world_mut().resource_mut::<RoomEdit>();
-    edit.active = true;
-    edit.buffer.clear();
+    open(app, FieldKind::Room);
+}
+
+fn focus(app: &App) -> Option<FieldKind> {
+    app.world().resource::<FieldEdit>().focus
+}
+
+fn buffer(app: &App) -> &str {
+    &app.world().resource::<FieldEdit>().buffer
+}
+
+fn room(app: &App) -> &str {
+    &app.world().resource::<RoomId>().0
 }
 
 #[test]
@@ -64,15 +125,13 @@ fn typing_a_room_and_committing_changes_the_room() {
     let mut app = app();
     open_room(&mut app);
     type_into(&mut app, "kitchen-table");
-    assert_eq!(app.world().resource::<RoomEdit>().buffer, "kitchen-table");
+    assert_eq!(buffer(&app), "kitchen-table");
 
     press(&mut app, KeyCode::Enter, None);
 
-    assert_eq!(app.world().resource::<RoomId>().0, "kitchen-table");
-    assert!(
-        !app.world().resource::<RoomEdit>().active,
-        "committing must close the field"
-    );
+    assert_eq!(room(&app), "kitchen-table");
+    assert_eq!(focus(&app), None, "committing must close the field");
+    assert!(buffer(&app).is_empty(), "the buffer is spent once applied");
 }
 
 /// The whole point: the lobby must be re-entered so `open_socket` runs again
@@ -81,15 +140,14 @@ fn typing_a_room_and_committing_changes_the_room() {
 #[test]
 fn committing_re_enters_the_lobby_so_the_socket_reopens() {
     let mut app = app();
+    let before = lobby_entries(&app);
     open_room(&mut app);
     type_into(&mut app, "other-room");
     press(&mut app, KeyCode::Enter, None);
 
-    assert!(
-        matches!(
-            app.world().resource::<NextState<AppState>>(),
-            NextState::Pending(AppState::Lobby)
-        ),
+    assert_eq!(
+        lobby_entries(&app),
+        before + 1,
         "a room change must re-enter the lobby so the socket reopens"
     );
 }
@@ -128,18 +186,14 @@ fn changing_room_forgets_the_old_rooms_state() {
 #[test]
 fn escape_abandons_the_edit_and_keeps_the_room() {
     let mut app = app();
-    let before = app.world().resource::<RoomId>().0.clone();
+    let before = room(&app).to_string();
 
     open_room(&mut app);
     type_into(&mut app, "typo");
     press(&mut app, KeyCode::Escape, None);
 
-    assert_eq!(
-        app.world().resource::<RoomId>().0,
-        before,
-        "cancelling must not change the room"
-    );
-    assert!(!app.world().resource::<RoomEdit>().active);
+    assert_eq!(room(&app), before, "cancelling must not change the room");
+    assert_eq!(focus(&app), None);
 }
 
 /// An invalid room must be refused *and explained*, leaving the field open so
@@ -147,14 +201,18 @@ fn escape_abandons_the_edit_and_keeps_the_room() {
 #[test]
 fn an_invalid_room_is_refused_with_a_reason() {
     let mut app = app();
-    let before = app.world().resource::<RoomId>().0.clone();
+    let before = room(&app).to_string();
 
     open_room(&mut app);
     type_into(&mut app, "bad/room");
     press(&mut app, KeyCode::Enter, None);
 
-    let edit = app.world().resource::<RoomEdit>();
-    assert!(edit.active, "the field must stay open to be corrected");
+    let edit = app.world().resource::<FieldEdit>();
+    assert_eq!(
+        edit.focus,
+        Some(FieldKind::Room),
+        "the field must stay open to be corrected"
+    );
     assert!(!edit.error.is_empty(), "the refusal must be explained");
     assert!(
         edit.error.contains('/'),
@@ -162,11 +220,7 @@ fn an_invalid_room_is_refused_with_a_reason() {
         edit.error
     );
     assert_eq!(edit.buffer, "bad/room", "what was typed must survive");
-    assert_eq!(
-        app.world().resource::<RoomId>().0,
-        before,
-        "a refused room must not change the room"
-    );
+    assert_eq!(room(&app), before, "a refused room must not change the room");
 }
 
 #[test]
@@ -175,7 +229,7 @@ fn backspace_deletes_the_last_character() {
     open_room(&mut app);
     type_into(&mut app, "abc");
     press(&mut app, KeyCode::Backspace, None);
-    assert_eq!(app.world().resource::<RoomEdit>().buffer, "ab");
+    assert_eq!(buffer(&app), "ab");
 }
 
 /// The buffer must not grow past what `parse` accepts, so the player is stopped
@@ -185,10 +239,7 @@ fn the_buffer_stops_at_the_length_limit() {
     let mut app = app();
     open_room(&mut app);
     type_into(&mut app, &"a".repeat(RoomId::MAX_LEN + 10));
-    assert_eq!(
-        app.world().resource::<RoomEdit>().buffer.chars().count(),
-        RoomId::MAX_LEN
-    );
+    assert_eq!(buffer(&app).chars().count(), RoomId::MAX_LEN);
 }
 
 /// Keys must not reach the field when it is closed, or a keypress meant for the
@@ -196,10 +247,10 @@ fn the_buffer_stops_at_the_length_limit() {
 #[test]
 fn keys_are_ignored_while_the_room_field_is_closed() {
     let mut app = app();
-    assert!(!app.world().resource::<RoomEdit>().active);
+    assert_eq!(focus(&app), None);
     type_into(&mut app, "ghost");
     assert!(
-        app.world().resource::<RoomEdit>().buffer.is_empty(),
+        buffer(&app).is_empty(),
         "a closed field must not accumulate text"
     );
 }
@@ -208,23 +259,22 @@ fn keys_are_ignored_while_the_room_field_is_closed() {
 #[test]
 fn committing_the_same_room_does_not_rejoin() {
     let mut app = app();
-    let current = app.world().resource::<RoomId>().0.clone();
+    let current = room(&app).to_string();
+    let before = lobby_entries(&app);
     app.world_mut().resource_mut::<NetState>().is_host = true;
 
     open_room(&mut app);
     type_into(&mut app, &current);
     press(&mut app, KeyCode::Enter, None);
 
-    assert_eq!(app.world().resource::<RoomId>().0, current);
+    assert_eq!(room(&app), current);
     assert!(
         app.world().resource::<NetState>().is_host,
         "re-committing the same room must not reset the session"
     );
-    assert!(
-        matches!(
-            app.world().resource::<NextState<AppState>>(),
-            NextState::Unchanged
-        ),
+    assert_eq!(
+        lobby_entries(&app),
+        before,
         "no state transition for a no-op change"
     );
 }
@@ -240,59 +290,99 @@ fn the_classifier_matches_what_the_system_does() {
     let mut app = app();
     open_room(&mut app);
     press(&mut app, KeyCode::KeyQ, Some("q"));
-    assert_eq!(app.world().resource::<RoomEdit>().buffer, "q");
+    assert_eq!(buffer(&app), "q");
 }
 
-/// The lobby's own systems, in the order the plugin chains them, so a keypress
-/// the field handled cannot also be seen by the systems that run after it.
+/// A field that closes stops reading. Esc, then `a`, then Enter in one frame
+/// used to cancel, type into the closed field, and commit it: the player
+/// joined room "a" right after cancelling.
+#[test]
+fn keys_after_escape_in_the_same_frame_are_dropped() {
+    let mut app = app();
+    let before = room(&app).to_string();
+    open_room(&mut app);
+    one_frame(
+        &mut app,
+        &[
+            (KeyCode::Escape, None),
+            (KeyCode::KeyA, Some("a")),
+            (KeyCode::Enter, None),
+        ],
+    );
+    assert_eq!(focus(&app), None);
+    assert_eq!(room(&app), before, "the cancelled field joined a room");
+    assert!(buffer(&app).is_empty(), "a closed field took more keys");
+}
+
+/// Enter, `x`, Enter in one frame changes the room once, to what was typed
+/// before the first Enter — not twice, leaving the room it just joined.
+#[test]
+fn keys_after_a_commit_in_the_same_frame_are_dropped() {
+    let mut app = app();
+    open_room(&mut app);
+    type_into(&mut app, "kitchen");
+    one_frame(
+        &mut app,
+        &[
+            (KeyCode::Enter, None),
+            (KeyCode::KeyX, Some("x")),
+            (KeyCode::Enter, None),
+        ],
+    );
+    assert_eq!(room(&app), "kitchen");
+    assert_eq!(focus(&app), None);
+    assert!(buffer(&app).is_empty(), "a closed field took more keys");
+}
+
+/// A field left open when the game starts is closed, not waiting focused in
+/// the lobby the player comes back to, where it would swallow the lobby's keys.
+#[test]
+fn leaving_the_lobby_closes_the_field() {
+    let mut app = app();
+    open_room(&mut app);
+    type_into(&mut app, "half");
+
+    app.world_mut()
+        .resource_mut::<NextState<AppState>>()
+        .set(AppState::InGame);
+    app.update();
+    app.world_mut()
+        .resource_mut::<NextState<AppState>>()
+        .set(AppState::Lobby);
+    app.update();
+
+    assert_eq!(focus(&app), None, "the field must not survive the round");
+    assert!(buffer(&app).is_empty());
+}
+
+/// The lobby's own systems as the plugin chains them, so a keypress the field
+/// handled cannot also be seen by the systems that run after it.
 fn chained_app() -> App {
-    let mut app = App::new();
-    app.add_plugins((MinimalPlugins, InputPlugin, StatesPlugin))
-        .init_state::<AppState>()
-        // The app boots into the menu; these tests exercise lobby fields.
-        .insert_state(AppState::Lobby)
-        .insert_resource(RoomId::parse("room-1").expect("a valid room parses"))
-        .init_resource::<RoomEdit>()
-        // `not_editing` reads every editor.
-        .init_resource::<NameEdit>()
-        .init_resource::<NetState>()
-        .init_resource::<LobbyStatus>()
-        .init_resource::<SelectedCorner>()
-        .add_systems(
-            Update,
-            (
-                edit_room,
-                // The *real* run condition, not a copy of it. An inline
-                // duplicate here made this test pass with the guard removed
-                // from the app -- it was checking its own logic.
-                select_corner.run_if(not_editing),
-            )
-                .chain()
-                .run_if(in_state(AppState::Lobby)),
-        );
+    let mut app = app();
+    app.init_resource::<SelectedCorner>().add_systems(
+        Update,
+        // The *real* run condition, not a copy of it. An inline duplicate here
+        // made an earlier version of this test pass with the guard removed
+        // from the app -- it was checking its own logic.
+        select_corner
+            .run_if(not_editing)
+            .run_if(in_state(AppState::Lobby)),
+    );
     app
 }
 
-/// A keypress the room field consumed must not reach the systems that run after
-/// it in the same frame.
+/// A keypress the field consumed must not reach any system that reads the
+/// keyboard.
 ///
-/// Found by running the app, not by testing it. Committing with Enter cleared
-/// `active`, and because the lobby systems are `.chain()`ed, the *same* Enter
-/// fell through to `handle_buttons` and started the game — typing a room name
-/// dropped straight onto the board.
+/// Found by running the app, not by testing it. Committing with Enter closed
+/// the field, and the *same* Enter fell through to `handle_buttons` and
+/// started the game — typing a room name dropped straight onto the board.
 ///
-/// Two things this test had to get right before it could see the bug, both of
-/// which got missed on first write:
-///
-/// - **Send only the message.** `edit_room` reads `KeyboardInput` messages;
-///   downstream systems read the `ButtonInput` resource. `InputPlugin` derives
-///   the resource from the message in `PreUpdate`, so one message gives both. A
-///   version that *also* called `press()` would pass, because
-///   `keyboard_input_system` begins by clearing `just_pressed` — so the
-///   downstream system never saw the key.
-/// - **Test the commit frame.** While a character is being typed the field stays
-///   open, so `!active` alone already suppresses everything downstream. The
-///   guard only matters on the one frame the field closes.
+/// The system that stands in for the rest of the app runs unconditionally: the
+/// field clears the presses it takes, so no reader needs a guard of its own.
+/// Two things matter for the test to see the bug: send only the message (see
+/// [`press`]), and test the commit frame — while a character is being typed
+/// the field is still open, and that frame is easy.
 #[test]
 fn the_committing_keypress_does_not_leak_downstream() {
     /// Stands in for `handle_buttons`, which needs a socket. Records whether the
@@ -306,32 +396,12 @@ fn the_committing_keypress_does_not_leak_downstream() {
         }
     }
 
-    let mut app = App::new();
-    app.add_plugins((MinimalPlugins, InputPlugin, StatesPlugin))
-        .init_state::<AppState>()
-        // The app boots into the menu; these tests exercise lobby fields.
-        .insert_state(AppState::Lobby)
-        .insert_resource(RoomId::parse("room-1").expect("a valid room parses"))
-        .init_resource::<RoomEdit>()
-        // `not_editing` reads every editor.
-        .init_resource::<NameEdit>()
-        .init_resource::<NetState>()
-        .init_resource::<LobbyStatus>()
-        .init_resource::<SawEnter>()
-        // `not_editing` itself, not a copy: an inline duplicate of the condition
-        // would keep passing after the real one was weakened.
-        .add_systems(
-            Update,
-            (edit_room, downstream.run_if(not_editing))
-                .chain()
-                .run_if(in_state(AppState::Lobby)),
-        );
-
-    {
-        let mut edit = app.world_mut().resource_mut::<RoomEdit>();
-        edit.active = true;
-        edit.buffer = "kitchen".into();
-    }
+    let mut app = app();
+    app.init_resource::<SawEnter>()
+        .add_systems(Update, downstream);
+    app.world_mut()
+        .resource_mut::<FieldEdit>()
+        .open(FieldKind::Room, "kitchen");
 
     app.world_mut().write_message(KeyboardInput {
         key_code: KeyCode::Enter,
@@ -343,31 +413,25 @@ fn the_committing_keypress_does_not_leak_downstream() {
     });
     app.update();
 
-    assert_eq!(
-        app.world().resource::<RoomId>().0,
-        "kitchen",
-        "the commit itself must still work"
-    );
+    assert_eq!(room(&app), "kitchen", "the commit itself must still work");
     assert!(
         !app.world().resource::<SawEnter>().0,
         "the Enter that committed the room must not also reach the lobby"
     );
 }
 
-/// The guard must not outlive its frame, or the lobby stays deaf after any edit
-/// — trading a leak for a lockout.
+/// The keyboard belongs to the field for exactly as long as it is open, or the
+/// lobby stays deaf after any edit — trading a leak for a lockout.
 #[test]
-fn the_guard_clears_on_the_next_frame() {
+fn a_closed_field_gives_the_keys_back() {
     let mut app = chained_app();
     open_room(&mut app);
-    press(&mut app, KeyCode::Enter, None);
-    assert!(app.world().resource::<RoomEdit>().consumed_input);
-
-    // A frame with no input at all.
-    app.update();
-    assert!(
-        !app.world().resource::<RoomEdit>().consumed_input,
-        "the guard must not persist past its frame"
+    press(&mut app, KeyCode::Escape, None);
+    press(&mut app, KeyCode::Digit3, Some("3"));
+    assert_eq!(
+        app.world().resource::<SelectedCorner>().0,
+        Some(2),
+        "the next digit selects its corner again"
     );
 }
 
@@ -376,18 +440,9 @@ fn the_guard_clears_on_the_next_frame() {
 fn a_digit_typed_into_the_room_field_does_not_select_a_corner() {
     let mut app = chained_app();
     open_room(&mut app);
-    // Message only, so `PreUpdate` fills the resource the way the window would.
-    app.world_mut().write_message(KeyboardInput {
-        key_code: KeyCode::Digit3,
-        logical_key: Key::Character("3".into()),
-        state: ButtonState::Pressed,
-        text: Some("3".into()),
-        repeat: false,
-        window: Entity::PLACEHOLDER,
-    });
-    app.update();
+    press(&mut app, KeyCode::Digit3, Some("3"));
 
-    assert_eq!(app.world().resource::<RoomEdit>().buffer, "3");
+    assert_eq!(buffer(&app), "3");
     assert_eq!(
         app.world().resource::<SelectedCorner>().0,
         None,
@@ -395,46 +450,66 @@ fn a_digit_typed_into_the_room_field_does_not_select_a_corner() {
     );
 }
 
+/// The app-wide shortcuts are deaf while a field holds the keyboard. The sound
+/// toggle is not a lobby system at all, and it used to flip once per `m` in a
+/// typed name — the default pet names are full of them.
+#[test]
+fn typing_does_not_toggle_the_sound() {
+    let mut app = app();
+    app.init_resource::<SoundOn>()
+        .add_systems(Update, sound::toggle);
+    open(&mut app, FieldKind::Name);
+    type_into(&mut app, "mimosa");
+
+    assert_eq!(buffer(&app), "mimosa");
+    assert!(
+        !app.world().resource::<SoundOn>().0,
+        "the letters were the field's, not the sound toggle's"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // The name field and its Apply button.
 // ---------------------------------------------------------------------------
 
-fn name_app() -> App {
-    let mut app = App::new();
-    app.add_plugins((MinimalPlugins, InputPlugin, StatesPlugin))
-        .init_state::<AppState>()
-        // The app boots into the menu; these tests exercise lobby fields.
-        .insert_state(AppState::Lobby)
-        .init_resource::<NameEdit>()
-        .init_resource::<NetState>()
-        .init_resource::<LobbyStatus>()
-        .add_systems(Update, edit_name.run_if(in_state(AppState::Lobby)));
-    app
-}
-
 fn open_name(app: &mut App) {
-    let mut edit = app.world_mut().resource_mut::<NameEdit>();
-    edit.active = true;
-    edit.buffer.clear();
+    open(app, FieldKind::Name);
 }
 
 #[test]
 fn typing_a_name_and_committing_changes_the_name_and_re_greets() {
-    let mut app = name_app();
+    let mut app = app();
     open_name(&mut app);
     type_into(&mut app, "ida");
     press(&mut app, KeyCode::Enter, None);
 
     let net = app.world().resource::<NetState>();
     assert_eq!(net.name, "ida");
-    assert!(
-        !app.world().resource::<NameEdit>().active,
-        "committing must close the field"
-    );
-    assert!(
-        app.world().resource::<NameEdit>().buffer.is_empty(),
-        "the buffer is spent once applied"
-    );
+    assert_eq!(focus(&app), None, "committing must close the field");
+    assert!(buffer(&app).is_empty(), "the buffer is spent once applied");
+}
+
+/// A name has its own limit, not the room's.
+#[test]
+fn the_name_stops_at_its_own_limit() {
+    let mut app = app();
+    open_name(&mut app);
+    type_into(&mut app, &"a".repeat(NAME_MAX_LEN + 10));
+    assert_eq!(buffer(&app).chars().count(), NAME_MAX_LEN);
+}
+
+fn apply_app() -> App {
+    let mut app = app();
+    app.add_systems(Update, apply_name.run_if(in_state(AppState::Lobby)));
+    app
+}
+
+fn click_apply(app: &mut App) {
+    let entity = app.world_mut().spawn(ApplyName).id();
+    app.world_mut()
+        .entity_mut(entity)
+        .insert(Interaction::Pressed);
+    app.update();
 }
 
 /// The button row: Apply sits next to the field. A click on a field that is not
@@ -442,54 +517,24 @@ fn typing_a_name_and_committing_changes_the_name_and_re_greets() {
 /// wipe the current name first.
 #[test]
 fn applying_with_the_field_closed_focuses_it() {
-    let mut app = App::new();
-    app.add_plugins((MinimalPlugins, InputPlugin, StatesPlugin))
-        .init_state::<AppState>()
-        // The app boots into the menu; these tests exercise lobby fields.
-        .insert_state(AppState::Lobby)
-        .init_resource::<NameEdit>()
-        .init_resource::<RoomEdit>()
-        .init_resource::<NetState>()
-        .init_resource::<LobbyStatus>()
-        .add_systems(Update, apply_name.run_if(in_state(AppState::Lobby)));
-
+    let mut app = apply_app();
     app.world_mut().resource_mut::<NetState>().name = "ada".into();
-    let entity = app.world_mut().spawn(ApplyName).id();
-    app.world_mut()
-        .entity_mut(entity)
-        .insert(Interaction::Pressed);
-    app.update();
+    click_apply(&mut app);
 
-    let edit = app.world().resource::<NameEdit>();
-    assert!(edit.active, "the click opens the field");
-    assert_eq!(edit.buffer, "ada", "the current name seeds the buffer");
+    assert_eq!(focus(&app), Some(FieldKind::Name), "the click opens the field");
+    assert_eq!(buffer(&app), "ada", "the current name seeds the buffer");
     assert_eq!(app.world().resource::<NetState>().name, "ada");
 }
 
 /// The real service: a second click, with the field open, commits.
 #[test]
 fn applying_with_the_field_open_commits() {
-    let mut app = App::new();
-    app.add_plugins((MinimalPlugins, InputPlugin, StatesPlugin))
-        .init_state::<AppState>()
-        // The app boots into the menu; these tests exercise lobby fields.
-        .insert_state(AppState::Lobby)
-        .init_resource::<NameEdit>()
-        .init_resource::<RoomEdit>()
-        .init_resource::<NetState>()
-        .init_resource::<LobbyStatus>()
-        .add_systems(Update, apply_name.run_if(in_state(AppState::Lobby)));
+    let mut app = apply_app();
+    open_name(&mut app);
+    click_apply(&mut app);
 
-    let entity = app.world_mut().spawn(ApplyName).id();
-    app.world_mut().resource_mut::<NameEdit>().active = true;
-
-    app.world_mut()
-        .entity_mut(entity)
-        .insert(Interaction::Pressed);
-    app.update();
-
-    let edit = app.world().resource::<NameEdit>();
-    assert!(edit.active, "an empty name is refused");
+    let edit = app.world().resource::<FieldEdit>();
+    assert_eq!(edit.focus, Some(FieldKind::Name), "an empty name is refused");
     assert!(!edit.error.is_empty(), "the refusal must be explained");
 }
 
@@ -497,12 +542,16 @@ fn applying_with_the_field_open_commits() {
 /// than erasing the player's name in the roster.
 #[test]
 fn an_empty_name_is_refused() {
-    let mut app = name_app();
+    let mut app = app();
     open_name(&mut app);
     type_into(&mut app, "   ");
     press(&mut app, KeyCode::Enter, None);
 
-    let edit = app.world().resource::<NameEdit>();
-    assert!(edit.active, "the field must stay open to be corrected");
+    let edit = app.world().resource::<FieldEdit>();
+    assert_eq!(
+        edit.focus,
+        Some(FieldKind::Name),
+        "the field must stay open to be corrected"
+    );
     assert!(!edit.error.is_empty(), "the refusal must be explained");
 }
