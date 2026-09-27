@@ -4,12 +4,12 @@
 //! source — the backend generates the wave itself, so there are no audio
 //! files, no decoder features, and nothing to load. One tone per meaning:
 //! a hop ticks, a commit settles, a cancel sinks, a win rings, a resignation
-//! falls. `M` mutes and unmutes; sound starts off.
+//! falls. `S` mutes and unmutes; sound starts off.
 
 use bevy::prelude::*;
 use std::time::Duration;
 
-/// Whether this build answers with sound. Muted by default; `M` unmutes.
+/// Whether this build answers with sound. Muted by default; `S` unmutes.
 #[derive(Resource, Debug, Clone, Copy, Default)]
 pub struct SoundOn(pub bool);
 
@@ -74,10 +74,11 @@ impl Sounds {
     }
 }
 
-/// `M` mutes and unmutes. Registered outside the game states: sound is a
-/// whole-app setting.
+/// `S` mutes and unmutes. Registered outside the game states: sound is a
+/// whole-app setting. Not `M`: that is the game-over card's way back to the
+/// menu, and one key doing both flipped the sound on every return.
 pub fn toggle(keys: Res<ButtonInput<KeyCode>>, mut on: ResMut<SoundOn>) {
-    if keys.just_pressed(KeyCode::KeyM) {
+    if keys.just_pressed(KeyCode::KeyS) {
         on.0 = !on.0;
     }
 }
@@ -87,13 +88,13 @@ mod tests {
     use super::*;
 
     /// Sound is born muted: a fresh build should not surprise the player with
-    /// tones, and unmuting is one explicit `M`.
+    /// tones, and unmuting is one explicit `S`.
     #[test]
     fn sound_starts_muted() {
         assert!(!SoundOn::default().0);
     }
 
-    /// Muting is a toggle: M twice returns to where it was.
+    /// Muting is a toggle: S twice returns to where it was.
     #[test]
     fn mute_is_a_toggle_not_a_latch() {
         let mut on = SoundOn::default();
