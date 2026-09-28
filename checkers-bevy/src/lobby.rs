@@ -361,9 +361,7 @@ fn sync_button_styles(
             Interaction::None if selected => CHOSEN,
             Interaction::None => IDLE,
         };
-        if bg.0 != colour {
-            bg.0 = colour;
-        }
+        bg.set_if_neq(BackgroundColor(colour));
     }
 }
 
@@ -380,26 +378,15 @@ fn sync_input_styles(
     )>,
 ) {
     for (interaction, input, mut bg, mut border) in inputs.iter_mut() {
-        let focused = edit.focus == Some(input.0);
-        let border_colour = if focused {
-            CHOSEN
+        let (well, edge) = if edit.focus == Some(input.0) {
+            (Color::srgb(0.15, 0.15, 0.19), CHOSEN)
+        } else if *interaction == Interaction::Hovered {
+            (IDLE, HOVER)
         } else {
-            match interaction {
-                Interaction::Hovered => HOVER,
-                _ => BORDER,
-            }
+            (IDLE, BORDER)
         };
-        let well = if focused {
-            Color::srgb(0.15, 0.15, 0.19)
-        } else {
-            IDLE
-        };
-        if bg.0 != well {
-            bg.0 = well;
-        }
-        if border.top != border_colour {
-            *border = BorderColor::all(border_colour);
-        }
+        bg.set_if_neq(BackgroundColor(well));
+        border.set_if_neq(BorderColor::all(edge));
     }
 }
 
@@ -413,14 +400,17 @@ fn sync_host_rows(
     let host = net.sequences();
     let solo = net.peers.is_empty();
     for (mut visibility, (host_only, solo_only)) in &mut rows {
-        let wanted = if host_only.is_some() && host || solo_only.is_some() && solo {
-            Visibility::Inherited
-        } else {
-            Visibility::Hidden
-        };
-        if *visibility != wanted {
-            *visibility = wanted;
-        }
+        let shown = host_only.is_some() && host || solo_only.is_some() && solo;
+        visibility.set_if_neq(visible_if(shown));
+    }
+}
+
+/// A row's visibility: shown with its parent, or hidden.
+fn visible_if(shown: bool) -> Visibility {
+    if shown {
+        Visibility::Inherited
+    } else {
+        Visibility::Hidden
     }
 }
 
@@ -697,24 +687,10 @@ fn sync_corner_actions(
         .is_some_and(|i| corner_is_filled(&net, &table, i));
     let seat_wanted = selected.0.is_some() && !claimed;
     for mut visibility in &mut seat_rows {
-        let wanted = if seat_wanted {
-            Visibility::Inherited
-        } else {
-            Visibility::Hidden
-        };
-        if *visibility != wanted {
-            *visibility = wanted;
-        }
+        visibility.set_if_neq(visible_if(seat_wanted));
     }
     for mut visibility in &mut cancel_rows {
-        let wanted = if claimed {
-            Visibility::Inherited
-        } else {
-            Visibility::Hidden
-        };
-        if *visibility != wanted {
-            *visibility = wanted;
-        }
+        visibility.set_if_neq(visible_if(claimed));
     }
 }
 
@@ -820,21 +796,15 @@ fn sync_remote_cursors(
         } else {
             Visibility::Visible
         };
-        if *vis != want {
-            *vis = want;
-        }
+        vis.set_if_neq(want);
         let (colour, label) = cursor_identity(&net, &cursor.peer);
-        if bg.0 != colour {
-            bg.0 = colour;
-        }
+        bg.set_if_neq(BackgroundColor(colour));
         for kid in kids.iter() {
             if let Ok((mut text, mut text_colour)) = labels.get_mut(kid) {
                 if **text != label {
                     **text = label.clone();
                 }
-                if text_colour.0 != colour {
-                    text_colour.0 = colour;
-                }
+                text_colour.set_if_neq(TextColor(colour));
             }
         }
     }
@@ -1796,9 +1766,7 @@ fn hover_corner(
         .iter()
         .next()
         .and_then(|rel| rel.normalized.and_then(sector_at));
-    if hovered.0 != over {
-        hovered.0 = over;
-    }
+    hovered.set_if_neq(HoveredCorner(over));
 }
 
 /// The concrete effect a [`CornerCommand`] presses on the selected corner.
@@ -2288,9 +2256,7 @@ fn draw_fields(
                 FieldKind::Name => net.name.clone(),
             }
         };
-        if **text != wanted {
-            **text = wanted;
-        }
+        text.set_if_neq(Text(wanted));
     }
     for (mut text, kind) in &mut errors {
         let wanted = if edit.focus == Some(kind.0) {
@@ -2400,14 +2366,7 @@ fn sync_corner_styles(
         }
     }
     for (outline, mut visibility) in &mut outlines {
-        let wanted = if selected.0 == Some(outline.0) {
-            Visibility::Inherited
-        } else {
-            Visibility::Hidden
-        };
-        if *visibility != wanted {
-            *visibility = wanted;
-        }
+        visibility.set_if_neq(visible_if(selected.0 == Some(outline.0)));
     }
 }
 
