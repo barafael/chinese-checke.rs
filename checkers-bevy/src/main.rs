@@ -549,12 +549,51 @@ fn exit_to_lobby(
     }
 }
 
-/// Fingers being tracked for a tap, and the feed they come from: a release
-/// near where its finger landed is a tap, a release far away is a drag.
+/// Fingers being tracked for a tap, and the feed they come from.
 #[derive(SystemParam)]
 struct TouchTaps<'w, 's> {
     events: MessageReader<'w, 's, TouchInput>,
-    starts: Local<'s, HashMap<u64, Vec2>>,
+    tracker: Local<'s, TapTracker>,
+}
+
+/// How far a finger may stray from where it landed, in logical pixels, and
+/// still lift as a tap.
+const TAP_SLOP: f32 = 12.0;
+
+/// Where each finger on the screen landed, for as long as it could still be
+/// a tap. A finger that strays past [`TAP_SLOP`] is forgotten at once: it is
+/// a drag from then on, even if it wanders back before lifting.
+#[derive(Default)]
+struct TapTracker(HashMap<u64, Vec2>);
+
+impl TapTracker {
+    /// Follow one touch event; where the tap landed if it completed one.
+    fn feed(&mut self, id: u64, phase: TouchPhase, position: Vec2) -> Option<Vec2> {
+        match phase {
+            TouchPhase::Started => {
+                self.0.insert(id, position);
+            }
+            TouchPhase::Moved => {
+                if self
+                    .0
+                    .get(&id)
+                    .is_some_and(|s| s.distance(position) >= TAP_SLOP)
+                {
+                    self.0.remove(&id);
+                }
+            }
+            TouchPhase::Ended => {
+                let start = self.0.remove(&id)?;
+                return (start.distance(position) < TAP_SLOP).then_some(position);
+            }
+            // The system took the touch over (a gesture, a dialog): whatever
+            // it was, the player did not lift a finger on the board.
+            TouchPhase::Canceled => {
+                self.0.remove(&id);
+            }
+        }
+        None
+    }
 }
 
 fn handle_clicks(
@@ -570,23 +609,15 @@ fn handle_clicks(
         return;
     }
 
-    // A touch counts as a click when the finger lifts within a flick of where
-    // it landed. On the web canvas, winit prevents the browser's emulated
-    // mouse events, so without this a touchscreen could select nothing. The
-    // mouse path below is untouched, and a drag travels too far to qualify.
+    // A touch counts as a click when the finger lifts without ever straying
+    // more than a flick from where it landed. On the web canvas, winit
+    // prevents the browser's emulated mouse events, so without this a
+    // touchscreen could select nothing. The mouse path below is untouched,
+    // and a drag travels too far to qualify.
     let mut tap: Option<Vec2> = None;
     for event in taps.events.read() {
-        match event.phase {
-            TouchPhase::Started | TouchPhase::Moved => {
-                taps.starts.insert(event.id, event.position);
-            }
-            TouchPhase::Ended | TouchPhase::Canceled => {
-                if let Some(start) = taps.starts.remove(&event.id)
-                    && start.distance(event.position) < 12.0
-                {
-                    tap = Some(event.position);
-                }
-            }
+        if let Some(at) = taps.tracker.feed(event.id, event.phase, event.position) {
+            tap = Some(at);
         }
     }
     let mouse_click = buttons.just_pressed(MouseButton::Left);
@@ -1274,5 +1305,80 @@ mod tests {
                 "{what} must go with the round"
             );
         }
+    }
+
+    /// Play one finger's events through a fresh tracker; the last tap seen.
+    fn taps(events: &[(TouchPhase, Vec2)]) -> Option<Vec2> {
+        let mut tracker = TapTracker::default();
+        let mut tap = None;
+        for &(phase, at) in events {
+            tap = tracker.feed(7, phase, at).or(tap);
+        }
+        tap
+    }
+
+    #[test]
+    fn a_finger_lifted_where_it_landed_taps_there() {
+        use TouchPhase::*;
+        let at = Vec2::new(100.0, 100.0);
+        assert_eq!(taps(&[(Started, at), (Ended, at)]), Some(at));
+
+        let wobble = at + Vec2::new(5.0, -4.0);
+        assert_eq!(
+            taps(&[(Started, at), (Moved, wobble), (Ended, wobble)]),
+            Some(wobble),
+            "a wobble inside the slop is still a tap"
+        );
+    }
+
+    /// The regression: every move used to re-anchor the finger, so a drag
+    /// that came to rest before lifting measured only its last step and
+    /// clicked the hole it ended over.
+    #[test]
+    fn a_drag_never_taps_even_when_it_comes_back() {
+        use TouchPhase::*;
+        let at = Vec2::new(100.0, 100.0);
+        let far = at + Vec2::new(80.0, 0.0);
+        let near_far = far + Vec2::new(2.0, 0.0);
+        assert_eq!(
+            taps(&[
+                (Started, at),
+                (Moved, far),
+                (Moved, near_far),
+                (Ended, near_far)
+            ]),
+            None,
+            "a drag that rests before lifting is still a drag"
+        );
+        assert_eq!(
+            taps(&[(Started, at), (Moved, far), (Moved, at), (Ended, at)]),
+            None,
+            "a drag that wanders back to where it landed is still a drag"
+        );
+        assert_eq!(
+            taps(&[(Started, at), (Ended, far)]),
+            None,
+            "a lift far from the landing is no tap, moves reported or not"
+        );
+    }
+
+    #[test]
+    fn a_cancelled_touch_never_taps() {
+        use TouchPhase::*;
+        let at = Vec2::new(100.0, 100.0);
+        assert_eq!(taps(&[(Started, at), (Canceled, at)]), None);
+    }
+
+    /// Two fingers are followed apart: one dragging does not spoil the
+    /// other's tap.
+    #[test]
+    fn fingers_are_tracked_independently() {
+        let mut tracker = TapTracker::default();
+        let (a, b) = (Vec2::new(10.0, 10.0), Vec2::new(300.0, 300.0));
+        tracker.feed(1, TouchPhase::Started, a);
+        tracker.feed(2, TouchPhase::Started, b);
+        tracker.feed(2, TouchPhase::Moved, b + Vec2::new(0.0, 90.0));
+        assert_eq!(tracker.feed(1, TouchPhase::Ended, a), Some(a));
+        assert_eq!(tracker.feed(2, TouchPhase::Ended, b), None);
     }
 }
