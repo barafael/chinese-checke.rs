@@ -208,12 +208,7 @@ pub fn all_sorted() -> Vec<&'static LawInfo> {
 /// All registered laws in specification reading order: by chapter, then ID.
 pub fn all_in_reading_order() -> Vec<&'static LawInfo> {
     let mut laws: Vec<&'static LawInfo> = LAWS.iter().collect();
-    laws.sort_by(|a, b| {
-        a.chapter
-            .number()
-            .cmp(&b.chapter.number())
-            .then_with(|| a.id.cmp(b.id))
-    });
+    laws.sort_by_key(|l| (l.chapter.number(), l.id));
     laws
 }
 

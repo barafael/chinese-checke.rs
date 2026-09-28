@@ -109,18 +109,11 @@ pub struct Position {
 /// coordinates, which buries the diagnostic in a violation message.
 impl core::fmt::Debug for Position {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "Position[")?;
-        let mut first = true;
-        for (c, o) in self.holes.iter().zip(&self.occupants) {
-            if let Some(p) = o {
-                if !first {
-                    write!(f, " ")?;
-                }
-                write!(f, "{},{}={}", c.q, c.r, p.index())?;
-                first = false;
-            }
-        }
-        write!(f, "]")
+        let pieces: Vec<String> = self
+            .occupied()
+            .map(|(c, p)| format!("{},{}={}", c.q, c.r, p.index()))
+            .collect();
+        write!(f, "Position[{}]", pieces.join(" "))
     }
 }
 
@@ -143,6 +136,14 @@ impl Position {
             }
         }
         p
+    }
+
+    /// Every occupied hole with its occupant, in hole order.
+    fn occupied(&self) -> impl Iterator<Item = (Coord, Player)> + '_ {
+        self.holes
+            .iter()
+            .zip(&self.occupants)
+            .filter_map(|(c, o)| o.map(|p| (*c, p)))
     }
 
     fn index_of(&self, c: Coord) -> Option<usize> {
@@ -172,10 +173,8 @@ impl Position {
     }
 
     pub fn pieces_of(&self, player: Player) -> Vec<Coord> {
-        self.holes
-            .iter()
-            .zip(&self.occupants)
-            .filter_map(|(c, o)| (*o == Some(player)).then_some(*c))
+        self.occupied()
+            .filter_map(|(c, p)| (p == player).then_some(c))
             .collect()
     }
 
@@ -196,16 +195,15 @@ impl Position {
 
     /// Occupied holes other than `exclude` — the set $\Omega$ of chapter 9.
     pub fn occupied_except(&self, exclude: Coord) -> Vec<Coord> {
-        self.holes
-            .iter()
-            .zip(&self.occupants)
-            .filter_map(|(c, o)| (o.is_some() && *c != exclude).then_some(*c))
+        self.occupied()
+            .filter_map(|(c, _)| (c != exclude).then_some(c))
             .collect()
     }
 
     /// Has `player` occupied every hole of their target camp? (chapter 13)
     pub fn has_won(&self, player: Player) -> bool {
-        camp_holes(player.opposite().index() as usize)
+        player
+            .target_camp()
             .iter()
             .all(|&c| self.occupant(c) == Some(player))
     }

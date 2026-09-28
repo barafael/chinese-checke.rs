@@ -63,9 +63,7 @@ pub enum CommitError {
 impl core::fmt::Display for CommitError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            CommitError::NoHopsTaken => {
-                write!(f, "a jump turn must take at least one hop")
-            }
+            CommitError::NoHopsTaken => write!(f, "a jump turn must take at least one hop"),
             CommitError::ReturnedToOrigin { hops } => write!(
                 f,
                 "the piece is back where it started after {hops} hop(s); a turn \

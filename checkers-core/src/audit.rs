@@ -58,23 +58,16 @@ impl core::error::Error for PositionFault {}
 /// Linear in the number of holes, so callers may run it on every state change.
 /// Use this in a front-end; use [`crate::law::verify_all`] in tests.
 pub fn audit_position(pos: &Position, players: &[Player]) -> Result<(), PositionFault> {
-    for player in Player::ALL {
-        let n = pos.count_of(player);
-        if players.contains(&player) {
-            if n != PIECES_PER_PLAYER {
-                return Err(PositionFault::PieceCount {
-                    player: player.index(),
-                    found: n,
-                });
+    for p in Player::ALL {
+        let (player, found) = (p.index(), pos.count_of(p));
+        if players.contains(&p) {
+            if found != PIECES_PER_PLAYER {
+                return Err(PositionFault::PieceCount { player, found });
             }
-        } else if n != 0 {
-            return Err(PositionFault::GhostPiece {
-                player: player.index(),
-                found: n,
-            });
+        } else if found != 0 {
+            return Err(PositionFault::GhostPiece { player, found });
         }
     }
-
     Ok(())
 }
 
