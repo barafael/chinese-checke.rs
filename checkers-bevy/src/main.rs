@@ -10,10 +10,10 @@
 //! ([`audit`]).
 
 use bevy::camera::ScalingMode;
-use bevy::prelude::*;
-// Not in the prelude, unlike the rest of the window API.
 use bevy::ecs::system::SystemParam;
 use bevy::input::touch::{TouchInput, TouchPhase};
+use bevy::prelude::*;
+// Not in the prelude, unlike the rest of the window API.
 use bevy::window::{Monitor, PrimaryMonitor};
 use bevy_matchbox::prelude::MatchboxSocket;
 use checkers_ai::{Ai, AiConfig};
@@ -25,7 +25,8 @@ use checkers_bevy::board_view::{
 use checkers_bevy::replay::{self, TraceMarker};
 use checkers_bevy::setup::Seating;
 use checkers_bevy::{
-    AppState, Selection, Session, audit, format_round_duration, lobby, net, record, sound, web,
+    AppState, Selection, Session, audit, format_round_duration, lobby, move_log, net, record,
+    sound, web,
 };
 use checkers_core::geometry::{Coord, all_holes, camp_of, on_board};
 use checkers_core::law::{LAWS, verify_all};
@@ -256,10 +257,7 @@ fn size_to_monitor(
     if *done {
         return;
     }
-    let Ok(monitor) = monitors.single() else {
-        return;
-    };
-    let Ok(mut window) = windows.single_mut() else {
+    let (Ok(monitor), Ok(mut window)) = (monitors.single(), windows.single_mut()) else {
         return;
     };
     *done = true;
@@ -269,10 +267,7 @@ fn size_to_monitor(
     } else {
         1.0
     };
-    let logical = Vec2::new(
-        monitor.physical_width as f32 / scale,
-        monitor.physical_height as f32 / scale,
-    );
+    let logical = UVec2::new(monitor.physical_width, monitor.physical_height).as_vec2() / scale;
     let wanted = logical * 2.0 / 3.0;
 
     window.resolution.set(wanted.x, wanted.y);
@@ -444,11 +439,13 @@ fn control_button(parent: &mut ChildSpawnerCommands, which: ControlButton, label
 ///
 /// The entities are one query, not one per marker, so an entity carrying
 /// several of these markers is despawned exactly once.
-#[derive(SystemParam)]
-struct RoundWorld<'w, 's> {
-    commands: Commands<'w, 's>,
-    owned: Query<'w, 's, Entity, RoundOwned>,
-    viewer: Option<ResMut<'w, replay::ReplayView>>,
+fn exit_round_teardown(mut commands: Commands, owned: Query<Entity, RoundOwned>) {
+    for e in owned.iter() {
+        commands.entity(e).despawn();
+    }
+    // Removing a resource that is not there does nothing, so this needs no
+    // check that a viewer is open.
+    commands.remove_resource::<replay::ReplayView>();
 }
 
 /// Every entity a round owns, whatever markers it carries.
@@ -460,20 +457,6 @@ type RoundOwned = Or<(
     With<HudUi>,
     With<GameOverUi>,
 )>;
-
-fn exit_round_teardown(world: RoundWorld) {
-    let RoundWorld {
-        mut commands,
-        owned,
-        viewer,
-    } = world;
-    for e in owned.iter() {
-        commands.entity(e).despawn();
-    }
-    if viewer.is_some() {
-        commands.remove_resource::<replay::ReplayView>();
-    }
-}
 
 /// The board: one entity per hole. Spawned on entering the round; the pieces
 /// and highlights on top of it are rebuilt by the sync systems.
@@ -515,12 +498,9 @@ fn handle_buttons(
     mut commands: Commands,
 ) {
     for (interaction, which) in interactions.iter() {
-        if *interaction != Interaction::Pressed {
-            continue;
-        }
         // On another player's move the controls are inert — the click would
         // otherwise confirm or cancel a selection this peer cannot touch.
-        if !session.may_act() {
+        if *interaction != Interaction::Pressed || !session.may_act() {
             continue;
         }
         match which {
@@ -531,11 +511,10 @@ fn handle_buttons(
             }
             ControlButton::Resign => session.resign(),
             ControlButton::Save => {
-                let text = session.to_record().to_text();
-                match web::save_record(&text) {
-                    Ok(where_) => session.message = format!("Saved{where_}"),
-                    Err(e) => session.message = format!("Save failed: {e}"),
-                }
+                session.message = match web::save_record(&session.to_record().to_text()) {
+                    Ok(where_) => format!("Saved{where_}"),
+                    Err(e) => format!("Save failed: {e}"),
+                };
             }
             ControlButton::Open => match web::load_record() {
                 Ok(text) => match record::GameRecord::from_text(&text)
@@ -592,10 +571,9 @@ fn exit_to_lobby(
     let pressed = buttons.iter().any(|(interaction, which)| {
         *interaction == Interaction::Pressed && *which == ControlButton::Menu
     });
-    if !pressed && !(keys.just_pressed(KeyCode::KeyM) && session.game.is_over()) {
-        return;
+    if pressed || (keys.just_pressed(KeyCode::KeyM) && session.game.is_over()) {
+        next_state.set(AppState::Lobby);
     }
-    next_state.set(AppState::Lobby);
 }
 
 /// Fingers being tracked for a tap, and the feed they come from: a release
@@ -626,10 +604,7 @@ fn handle_clicks(
     let mut tap: Option<Vec2> = None;
     for event in taps.events.read() {
         match event.phase {
-            TouchPhase::Started => {
-                taps.starts.insert(event.id, event.position);
-            }
-            TouchPhase::Moved => {
+            TouchPhase::Started | TouchPhase::Moved => {
                 taps.starts.insert(event.id, event.position);
             }
             TouchPhase::Ended | TouchPhase::Canceled => {
@@ -650,13 +625,10 @@ fn handle_clicks(
         return;
     }
 
-    let Ok(window) = windows.single() else {
+    let (Ok(window), Ok((camera, cam_tf))) = (windows.single(), cameras.single()) else {
         return;
     };
     let Some(cursor) = tap.or_else(|| window.cursor_position()) else {
-        return;
-    };
-    let Ok((camera, cam_tf)) = cameras.single() else {
         return;
     };
     let Ok(plane) = camera.viewport_to_world_2d(cam_tf, cursor) else {
@@ -708,9 +680,7 @@ fn handle_keys(keys: Res<ButtonInput<KeyCode>>, play: PlayContext) {
         on,
         mut commands,
     } = play;
-    if (keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::NumpadEnter))
-        && session.may_act()
-    {
+    if keys.any_just_pressed([KeyCode::Enter, KeyCode::NumpadEnter]) && session.may_act() {
         // Someone else's turn: confirmation is inert so this peer cannot submit a
         // move on another player's behalf.
         session.confirm();
@@ -877,25 +847,20 @@ fn sync_buttons(
     )>,
 ) {
     for (interaction, which, mut bg, mut vis) in buttons.iter_mut() {
-        // While the record viewer is up the whole row steps aside: its keys
-        // own the input, and the controls have nothing to act on.
-        let wanted = if viewer.is_some() {
-            Visibility::Hidden
-        } else if matches!(
+        // Record controls are local-mode, like resign: a shared round is
+        // shared state, and one peer's save would say nothing about the
+        // rest of the table.
+        let local_only = matches!(
             which,
             ControlButton::Resign
                 | ControlButton::Save
                 | ControlButton::Open
                 | ControlButton::Replay
-        ) {
-            // Record controls are local-mode, like resign: a shared round is
-            // shared state, and one peer's save would say nothing about the
-            // rest of the table.
-            if !session.shared {
-                Visibility::Inherited
-            } else {
-                Visibility::Hidden
-            }
+        );
+        // While the record viewer is up the whole row steps aside: its keys
+        // own the input, and the controls have nothing to act on.
+        let wanted = if viewer.is_some() || (local_only && session.shared) {
+            Visibility::Hidden
         } else {
             Visibility::Inherited
         };
@@ -1244,41 +1209,27 @@ fn ai_take_turn(
     let action = if replay_state.busy() {
         Action::Wait
     } else {
-        let now = time.elapsed();
-        pace.advance(&mut session, &mut engine.0, now)
+        pace.advance(&mut session, &mut engine.0, time.elapsed())
     };
-    let move_no = session.stats.total_moves() + 1;
+    let moves = session.stats.total_moves();
+    let seat = session.game.turn().index();
     match action {
         Action::Wait => {}
         Action::Play(mv) => {
-            let seat = session.game.turn().index();
-            let line = format!(
-                "{}. p{} {}",
-                move_no,
-                seat,
-                checkers_bevy::move_log::describe(&mv)
-            );
-            checkers_bevy::move_log::log(&line);
-            session.message = format!(
-                "Player {} (computer): {}",
-                seat,
-                checkers_bevy::move_log::describe(&mv)
-            );
+            let described = move_log::describe(&mv);
+            move_log::log(&format!("{}. p{seat} {described}", moves + 1));
+            session.message = format!("Player {seat} (computer): {described}");
             session.outbox.push(mv);
         }
         Action::Pass => {
-            let seat = session.game.turn().index();
-            checkers_bevy::move_log::log(&format!("{}. p{} passes", move_no, seat));
+            move_log::log(&format!("{}. p{seat} passes", moves + 1));
             session.selection = Selection::None;
             checkers_bevy::net::after_turn(&mut session);
         }
         // An engine-only race neither side can resolve: log it honestly and
         // end the game — for every peer watching, too.
         Action::Abandon(reason) => {
-            checkers_bevy::move_log::log(&format!(
-                "# game abandoned: {reason} after {} moves",
-                session.stats.total_moves()
-            ));
+            move_log::log(&format!("# game abandoned: {reason} after {moves} moves"));
             pace.result_logged = true;
             checkers_bevy::net::abandon_round(&mut session, socket.as_deref_mut(), &net);
         }
@@ -1287,23 +1238,13 @@ fn ai_take_turn(
     // The end-of-game line, exactly once.
     if session.game.is_over() && !pace.result_logged {
         pace.result_logged = true;
-        let line = match session.game.outcome() {
-            Some(checkers_core::rules::Outcome::Winner(p)) => format!(
-                "# game over: player {} wins after {} moves",
-                p.index(),
-                session.stats.total_moves()
-            ),
-            Some(checkers_core::rules::Outcome::Resigned(p)) => format!(
-                "# game over: player {} resigned after {} moves",
-                p.index(),
-                session.stats.total_moves()
-            ),
-            _ => format!(
-                "# game over: draw after {} moves",
-                session.stats.total_moves()
-            ),
+        let result = match session.game.outcome() {
+            Some(Outcome::Winner(p)) => format!("player {} wins", p.index()),
+            Some(Outcome::Resigned(p)) => format!("player {} resigned", p.index()),
+            _ => "draw".to_string(),
         };
-        checkers_bevy::move_log::log(&line);
+        let total = session.stats.total_moves();
+        move_log::log(&format!("# game over: {result} after {total} moves"));
     }
 }
 
