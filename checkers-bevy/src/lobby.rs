@@ -386,7 +386,7 @@ fn sync_input_styles(
         } else {
             match interaction {
                 Interaction::Hovered => HOVER,
-                _ => Color::srgb(0.35, 0.35, 0.40),
+                _ => BORDER,
             }
         };
         let well = if focused {
@@ -427,30 +427,68 @@ fn sync_host_rows(
 /// One button. Factored out because the lobby spawns rows of them and the
 /// padding, radius, and text styling must not drift between the rows.
 fn button(parent: &mut ChildSpawnerCommands, label: &str, tag: LobbyButton) {
+    sized_button(parent, label, (14.0, 8.0), 15.0, tag);
+}
+
+/// A [`button`] one size smaller: the name row's Apply, and Computer.
+fn small_button(parent: &mut ChildSpawnerCommands, label: &str, tag: impl Bundle) {
+    sized_button(parent, label, (10.0, 6.0), 14.0, tag);
+}
+
+/// The shape every button shares, at a given padding and font size.
+fn sized_button(
+    parent: &mut ChildSpawnerCommands,
+    label: &str,
+    (pad_x, pad_y): (f32, f32),
+    font_size: f32,
+    tag: impl Bundle,
+) {
     parent
         .spawn((
             Button,
             Node {
-                padding: UiRect::axes(Val::Px(14.0), Val::Px(8.0)),
+                padding: UiRect::axes(Val::Px(pad_x), Val::Px(pad_y)),
                 border_radius: BorderRadius::all(Val::Px(5.0)),
                 ..default()
             },
             BackgroundColor(IDLE),
             tag,
         ))
-        .with_child((
-            Text::new(label),
-            TextFont {
-                font_size: FontSize::Px(15.0),
-                ..default()
-            },
-            TextColor(Color::srgb(0.9, 0.9, 0.92)),
-        ));
+        .with_child(ui_text(label, font_size, TEXT));
+}
+
+/// One line of lobby text: `label` at `size` pixels, in `colour`.
+fn ui_text(label: impl Into<String>, size: f32, colour: Color) -> (Text, TextFont, TextColor) {
+    (
+        Text::new(label),
+        TextFont::from_font_size(size),
+        TextColor(colour),
+    )
+}
+
+/// A row of controls, centred on one line.
+fn control_row() -> Node {
+    Node {
+        column_gap: Val::Px(10.0),
+        align_items: AlignItems::Center,
+        ..default()
+    }
+}
+
+/// A centred column of rows, `gap` pixels apart.
+fn column(gap: f32) -> Node {
+    Node {
+        flex_direction: FlexDirection::Column,
+        align_items: AlignItems::Center,
+        row_gap: Val::Px(gap),
+        ..default()
+    }
 }
 
 /// One labelled input row: the label, the text input box, and what closes it —
 /// the focusing key for the room, the Apply button and focusing key for the
-/// name. Enter commits, Esc leaves; visuals follow in [`sync_input_styles`].
+/// name — and beneath it the line for a refused commit. Enter commits, Esc
+/// leaves; visuals follow in [`sync_input_styles`].
 fn field_row(
     parent: &mut ChildSpawnerCommands,
     label: &str,
@@ -458,51 +496,18 @@ fn field_row(
     key: &str,
     apply: bool,
 ) {
-    parent
-        .spawn(Node {
-            column_gap: Val::Px(10.0),
-            align_items: AlignItems::Center,
-            ..default()
-        })
-        .with_children(|row| {
-            row.spawn((
-                Text::new(label),
-                TextFont {
-                    font_size: FontSize::Px(14.0),
-                    ..default()
-                },
-                TextColor(Color::srgb(0.62, 0.62, 0.68)),
-            ));
-            input_box(row, kind);
-            if apply {
-                row.spawn((
-                    Button,
-                    Node {
-                        padding: UiRect::axes(Val::Px(10.0), Val::Px(6.0)),
-                        border_radius: BorderRadius::all(Val::Px(5.0)),
-                        ..default()
-                    },
-                    BackgroundColor(IDLE),
-                    ApplyName,
-                ))
-                .with_child((
-                    Text::new("Apply"),
-                    TextFont {
-                        font_size: FontSize::Px(14.0),
-                        ..default()
-                    },
-                    TextColor(Color::srgb(0.9, 0.9, 0.92)),
-                ));
-            }
-            row.spawn((
-                Text::new(key),
-                TextFont {
-                    font_size: FontSize::Px(14.0),
-                    ..default()
-                },
-                TextColor(Color::srgb(0.62, 0.62, 0.68)),
-            ));
-        });
+    parent.spawn(control_row()).with_children(|row| {
+        row.spawn(ui_text(label, 14.0, MUTED));
+        input_box(row, kind);
+        if apply {
+            small_button(row, "Apply", ApplyName);
+        }
+        row.spawn(ui_text(key, 14.0, MUTED));
+    });
+    parent.spawn((
+        ui_text("", 14.0, Color::srgb(0.85, 0.35, 0.35)),
+        InputError(kind),
+    ));
 }
 
 /// A text input box, shared by every field row.
@@ -518,18 +523,10 @@ fn input_box(parent: &mut ChildSpawnerCommands, kind: FieldKind) {
                 ..default()
             },
             BackgroundColor(IDLE),
-            BorderColor::all(Color::srgb(0.35, 0.35, 0.40)),
+            BorderColor::all(BORDER),
             TextInput(kind),
         ))
-        .with_child((
-            Text::new(String::new()),
-            TextFont {
-                font_size: FontSize::Px(14.0),
-                ..default()
-            },
-            TextColor(Color::srgb(0.9, 0.9, 0.92)),
-            InputText(kind),
-        ));
+        .with_child((ui_text("", 14.0, TEXT), InputText(kind)));
 }
 
 /// The shared palette. `CHOSEN` marks the button whose mode is active, with
@@ -540,6 +537,12 @@ pub(crate) const DOWN: Color = Color::srgb(0.17, 0.17, 0.21);
 pub(crate) const CHOSEN: Color = Color::srgb(0.20, 0.45, 0.28);
 pub(crate) const CHOSEN_HOVER: Color = Color::srgb(0.25, 0.53, 0.34);
 pub(crate) const CHOSEN_DOWN: Color = Color::srgb(0.16, 0.37, 0.23);
+
+/// Text on a button or in a field, the dimmer hints beside them, and an
+/// unfocused field's border.
+const TEXT: Color = Color::srgb(0.9, 0.9, 0.92);
+const MUTED: Color = Color::srgb(0.62, 0.62, 0.68);
+const BORDER: Color = Color::srgb(0.35, 0.35, 0.40);
 
 /// The lobby is a two-column flex row filling the window: the star on the
 /// left, every control on the right. Side by side the columns stay short
@@ -562,21 +565,12 @@ fn spawn(mut commands: Commands, art: Res<SectorArt>) {
         ))
         .with_children(|root| {
             // Left: the setup itself.
-            root.spawn(Node {
-                flex_direction: FlexDirection::Column,
-                align_items: AlignItems::Center,
-                row_gap: Val::Px(12.0),
-                ..default()
-            })
-            .with_children(|col| {
+            root.spawn(column(12.0)).with_children(|col| {
                 header(col, "Lobby");
-                col.spawn((
-                    Text::new("The star is the setup: click a corner, then set who sits there."),
-                    TextFont {
-                        font_size: FontSize::Px(14.0),
-                        ..default()
-                    },
-                    TextColor(Color::srgb(0.62, 0.62, 0.68)),
+                col.spawn(ui_text(
+                    "The star is the setup: click a corner, then set who sits there.",
+                    14.0,
+                    MUTED,
                 ));
 
                 // The hex star. Wedges are out-facing triangle sectors over a
@@ -585,13 +579,7 @@ fn spawn(mut commands: Commands, art: Res<SectorArt>) {
             });
 
             // Right: what to do with it.
-            root.spawn(Node {
-                flex_direction: FlexDirection::Column,
-                align_items: AlignItems::Center,
-                row_gap: Val::Px(10.0),
-                ..default()
-            })
-            .with_children(|col| {
+            root.spawn(column(10.0)).with_children(|col| {
                 // Who I am and where I am: the room to join or share, and the
                 // name the roster shows. Both are typed — on desktop they are
                 // the only way in — so each row is a real text field.
@@ -600,120 +588,46 @@ fn spawn(mut commands: Commands, art: Res<SectorArt>) {
                 // The room field. Enter joins: the loopback to the socket is
                 // a lobby re-enter, which also rewrites the page URL (web).
                 field_row(col, "Room", FieldKind::Room, "R", false);
-                col.spawn((
-                    Text::new(String::new()),
-                    TextFont {
-                        font_size: FontSize::Px(14.0),
-                        ..default()
-                    },
-                    TextColor(Color::srgb(0.85, 0.35, 0.35)),
-                    InputError(FieldKind::Room),
-                ));
 
                 // The player-name field, same pattern; Apply commits it.
                 field_row(col, "Name", FieldKind::Name, "N", true);
-                col.spawn((
-                    Text::new(String::new()),
-                    TextFont {
-                        font_size: FontSize::Px(14.0),
-                        ..default()
-                    },
-                    TextColor(Color::srgb(0.85, 0.35, 0.35)),
-                    InputError(FieldKind::Name),
-                ));
 
                 header(col, "Table");
                 // Presets are shortcuts for the symmetric setups; they fill the
                 // whole table, so what is configured and what the shortcut
                 // leaves can never silently disagree. Solo-only: a shared
                 // table is claimed corner by corner on the star.
-                col.spawn((
-                    Node {
-                        column_gap: Val::Px(10.0),
-                        align_items: AlignItems::Center,
-                        ..default()
-                    },
-                    SoloOnly,
-                ))
-                .with_children(|row| {
+                col.spawn((control_row(), SoloOnly)).with_children(|row| {
                     for seating in Seating::ALL {
-                        button(
-                            row,
-                            &format!("Preset {}", seating.label()),
-                            LobbyButton::Preset(seating),
-                        );
+                        let label = format!("Preset {}", seating.label());
+                        button(row, &label, LobbyButton::Preset(seating));
                     }
                 });
 
                 // What to do with the selected corner. [`sync_corner_actions`]
                 // shows exactly one of these rows: a free corner offers
                 // seating, a claimed corner offers cancelling it.
-                col.spawn((Node {
-                    flex_direction: FlexDirection::Column,
-                    align_items: AlignItems::Center,
-                    row_gap: Val::Px(10.0),
-                    ..default()
-                },))
-                    .with_children(|corner| {
-                        // Seat a free corner. Seating an engine is the host's
-                        // call alone — the engine runs in the host's process —
-                        // so guests never see the button.
-                        corner
-                            .spawn((
-                                Node {
-                                    column_gap: Val::Px(10.0),
-                                    align_items: AlignItems::Center,
-                                    ..default()
-                                },
-                                SeatButtons,
-                            ))
-                            .with_children(|row| {
-                                button(
-                                    row,
-                                    "Human",
-                                    LobbyButton::CornerAction(CornerCommand::Human),
-                                );
-                                row.spawn((
-                                    Button,
-                                    Node {
-                                        padding: UiRect::axes(Val::Px(10.0), Val::Px(6.0)),
-                                        border_radius: BorderRadius::all(Val::Px(5.0)),
-                                        ..default()
-                                    },
-                                    BackgroundColor(IDLE),
-                                    LobbyButton::CornerAction(CornerCommand::Cpu),
-                                    HostOnly,
-                                ))
-                                .with_child((
-                                    Text::new("Computer"),
-                                    TextFont {
-                                        font_size: FontSize::Px(14.0),
-                                        ..default()
-                                    },
-                                    TextColor(Color::srgb(0.9, 0.9, 0.92)),
-                                ));
-                            });
+                col.spawn(column(10.0)).with_children(|corner| {
+                    // Seat a free corner. Seating an engine is the host's
+                    // call alone — the engine runs in the host's process —
+                    // so guests never see the button.
+                    corner
+                        .spawn((control_row(), SeatButtons))
+                        .with_children(|row| {
+                            let human = LobbyButton::CornerAction(CornerCommand::Human);
+                            let cpu = LobbyButton::CornerAction(CornerCommand::Cpu);
+                            button(row, "Human", human);
+                            small_button(row, "Computer", (cpu, HostOnly));
+                        });
 
-                        // Cancel a claimed corner — yours (release), another
-                        // player's (host un-seats), or an engine's (host removes
-                        // it). [`corner_effect`] picks the right move.
-                        corner
-                            .spawn((
-                                Node {
-                                    column_gap: Val::Px(10.0),
-                                    align_items: AlignItems::Center,
-                                    ..default()
-                                },
-                                CancelSeat,
-                            ))
-                            .with_children(|row| {
-                                button(
-                                    row,
-                                    "Cancel Seat",
-                                    LobbyButton::CornerAction(CornerCommand::Off),
-                                );
-                            });
-                    });
+                    // Cancel a claimed corner — yours (release), another
+                    // player's (host un-seats), or an engine's (host removes
+                    // it). [`corner_effect`] picks the right move.
+                    let cancel = LobbyButton::CornerAction(CornerCommand::Off);
+                    corner
+                        .spawn((control_row(), CancelSeat))
+                        .with_children(|row| button(row, "Cancel Seat", cancel));
+                });
 
                 // House rules, one toggle per switch. Only the host decides
                 // them, so only the host even sees them.
@@ -724,51 +638,26 @@ fn spawn(mut commands: Commands, art: Res<SectorArt>) {
                     },
                     HostOnly,
                 ))
-                .with_children(|row| {
-                    row.spawn((
-                        Text::new("Rules"),
-                        TextFont {
-                            font_size: FontSize::Px(16.0),
-                            ..default()
-                        },
-                        TextColor(Color::srgb(0.7, 0.7, 0.76)),
-                    ));
-                });
-                col.spawn((
-                    Node {
-                        column_gap: Val::Px(10.0),
-                        ..default()
-                    },
-                    HostOnly,
-                ))
-                .with_children(|row| {
-                    button(row, "No foreign rest", LobbyButton::ForeignCamps);
-                });
+                .with_child(ui_text("Rules", 16.0, Color::srgb(0.7, 0.7, 0.76)));
+                let toggle_row = Node {
+                    column_gap: Val::Px(10.0),
+                    ..default()
+                };
+                col.spawn((toggle_row, HostOnly))
+                    .with_children(|row| button(row, "No foreign rest", LobbyButton::ForeignCamps));
 
                 // The roster: who is here and where they sit.
-                col.spawn((
-                    Text::new(String::new()),
-                    TextFont {
-                        font_size: FontSize::Px(14.0),
-                        ..default()
-                    },
-                    TextColor(Color::srgb(0.88, 0.88, 0.9)),
-                    RosterText,
-                ));
+                col.spawn((ui_text("", 14.0, Color::srgb(0.88, 0.88, 0.9)), RosterText));
 
                 // The host starts the game — the one button guests must not
                 // even see, since a shared start belongs to the host alone.
-                col.spawn((
-                    Node {
-                        column_gap: Val::Px(10.0),
-                        margin: UiRect::top(Val::Px(4.0)),
-                        ..default()
-                    },
-                    HostOnly,
-                ))
-                .with_children(|row| {
-                    button(row, "Start (Enter)", LobbyButton::Start);
-                });
+                let start_row = Node {
+                    column_gap: Val::Px(10.0),
+                    margin: UiRect::top(Val::Px(4.0)),
+                    ..default()
+                };
+                col.spawn((start_row, HostOnly))
+                    .with_children(|row| button(row, "Start (Enter)", LobbyButton::Start));
             });
         });
 }
@@ -953,14 +842,7 @@ fn sync_remote_cursors(
 
 /// A section heading in the lobby.
 fn header(parent: &mut ChildSpawnerCommands, label: &str) {
-    parent.spawn((
-        Text::new(label),
-        TextFont {
-            font_size: FontSize::Px(20.0),
-            ..default()
-        },
-        TextColor(Color::srgb(0.92, 0.92, 0.95)),
-    ));
+    parent.spawn(ui_text(label, 20.0, Color::srgb(0.92, 0.92, 0.95)));
 }
 
 /// Star geometry: the container the wedges and their labels live in.
@@ -1180,13 +1062,8 @@ fn outlined_copy(stack: &mut ChildSpawnerCommands, offset: Vec2, font_size: f32,
             ..default()
         })
         .with_child((
-            Text::new(String::new()),
-            TextFont {
-                font_size: FontSize::Px(font_size),
-                ..default()
-            },
+            ui_text("", font_size, colour),
             TextLayout::new(Justify::Center, LineBreak::NoWrap),
-            TextColor(colour),
         ));
 }
 
@@ -1216,35 +1093,18 @@ fn star(parent: &mut ChildSpawnerCommands, art: &SectorArt) {
         .with_children(|node| {
             node.spawn((
                 Button,
-                Node {
-                    position_type: PositionType::Absolute,
-                    left: Val::Px(0.0),
-                    top: Val::Px(0.0),
-                    width: Val::Px(STAR_W),
-                    height: Val::Px(STAR_H),
-                    ..default()
-                },
+                full_star(),
                 StarHit,
                 RelativeCursorPosition::default(),
             ));
             for (i, handle) in art.fills.iter().enumerate() {
-                node.spawn((
-                    full_star(),
-                    ImageNode {
-                        image: handle.clone(),
-                        ..default()
-                    },
-                    CornerPetal(i),
-                ));
+                node.spawn((full_star(), ImageNode::new(handle.clone()), CornerPetal(i)));
             }
             // Over the fills, under the labels; only the selected one shows.
             for (i, handle) in art.outlines.iter().enumerate() {
                 node.spawn((
                     full_star(),
-                    ImageNode {
-                        image: handle.clone(),
-                        ..default()
-                    },
+                    ImageNode::new(handle.clone()),
                     Visibility::Hidden,
                     CornerOutline(i),
                 ));
@@ -1590,22 +1450,15 @@ pub fn pump_socket(socket: Option<ResMut<MatchboxSocket>>, lobby: LobbyWorld) {
                                 last_seen: now,
                             },
                         ))
-                        .with_children(|dot| {
-                            dot.spawn((
-                                Node {
-                                    position_type: PositionType::Absolute,
-                                    left: Val::Px(12.0),
-                                    top: Val::Px(-4.0),
-                                    ..default()
-                                },
-                                Text::new(label),
-                                TextFont {
-                                    font_size: FontSize::Px(12.0),
-                                    ..default()
-                                },
-                                TextColor(colour),
-                            ));
-                        });
+                        .with_child((
+                            Node {
+                                position_type: PositionType::Absolute,
+                                left: Val::Px(12.0),
+                                top: Val::Px(-4.0),
+                                ..default()
+                            },
+                            ui_text(label, 12.0, colour),
+                        ));
                 }
             }
             NetMsg::Start {
