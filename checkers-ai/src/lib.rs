@@ -36,7 +36,7 @@ mod tables;
 mod testutil;
 
 use checkers_core::geometry::Dir;
-use checkers_core::position::{Move, MoveKind, Player};
+use checkers_core::position::{Move, Player};
 use checkers_core::rules::Game;
 
 use engine::State;
@@ -178,8 +178,7 @@ impl Ai {
         // shuffle) and with the other seat to move (the two-move shuffle).
         self.remember(state.hash);
         self.remember(state.piece_hash());
-        let raw = search::search(&state, &self.config, &self.recent);
-        raw.map(decode)
+        search::search(&state, &self.config, &self.recent).map(decode)
     }
 }
 
@@ -187,17 +186,10 @@ impl Ai {
 /// derived, not carried: one hex step is a step, anything else is a jump.
 fn decode(raw: u16) -> Move {
     let (from, to) = engine::unpack(raw);
-    let from = tables::coord_of(from);
-    let to = tables::coord_of(to);
-    let kind = if Dir::ALL.iter().any(|d| from.neighbour(*d) == to) {
-        MoveKind::Step
+    let (from, to) = (tables::coord_of(from), tables::coord_of(to));
+    if Dir::ALL.iter().any(|d| from.neighbour(*d) == to) {
+        Move::step(from, to)
     } else {
-        MoveKind::Jump
-    };
-    Move {
-        kind,
-        origin: from,
-        destination: to,
-        route: None,
+        Move::jump(from, to)
     }
 }

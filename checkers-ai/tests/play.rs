@@ -38,23 +38,15 @@ fn self_play(players: &[Player], ply_cap: usize) -> (Game, usize) {
         let mv = ai
             .choose_move(&game)
             .unwrap_or_else(|| panic!("players {players:?}: stuck at ply {ply}"));
-        let legal = game.legal_moves();
         assert!(
-            legal.iter().any(|m| m.kind == mv.kind
-                && m.origin == mv.origin
-                && m.destination == mv.destination),
+            game.legal_moves().contains(&mv),
             "players {players:?}: illegal engine move {mv:?} at ply {ply}"
         );
         game.play(&mv);
 
         let pos = game.position();
-        let seated_audit = if players.len() == 6 {
-            audit_position(pos, &Player::ALL)
-        } else {
-            audit_position(pos, players)
-        };
         assert_eq!(
-            seated_audit,
+            audit_position(pos, players),
             Ok(()),
             "players {players:?}: position invariant broken at ply {ply}"
         );

@@ -20,7 +20,7 @@
 //! a partial iteration's scores are unsound; its best move is not used).
 
 use crate::AiConfig;
-use crate::engine::{RawMove, State};
+use crate::engine::{RawMove, State, unpack};
 use crate::tables::TABLES;
 use std::collections::HashMap;
 use std::time::Duration;
@@ -67,10 +67,6 @@ impl std::hash::Hasher for IdentityHasher {
 
 type Table = HashMap<u64, Entry, std::hash::BuildHasherDefault<IdentityHasher>>;
 
-fn table() -> Table {
-    HashMap::with_hasher(std::hash::BuildHasherDefault::default())
-}
-
 /// Deadline and node counter shared by the recursion of one search.
 struct Budget {
     deadline: Instant,
@@ -106,7 +102,6 @@ pub fn search(state: &State, config: &AiConfig, history: &[u64]) -> Option<RawMo
     let mut seated: Vec<usize> = (0..6).filter(|&p| state.pieces[p] != 0).collect();
 
     let mut budget = Budget::new(config.budget);
-    let mut tt = table();
     let mut best: Option<RawMove> = None;
 
     if seated.len() == 2 {
@@ -116,6 +111,12 @@ pub fn search(state: &State, config: &AiConfig, history: &[u64]) -> Option<RawMo
             seated.rotate_left(pos);
         }
         let rival = seated[1];
+        let mut ctx = Ctx {
+            me,
+            rival,
+            budget,
+            tt: Table::default(),
+        };
         // The race-game tempo trap: at even depths the leaf sits after the
         // opponent's move, and the evaluation's home-fill and straggler terms
         // swing hundreds of points with it. Taking the deepest iteration's
@@ -125,14 +126,8 @@ pub fn search(state: &State, config: &AiConfig, history: &[u64]) -> Option<RawMo
         // the most optimistic *confirmed* line is the one that goes forward.
         let mut best_score = i32::MIN;
         for depth in 1..=config.max_depth {
-            let mut ctx = Ctx {
-                me,
-                rival,
-                budget: &mut budget,
-                tt: &mut tt,
-            };
             let (score, mv) = negamax(state, &mut ctx, depth, i32::MIN + 1, i32::MAX, 0);
-            if budget.expired {
+            if ctx.budget.expired {
                 break;
             }
             if let Some(mv) = mv
@@ -151,9 +146,7 @@ pub fn search(state: &State, config: &AiConfig, history: &[u64]) -> Option<RawMo
             if budget.expired {
                 break;
             }
-            if let Some(mv) = mv {
-                best = Some(mv);
-            }
+            best = mv.or(best);
         }
     }
 
@@ -171,7 +164,7 @@ fn ordered_moves(state: &State) -> Vec<RawMove> {
     let mut moves = state.moves();
     let me = state.turn as usize;
     moves.sort_by_key(|&mv| {
-        let (from, to) = crate::engine::unpack(mv);
+        let (from, to) = unpack(mv);
         -(TABLES.dist[me][from as usize] - TABLES.dist[me][to as usize])
     });
     moves
@@ -184,8 +177,7 @@ fn refuse_history(state: &State, best: Option<RawMove>, history: &[u64]) -> Opti
     // Both kinds of repeat count: the same board with the same seat to move
     // (one wasted move) and the same board with the other seat to move (two).
     let leads_back = |mv: RawMove| {
-        let mut probe = state.clone();
-        probe.apply(mv);
+        let probe = state.after(mv);
         history.contains(&probe.hash) || history.contains(&probe.piece_hash())
     };
     match best {
@@ -198,11 +190,11 @@ fn refuse_history(state: &State, best: Option<RawMove>, history: &[u64]) -> Opti
 }
 
 /// Everything a two-player node needs beyond the state itself.
-struct Ctx<'a> {
+struct Ctx {
     me: usize,
     rival: usize,
-    budget: &'a mut Budget,
-    tt: &'a mut Table,
+    budget: Budget,
+    tt: Table,
 }
 
 fn negamax(
@@ -221,11 +213,12 @@ fn negamax(
     // won: +WIN if that is the mover, -WIN if it is the other seat.
     let mover = state.turn as usize;
     let other = if mover == ctx.me { ctx.rival } else { ctx.me };
-    if state.pieces[mover] & TABLES.target[mover] == TABLES.target[mover] {
-        return (WIN - (24i32 - depth as i32), None);
+    let win = WIN - (24i32 - depth as i32);
+    if state.has_won(mover) {
+        return (win, None);
     }
-    if state.pieces[other] & TABLES.target[other] == TABLES.target[other] {
-        return (-(WIN - (24i32 - depth as i32)), None);
+    if state.has_won(other) {
+        return (-win, None);
     }
     // Twelve seats in a row without a move: two full rounds of passes, the
     // draw the rules describe.
@@ -258,10 +251,8 @@ fn negamax(
     let mut moves = ordered_moves(state);
     if moves.is_empty() {
         // Forced pass: the turn advances, the pass counter guards termination.
-        let old_turn = state.turn as usize;
         let mut next = state.clone();
-        next.turn = (next.turn + 1) % 6;
-        next.hash ^= TABLES.zobrist_turn[old_turn] ^ TABLES.zobrist_turn[next.turn as usize];
+        next.pass();
         let (score, _) = negamax(
             &next,
             ctx,
@@ -282,8 +273,7 @@ fn negamax(
     let mut flag = UPPER;
     let mut best_score = i32::MIN;
     for mv in moves {
-        let mut next = state.clone();
-        next.apply(mv);
+        let next = state.after(mv);
         let (score, _) = negamax(&next, ctx, depth.saturating_sub(1), -beta, -alpha, 0);
         let score = -score;
         if ctx.budget.expired {
@@ -330,7 +320,7 @@ fn maxn(
     let mover = state.turn as usize;
     // A finished camp scores a win for its owner.
     for &p in seated {
-        if state.pieces[p] & TABLES.target[p] == TABLES.target[p] {
+        if state.has_won(p) {
             let mut v = [0; 6];
             v[p] = WIN;
             return (v, None);
@@ -347,19 +337,15 @@ fn maxn(
 
     let moves = ordered_moves(state);
     if moves.is_empty() {
-        let old_turn = state.turn as usize;
         let mut next = state.clone();
-        next.turn = (next.turn + 1) % 6;
-        next.hash ^= TABLES.zobrist_turn[old_turn] ^ TABLES.zobrist_turn[next.turn as usize];
+        next.pass();
         return maxn(&next, seated, depth.saturating_sub(1), budget);
     }
 
     let mut best_vector = [i32::MIN; 6];
     let mut best_mv: Option<RawMove> = None;
     for mv in moves {
-        let mut next = state.clone();
-        next.apply(mv);
-        let (vector, _) = maxn(&next, seated, depth.saturating_sub(1), budget);
+        let (vector, _) = maxn(&state.after(mv), seated, depth.saturating_sub(1), budget);
         if budget.expired {
             return (best_vector, best_mv);
         }
@@ -374,14 +360,13 @@ fn maxn(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::{pack, unpack};
+    use crate::Ai;
+    use crate::engine::pack;
     use crate::tables::index_of;
     use crate::testutil::state_with;
-    use crate::{Ai, AiConfig};
     use checkers_core::geometry::Coord;
     use checkers_core::position::Player;
     use checkers_core::rules::Game;
-    use std::time::Duration;
 
     fn config() -> AiConfig {
         AiConfig {
@@ -415,11 +400,7 @@ mod tests {
 
         // With (0,0)-having-been-occupied in the history, that exact landing
         // is out: the engine must pick something else rather than shuffle.
-        let landing = {
-            let mut probe = state.clone();
-            probe.apply(shuffle);
-            probe.hash
-        };
+        let landing = state.after(shuffle).hash;
         let refused = search(&state, &config(), &[landing]);
         let refused = refused.expect("a moveable position must still yield a move");
         assert_ne!(refused, shuffle, "the engine returned to a known position");
@@ -440,15 +421,7 @@ mod tests {
             ],
             0,
         );
-        let offered: Vec<String> = state
-            .moves()
-            .into_iter()
-            .map(|mv| {
-                let (f, t) = unpack(mv);
-                let (f, t) = (TABLES.coord[f as usize], TABLES.coord[t as usize]);
-                format!("({},{}) -> ({},{})", f.q, f.r, t.q, t.r)
-            })
-            .collect();
+        let offered: Vec<_> = state.moves().into_iter().map(crate::decode).collect();
         assert!(
             offered.is_empty(),
             "the fixture must be stuck, but offers: {offered:?}"
@@ -463,7 +436,6 @@ mod tests {
     #[test]
     fn chosen_moves_are_always_legal() {
         let mut ai = Ai::new(config());
-        let mut rng = checkers_core::Xorshift::new(7);
 
         for players in [
             vec![Player::ALL[0], Player::ALL[3]],
@@ -483,9 +455,7 @@ mod tests {
                     panic!("a moveable position must yield a move");
                 };
                 assert!(
-                    legal.iter().any(|m| m.kind == mv.kind
-                        && m.origin == mv.origin
-                        && m.destination == mv.destination),
+                    legal.contains(&mv),
                     "the engine played {mv:?}, which the rules do not offer"
                 );
                 game.play(&mv);
@@ -493,7 +463,6 @@ mod tests {
                 // The wrong seat is refused outright.
                 let wrong = Player::wrapping(game.turn().index() + 1);
                 assert!(ai.choose_move_for(&game, wrong).is_none());
-                let _ = rng.below(1); // keep the generator referenced
             }
         }
     }
@@ -502,9 +471,8 @@ mod tests {
 #[cfg(test)]
 mod brute_force_check {
     use super::*;
-    use crate::engine::State;
     use checkers_core::geometry::Coord;
-    use checkers_core::position::Player;
+    use checkers_core::position::{Move, Player};
     use checkers_core::rules::Game;
 
     /// Full-window minimax with no pruning and no table — the ground truth
@@ -512,11 +480,12 @@ mod brute_force_check {
     fn minimax(state: &State, me: usize, rival: usize, depth: u8, passes: u32) -> i32 {
         let mover = state.turn as usize;
         let other = if mover == me { rival } else { me };
-        if state.pieces[mover] & TABLES.target[mover] == TABLES.target[mover] {
-            return WIN - (24i32 - depth as i32);
+        let win = WIN - (24i32 - depth as i32);
+        if state.has_won(mover) {
+            return win;
         }
-        if state.pieces[other] & TABLES.target[other] == TABLES.target[other] {
-            return -(WIN - (24i32 - depth as i32));
+        if state.has_won(other) {
+            return -win;
         }
         if passes >= 12 {
             return DRAW;
@@ -526,41 +495,34 @@ mod brute_force_check {
         }
         let moves = state.moves();
         if moves.is_empty() {
-            let old_turn = state.turn as usize;
             let mut next = state.clone();
-            next.turn = (next.turn + 1) % 6;
-            next.hash ^= TABLES.zobrist_turn[old_turn] ^ TABLES.zobrist_turn[next.turn as usize];
+            next.pass();
             return -minimax(&next, me, rival, depth.saturating_sub(1), passes + 1);
         }
         moves
             .into_iter()
-            .map(|mv| {
-                let mut next = state.clone();
-                next.apply(mv);
-                -minimax(&next, me, rival, depth.saturating_sub(1), 0)
-            })
+            .map(|mv| -minimax(&state.after(mv), me, rival, depth.saturating_sub(1), 0))
             .max()
             .expect("moves non-empty")
     }
 
+    /// The position after each seat's opening jump.
     fn ply2_state() -> State {
         let mut game = Game::for_players(&[Player::ALL[0], Player::ALL[3]]);
-        use checkers_core::position::MoveKind;
-        for (oq, or, dq, dr) in [(6, -4, 4, -2), (-6, 2, -4, 0)] {
-            let (origin, destination) = (Coord::new(oq, or), Coord::new(dq, dr));
-            let kind = if origin.distance(destination) == 1 {
-                MoveKind::Step
-            } else {
-                MoveKind::Jump
-            };
-            game.play(&checkers_core::position::Move {
-                kind,
-                origin,
-                destination,
-                route: None,
-            });
-        }
+        game.play(&Move::jump(Coord::new(6, -4), Coord::new(4, -2)));
+        game.play(&Move::jump(Coord::new(-6, 2), Coord::new(-4, 0)));
         State::of_game(&game)
+    }
+
+    /// Negamax over the full window, with a fresh table and a minute's budget.
+    fn full_negamax(state: &State, me: usize, rival: usize, depth: u8) -> (i32, Option<RawMove>) {
+        let mut ctx = Ctx {
+            me,
+            rival,
+            budget: Budget::new(Duration::from_secs(60)),
+            tt: Table::default(),
+        };
+        negamax(state, &mut ctx, depth, i32::MIN + 1, i32::MAX, 0)
     }
 
     #[test]
@@ -571,17 +533,7 @@ mod brute_force_check {
 
         for depth in [1u8, 2, 3, 4] {
             let truth = minimax(&state, me, rival, depth, 0);
-
-            let mut budget = Budget::new(Duration::from_secs(60));
-            let mut tt = table();
-            let mut ctx = Ctx {
-                me,
-                rival,
-                budget: &mut budget,
-                tt: &mut tt,
-            };
-            let (neg, _) = negamax(&state, &mut ctx, depth, i32::MIN + 1, i32::MAX, 0);
-
+            let (neg, _) = full_negamax(&state, me, rival, depth);
             assert_eq!(
                 neg, truth,
                 "depth {depth}: negamax {neg} != brute-force {truth}"
@@ -601,23 +553,11 @@ mod brute_force_check {
             let mut by_brute: Vec<(i32, u16)> = state
                 .moves()
                 .into_iter()
-                .map(|mv| {
-                    let mut next = state.clone();
-                    next.apply(mv);
-                    (-minimax(&next, me, rival, depth - 1, 0), mv)
-                })
+                .map(|mv| (-minimax(&state.after(mv), me, rival, depth - 1, 0), mv))
                 .collect();
             by_brute.sort();
 
-            let mut budget = Budget::new(Duration::from_secs(60));
-            let mut tt = table();
-            let mut ctx = Ctx {
-                me,
-                rival,
-                budget: &mut budget,
-                tt: &mut tt,
-            };
-            let (_, neg_best) = negamax(&state, &mut ctx, depth, i32::MIN + 1, i32::MAX, 0);
+            let (_, neg_best) = full_negamax(&state, me, rival, depth);
 
             let best_brute = by_brute.last().copied().map(|(_, mv)| mv);
             assert_eq!(

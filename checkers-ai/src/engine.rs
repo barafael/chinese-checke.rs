@@ -38,13 +38,12 @@ impl State {
     /// Build from the rules' game: who stands where, with the game's active
     /// player to move.
     pub fn of_game(game: &Game) -> State {
-        let t = &TABLES;
         let mut pieces = [0u128; 6];
         let mut occupied = 0u128;
         let pos = game.position();
         for hole in pos.holes() {
             if let Some(player) = pos.occupant(*hole)
-                && let Some(&i) = t.index.get(hole)
+                && let Some(&i) = TABLES.index.get(hole)
             {
                 pieces[player.index() as usize] |= 1u128 << i;
                 occupied |= 1u128 << i;
@@ -66,32 +65,21 @@ impl State {
     /// refuses to re-create either kind of repeat — same-turn shuffling is a
     /// single wasted move, cross-turn shuffling is two.
     pub fn piece_hash(&self) -> u64 {
-        let t = &TABLES;
         let mut h = 0u64;
         for (p, pieces) in self.pieces.iter().enumerate() {
             let mut bits = *pieces;
             while bits != 0 {
                 let i = bits.trailing_zeros() as usize;
-                h ^= t.zobrist_piece[p][i];
+                h ^= TABLES.zobrist_piece[p][i];
                 bits &= bits - 1;
             }
         }
         h
     }
 
+    /// The full key: the board, plus the seat to move.
     pub fn zobrist(&self) -> u64 {
-        let t = &TABLES;
-        let mut h = 0u64;
-        for p in 0..6usize {
-            let mut bits = self.pieces[p];
-            while bits != 0 {
-                let i = bits.trailing_zeros() as usize;
-                h ^= t.zobrist_piece[p][i];
-                bits &= bits - 1;
-            }
-        }
-        h ^= t.zobrist_turn[self.turn as usize];
-        h
+        self.piece_hash() ^ TABLES.zobrist_turn[self.turn as usize]
     }
 
     pub fn apply(&mut self, mv: RawMove) {
@@ -101,17 +89,32 @@ impl State {
         self.pieces[p] ^= fmask | tmask;
         self.occupied ^= fmask;
         self.occupied |= tmask;
+        self.hash ^= TABLES.zobrist_piece[p][from as usize] ^ TABLES.zobrist_piece[p][to as usize];
+        self.pass();
+    }
+
+    /// Hand the turn to the next seat without moving: a forced pass, and the
+    /// second half of every move.
+    pub fn pass(&mut self) {
         let next = (self.turn + 1) % 6;
-        let t = &TABLES;
         // The turn key must be swapped, not merely toggled out: the hash of a
         // state always carries the key of the seat to move. Getting this wrong
         // conflates different states in the transposition table and the search
         // plays nonsense with complete confidence.
-        self.hash ^= t.zobrist_piece[p][from as usize]
-            ^ t.zobrist_piece[p][to as usize]
-            ^ t.zobrist_turn[p]
-            ^ t.zobrist_turn[next as usize];
+        self.hash ^= TABLES.zobrist_turn[self.turn as usize] ^ TABLES.zobrist_turn[next as usize];
         self.turn = next;
+    }
+
+    /// The state after `mv`, leaving this one as it was.
+    pub fn after(&self, mv: RawMove) -> State {
+        let mut next = self.clone();
+        next.apply(mv);
+        next
+    }
+
+    /// Whether `player` has filled its target camp — the win.
+    pub fn has_won(&self, player: usize) -> bool {
+        self.pieces[player] & TABLES.target[player] == TABLES.target[player]
     }
 
     /// Inverse of [`State::apply`], used only by the round-trip tests: search
@@ -204,16 +207,15 @@ impl State {
     /// (The search compares seats with this; nothing else is needed.)
     pub fn eval_for(&self, player: usize) -> i32 {
         let t = &TABLES;
-        let p = player;
-        let mut own = self.pieces[p];
+        let mut own = self.pieces[player];
         let mut score = 0;
         let mut worst = 0i32;
         while own != 0 {
             let i = own.trailing_zeros() as usize;
             own &= own - 1;
-            let d = t.dist[p][i];
+            let d = t.dist[player][i];
             score += (PROGRESS_MAX - d) * 10;
-            if t.target[p] >> i & 1 == 1 {
+            if t.target[player] >> i & 1 == 1 {
                 score += 25;
             }
             worst = worst.max(d);
@@ -229,25 +231,23 @@ mod tests {
     use crate::testutil::state_with;
     use checkers_core::Xorshift;
     use checkers_core::geometry::Coord;
-    use checkers_core::position::Player;
+    use checkers_core::position::{Move, Player};
     use checkers_core::rules::legal_moves;
+    use std::collections::BTreeSet;
 
     fn random_games() -> Vec<Game> {
         let mut rng = Xorshift::new(0xAB1E);
-        let mut games = vec![Game::new()];
-        // Composed games: two and three players.
-        games.push(Game::for_players(&[Player::ALL[0], Player::ALL[3]]));
-        games.push(Game::for_players(&[
-            Player::ALL[0],
-            Player::ALL[2],
-            Player::ALL[4],
-        ]));
+        let games = [
+            Game::new(),
+            // Composed games: two and three players.
+            Game::for_players(&[Player::ALL[0], Player::ALL[3]]),
+            Game::for_players(&[Player::ALL[0], Player::ALL[2], Player::ALL[4]]),
+        ];
 
         // And positions reached by random play, which exercise moves the
         // opening never shows.
         let mut played = Vec::new();
-        for game in &mut games {
-            let mut g = game.clone();
+        for mut g in games {
             for _ in 0..12 {
                 if g.is_over() {
                     break;
@@ -257,11 +257,23 @@ mod tests {
                     g.pass();
                     continue;
                 }
-                g.play(&moves[rng.below(moves.len())].clone());
+                g.play(&moves[rng.below(moves.len())]);
                 played.push(g.clone());
             }
         }
         played
+    }
+
+    /// The engine's move list must be exactly the rules' `legal` list, as
+    /// `(origin, destination)` hole pairs; `what` names the list in a failure.
+    fn assert_movegen_matches(legal: &[Move], state: &State, what: &str) {
+        let hole = |c| index_of(c).expect("legal hole") as u8;
+        let rules: BTreeSet<(u8, u8)> = legal
+            .iter()
+            .map(|mv| (hole(mv.origin), hole(mv.destination)))
+            .collect();
+        let engine: BTreeSet<(u8, u8)> = state.moves().into_iter().map(unpack).collect();
+        assert_eq!(rules, engine, "{what} diverged for player {}", state.turn);
     }
 
     /// The engine's move list must be exactly the rules' move list, on every
@@ -270,31 +282,8 @@ mod tests {
     #[test]
     fn movegen_matches_the_rules() {
         for game in random_games() {
-            let player = game.turn();
-            let state = State::of_game(&game);
-
-            let mut rules: Vec<(u8, u8)> = legal_moves(game.position(), player)
-                .into_iter()
-                .map(|mv| {
-                    (
-                        index_of(mv.origin).expect("legal origin") as u8,
-                        index_of(mv.destination).expect("legal destination") as u8,
-                    )
-                })
-                .collect();
-            rules.sort_unstable();
-            rules.dedup();
-
-            let mut engine: Vec<(u8, u8)> = state.moves().into_iter().map(unpack).collect();
-            engine.sort_unstable();
-            engine.dedup();
-
-            assert_eq!(
-                rules,
-                engine,
-                "movegen diverged for player {}",
-                player.index()
-            );
+            let legal = legal_moves(game.position(), game.turn());
+            assert_movegen_matches(&legal, &State::of_game(&game), "movegen");
         }
     }
 
@@ -311,30 +300,7 @@ mod tests {
                 continue;
             }
             let state = State::of_game(&game);
-
-            let mut rules: Vec<(u8, u8)> = game
-                .legal_moves()
-                .into_iter()
-                .map(|mv| {
-                    (
-                        index_of(mv.origin).expect("legal origin") as u8,
-                        index_of(mv.destination).expect("legal destination") as u8,
-                    )
-                })
-                .collect();
-            rules.sort_unstable();
-            rules.dedup();
-
-            let mut engine: Vec<(u8, u8)> = state.moves().into_iter().map(unpack).collect();
-            engine.sort_unstable();
-            engine.dedup();
-
-            assert_eq!(
-                rules,
-                engine,
-                "filtered movegen diverged for player {}",
-                game.turn().index()
-            );
+            assert_movegen_matches(&game.legal_moves(), &state, "filtered movegen");
         }
     }
 
@@ -346,29 +312,25 @@ mod tests {
     fn a_jump_landing_in_a_foreign_camp_is_not_offered() {
         let origin = Coord::new(0, 4);
         let landing = Coord::new(2, 4);
+        let (from, to) = (
+            index_of(origin).unwrap() as u8,
+            index_of(landing).unwrap() as u8,
+        );
         assert_eq!(
-            TABLES.camp[index_of(landing).unwrap()],
-            1,
+            TABLES.camp[to as usize], 1,
             "the landing must be inside camp 1 for this test"
         );
 
         let open = state_with(&[origin], &[Coord::new(1, 4)], 0);
         assert!(
-            open.moves().iter().any(|&m| unpack(m)
-                == (
-                    index_of(origin).unwrap() as u8,
-                    index_of(landing).unwrap() as u8
-                )),
+            open.moves().contains(&pack(from, to)),
             "the jump into camp 1 is open with the rule off"
         );
 
-        let mut fenced = state_with(&[origin], &[Coord::new(1, 4)], 0);
+        let mut fenced = open.clone();
         fenced.forbid_foreign_camps = true;
         assert!(
-            fenced
-                .moves()
-                .iter()
-                .all(|&m| unpack(m).1 != index_of(landing).unwrap() as u8),
+            fenced.moves().iter().all(|&m| unpack(m).1 != to),
             "the rule closes the foreign landing"
         );
     }
@@ -389,7 +351,7 @@ mod tests {
                 game.pass();
                 continue;
             }
-            game.play(&moves[rng.below(moves.len())].clone());
+            game.play(&moves[rng.below(moves.len())]);
 
             let mut state = State::of_game(&game);
             let snapshot = state.clone();
@@ -491,15 +453,8 @@ mod tests {
         assert!(apex.eval_for(0) > 0);
         // The apex is distance zero and inside the camp: pure bonus plus the
         // full progress term.
-        let apex_score = apex.eval_for(0);
-        assert!(apex_score >= PROGRESS_MAX * 10 + 25);
+        assert!(apex.eval_for(0) >= PROGRESS_MAX * 10 + 25);
     }
-}
-
-#[cfg(test)]
-mod hash_tests {
-    use super::*;
-    use checkers_core::Xorshift;
 
     /// The incremental hash must equal the canonical hash of the state it
     /// describes, because the transposition table keys on it.
@@ -516,7 +471,7 @@ mod hash_tests {
                 game.pass();
                 continue;
             }
-            game.play(&moves[rng.below(moves.len())].clone());
+            game.play(&moves[rng.below(moves.len())]);
             let state = State::of_game(&game);
             assert_eq!(
                 state.hash,
@@ -529,8 +484,7 @@ mod hash_tests {
             if moves.is_empty() {
                 continue;
             }
-            let mut moved = state.clone();
-            moved.apply(moves[rng.below(moves.len())]);
+            let moved = state.after(moves[rng.below(moves.len())]);
             assert_eq!(
                 moved.hash,
                 moved.zobrist(),

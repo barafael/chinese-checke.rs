@@ -7,6 +7,7 @@
 //! to the geometry flows through.
 
 use checkers_core::geometry::{Coord, Dir, all_holes, camp_of, in_camp, rotate_n};
+use std::array::from_fn;
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
@@ -54,25 +55,16 @@ pub(crate) fn index_of(c: Coord) -> Option<usize> {
 fn build() -> Tables {
     let holes = all_holes();
     assert_eq!(holes.len(), HOLES, "the board is 121 holes");
-    let mut coord = [Coord::ORIGIN; HOLES];
-    let mut index = HashMap::with_capacity(HOLES);
-    for (i, c) in holes.iter().enumerate() {
-        coord[i] = *c;
-        index.insert(*c, i);
-    }
+    let coord = from_fn(|i| holes[i]);
+    let index: HashMap<Coord, usize> = holes.iter().enumerate().map(|(i, &c)| (c, i)).collect();
+    let hole_at = |c: Coord| index.get(&c).map(|&i| i as u8);
 
     let mut nbr = [[None; HOLES]; 6];
     let mut jmp = [[None; HOLES]; 6];
     for (i, c) in holes.iter().enumerate() {
         for (d, dir) in Dir::ALL.iter().enumerate() {
-            let n = c.neighbour(*dir);
-            if let Some(&ni) = index.get(&n) {
-                nbr[d][i] = Some(ni as u8);
-            }
-            let j = c.jump_dest(*dir);
-            if let Some(&ji) = index.get(&j) {
-                jmp[d][i] = Some(ji as u8);
-            }
+            nbr[d][i] = hole_at(c.neighbour(*dir));
+            jmp[d][i] = hole_at(c.jump_dest(*dir));
         }
     }
 
@@ -85,40 +77,21 @@ fn build() -> Tables {
         let apex = rotate_n(Coord::new(8, -4), target_camp as u32);
         for (i, c) in holes.iter().enumerate() {
             dist[p][i] = c.distance(apex);
-        }
-        let mut mask = 0u128;
-        for c in holes.iter().copied() {
-            if in_camp(c, target_camp as u32)
-                && let Some(&i) = index.get(&c)
-            {
-                mask |= 1u128 << i;
+            if in_camp(*c, target_camp as u32) {
+                target[p] |= 1u128 << i;
             }
         }
-        target[p] = mask;
     }
 
     // Each hole's camp under the rules' `camp_of`, stored so the engine's own
     // move filter can fence landings without touching the geometry crate.
-    let mut camp = [u8::MAX; HOLES];
-    for (i, c) in holes.iter().enumerate() {
-        if let Some(camp_index) = camp_of(*c) {
-            camp[i] = camp_index as u8;
-        }
-    }
+    let camp = from_fn(|i| camp_of(holes[i]).map_or(u8::MAX, |k| k as u8));
 
     // Zobrist keys from the workspace's own xorshift, so the crate stays
     // dependency-free and the hashes are stable across runs.
     let mut rng = checkers_core::Xorshift::new(0x2A11_C0DE);
-    let mut zobrist_piece = [[0u64; HOLES]; 6];
-    for row in zobrist_piece.iter_mut() {
-        for key in row.iter_mut() {
-            *key = rng.next_u64();
-        }
-    }
-    let mut zobrist_turn = [0u64; 6];
-    for key in zobrist_turn.iter_mut() {
-        *key = rng.next_u64();
-    }
+    let zobrist_piece = from_fn(|_| from_fn(|_| rng.next_u64()));
+    let zobrist_turn = from_fn(|_| rng.next_u64());
 
     Tables {
         coord,
