@@ -106,3 +106,17 @@ pub fn state(app: &App) -> AppState {
 pub fn status(app: &App) -> &str {
     &app.world().resource::<LobbyStatus>().0
 }
+
+pub fn set_state(app: &mut App, state: AppState) {
+    app.world_mut()
+        .resource_mut::<NextState<AppState>>()
+        .set(state);
+}
+
+pub fn net(app: &App) -> &NetState {
+    app.world().resource::<NetState>()
+}
+
+pub fn session(app: &App) -> &Session {
+    app.world().resource::<Session>()
+}

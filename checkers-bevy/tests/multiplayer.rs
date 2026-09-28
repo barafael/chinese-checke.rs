@@ -26,19 +26,18 @@
 //! cargo test -p checkers-bevy --test multiplayer -- --ignored --nocapture
 //! ```
 
+mod common;
+
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use bevy::input::ButtonState;
-use bevy::input::InputPlugin;
-use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::prelude::*;
-use bevy::state::app::StatesPlugin;
 use bevy_matchbox::prelude::*;
-use checkers_bevy::lobby::{ChosenVariants, CornerCommand, LobbyButton, SelectedCorner, Table};
+use checkers_bevy::lobby::{self, ChosenVariants, CornerCommand};
 use checkers_bevy::{AppState, Session};
 use checkers_core::position::Player;
 use checkers_net::{NetState, RoomId, Signaling};
+use common::{choose, net, press, session, set_state, state, status};
 
 /// A local full-mesh signaling server, on a free loopback port. Runs on its
 /// own tokio runtime in a background thread, exactly like `matchbox_server`;
@@ -89,19 +88,9 @@ fn fresh_room(label: &str) -> RoomId {
 /// the `OnEnter` transition, and the game's own [`checkers_bevy::net::pump`]
 /// runs while in it.
 fn instance(name: &str, room: &RoomId, port: u16) -> App {
-    let mut app = App::new();
-    app.add_plugins((MinimalPlugins, InputPlugin, StatesPlugin))
-        .init_state::<AppState>()
-        .insert_state(AppState::Lobby)
-        .insert_resource(room.clone())
+    let mut app = common::lobby_app();
+    app.insert_resource(room.clone())
         .insert_resource(Signaling(format!("ws://127.0.0.1:{port}")))
-        .init_resource::<Session>()
-        .init_resource::<Table>()
-        .init_resource::<SelectedCorner>()
-        .init_resource::<ChosenVariants>()
-        .init_resource::<NetState>()
-        .init_resource::<checkers_bevy::lobby::LobbyStatus>()
-        .init_resource::<checkers_bevy::lobby::PendingClaim>()
         .add_systems(OnEnter(AppState::Lobby), checkers_net::open_socket)
         .add_systems(
             Update,
@@ -110,22 +99,48 @@ fn instance(name: &str, room: &RoomId, port: u16) -> App {
         .add_systems(
             Update,
             (
-                checkers_bevy::lobby::elect_host,
-                checkers_bevy::lobby::pump_socket,
-                checkers_bevy::lobby::settle_name_clash,
-                checkers_bevy::lobby::select_corner,
-                checkers_bevy::lobby::handle_buttons,
+                lobby::elect_host,
+                lobby::pump_socket,
+                lobby::settle_name_clash,
+                lobby::select_corner,
+                lobby::handle_buttons,
             )
                 .chain()
                 .run_if(in_state(AppState::Lobby)),
         )
-        .add_systems(OnEnter(AppState::InGame), checkers_bevy::lobby::apply_seats);
+        .add_systems(OnEnter(AppState::InGame), lobby::apply_seats);
     app.world_mut().resource_mut::<NetState>().name = name.into();
     app
 }
 
-fn net(app: &App) -> &NetState {
-    app.world().resource::<NetState>()
+/// Start a signaling server and put one instance per name into a fresh room,
+/// waiting until each sees all the others and one of them is the host.
+fn connect(label: &str, names: &[&str]) -> Vec<App> {
+    let port = start_signaling_server();
+    let room = fresh_room(label);
+    println!(
+        "[server] full-mesh signaling on ws://127.0.0.1:{port}/{}",
+        room.0
+    );
+    let mut apps: Vec<App> = names
+        .iter()
+        .map(|name| instance(name, &room, port))
+        .collect();
+    let others = apps.len() - 1;
+    wait_for(
+        &mut apps,
+        Duration::from_secs(45),
+        &format!("the {} instances never saw each other", names.len()),
+        |apps| {
+            apps.iter().all(|a| net(a).peers.len() == others) && apps.iter().any(|a| net(a).is_host)
+        },
+    );
+    apps
+}
+
+/// Which instance won the election.
+fn host_index(apps: &[App]) -> usize {
+    apps.iter().position(|a| net(a).is_host).expect("a host")
 }
 
 /// The corners a roster actually seats, sorted — the amount every peer must
@@ -137,14 +152,40 @@ fn roster_players(net: &NetState) -> Vec<u32> {
     corners
 }
 
+/// Wait until every instance sees exactly the same roster.
+fn wait_greeted(apps: &mut [App]) {
+    wait_for(
+        apps,
+        Duration::from_secs(30),
+        "the greetings never settled",
+        |apps| {
+            let first = &net(&apps[0]).seats;
+            apps.iter().all(|a| &net(a).seats == first)
+        },
+    );
+}
+
 /// Wait until every instance's roster carries exactly these players. Unlike
 /// plain agreement — which is true the moment two empty rosters match — this
 /// waits for the *configured* outcome, so a claim broadcast this frame has
-/// time to round-trip through the host and back before the assertion runs.
-fn wait_players(apps: &mut [App], expected: &[u32], timeout: Duration) -> bool {
-    wait_for(apps, timeout, |apps| {
-        apps.iter().all(|a| roster_players(net(a)) == expected)
-    })
+/// time to round-trip through the host and back.
+fn wait_players(apps: &mut [App], expected: &[u32], what: &str) {
+    wait_for(
+        apps,
+        Duration::from_secs(30),
+        &format!("{what} on corners {expected:?}"),
+        |apps| apps.iter().all(|a| roster_players(net(a)) == expected),
+    );
+}
+
+/// The host presses Enter, and every instance must enter a fresh round: in
+/// the game, and not still on the game-over card of the last one.
+fn start(apps: &mut [App], host_i: usize, what: &str) {
+    press(&mut apps[host_i], KeyCode::Enter);
+    wait_for(apps, Duration::from_secs(30), what, |apps| {
+        apps.iter()
+            .all(|a| in_game(a) && !session(a).game.is_over())
+    });
 }
 
 /// A compact, readable rendering of a roster for the logs.
@@ -165,20 +206,16 @@ fn fmt_roster(net: &NetState) -> String {
     format!("[{}]", seats)
 }
 
-/// Pump every instance while `ok` is false, until `ok` or the deadline.
+/// Pump every instance until `ok`, failing with `what` and every instance's
+/// state if the deadline comes first.
 ///
 /// The only source of timing in these tests: WebRTC handshakes and message
 /// delivery are real and asynchronous, so a scenario is a sequence of
 /// *wait for condition*, each holding until it is actually true.
-fn wait_for(apps: &mut [App], timeout: Duration, mut ok: impl FnMut(&[App]) -> bool) -> bool {
+fn wait_for(apps: &mut [App], timeout: Duration, what: &str, mut ok: impl FnMut(&[App]) -> bool) {
     let deadline = Instant::now() + timeout;
-    loop {
-        if ok(apps) {
-            return true;
-        }
-        if Instant::now() >= deadline {
-            return false;
-        }
+    while !ok(apps) {
+        assert!(Instant::now() < deadline, "{what}: {}", describe(apps));
         for app in apps.iter_mut() {
             app.update();
         }
@@ -192,110 +229,35 @@ fn describe(apps: &[App]) -> String {
     apps.iter()
         .map(|a| {
             let n = net(a);
-            let state = app_state(a);
-            let status = &a.world().resource::<checkers_bevy::lobby::LobbyStatus>().0;
             format!(
-                "{}: peers={} host={} seats={} players={:?} state={} status={status}",
+                "{}: peers={} host={} seats={} players={:?} state={:?} status={}",
                 n.name,
                 n.peers.len(),
                 n.is_host,
                 fmt_roster(n),
                 roster_players(n),
-                state,
+                state(a),
+                status(a),
             )
         })
         .collect::<Vec<_>>()
         .join(" | ")
 }
 
-fn app_state(app: &App) -> &'static str {
-    match *app
-        .world()
-        .resource::<bevy::state::state::State<AppState>>()
-        .get()
-    {
-        AppState::Lobby => "lobby",
-        AppState::InGame => "ingame",
-    }
-}
-
-fn log(line: &str) {
-    println!("{line}");
-}
-
-fn digit_key(corner: usize) -> KeyCode {
-    match corner {
-        0 => KeyCode::Digit1,
-        1 => KeyCode::Digit2,
-        2 => KeyCode::Digit3,
-        3 => KeyCode::Digit4,
-        4 => KeyCode::Digit5,
-        _ => KeyCode::Digit6,
-    }
-}
-
-/// Press a key the way the window does: by sending a [`KeyboardInput`] message
-/// (down, a frame, up). Exactly the helper `lobby_flow` uses — not
-/// `ButtonInput::press`, which `InputPlugin` wipes before the update systems
-/// see it.
-fn press(app: &mut App, key: KeyCode) {
-    app.world_mut().write_message(KeyboardInput {
-        key_code: key,
-        logical_key: Key::Character("x".into()),
-        state: ButtonState::Pressed,
-        text: None,
-        repeat: false,
-        window: Entity::PLACEHOLDER,
-    });
-    app.update();
-    app.world_mut().write_message(KeyboardInput {
-        key_code: key,
-        logical_key: Key::Character("x".into()),
-        state: ButtonState::Released,
-        text: None,
-        repeat: false,
-        window: Entity::PLACEHOLDER,
-    });
-}
-
-fn spawn_button(app: &mut App, tag: LobbyButton) -> Entity {
-    app.world_mut().spawn((Button, Interaction::None, tag)).id()
-}
-
-fn press_button(app: &mut App, button: Entity) {
-    app.world_mut()
-        .entity_mut(button)
-        .insert(Interaction::Pressed);
-    app.update();
-    app.world_mut().entity_mut(button).insert(Interaction::None);
-}
-
-/// Issue a corner command to one instance: select the corner with its digit
-/// key, then press the Human / Computer / Off button.
-fn choose(app: &mut App, command: CornerCommand, corner: usize) {
-    press(app, digit_key(corner));
-    let button = spawn_button(app, LobbyButton::CornerAction(command));
-    press_button(app, button);
-}
-
-/// Wait until every instance sees exactly the same roster.
-fn wait_roster_agreement(apps: &mut [App], timeout: Duration) -> bool {
-    wait_for(apps, timeout, |apps| {
-        let first = &net(&apps[0]).seats;
-        apps.iter().all(|a| &net(a).seats == first)
-    })
-}
-
-/// Wait until every instance has entered the game.
-fn wait_in_game(apps: &mut [App], timeout: Duration) -> bool {
-    wait_for(apps, timeout, |apps| apps.iter().all(in_game))
-}
-
 fn in_game(app: &App) -> bool {
-    app.world()
-        .resource::<bevy::state::state::State<AppState>>()
-        .get()
-        == &AppState::InGame
+    state(app) == AppState::InGame
+}
+
+/// Every instance dealt exactly these corners.
+fn assert_dealt(apps: &[App], corners: &[usize]) {
+    let players: Vec<Player> = corners.iter().map(|&c| Player::ALL[c]).collect();
+    for (i, app) in apps.iter().enumerate() {
+        assert_eq!(
+            session(app).players,
+            players,
+            "instance {i} dealt the wrong corners"
+        );
+    }
 }
 
 /// Two instances: the host is the configurator (sets an engine, claims its own
@@ -307,100 +269,50 @@ fn in_game(app: &App) -> bool {
 #[test]
 #[ignore = "runs live WebRTC peers on an in-process signaling server"]
 fn two_instances_share_one_engine_table() {
-    let port = start_signaling_server();
-    let room = fresh_room("pair");
-    let mut apps = vec![instance("A", &room, port), instance("B", &room, port)];
-    log(&format!(
-        "[server] full-mesh signaling on ws://127.0.0.1:{port}/{}",
-        room.0
-    ));
-
-    let connected = wait_for(&mut apps, Duration::from_secs(45), |apps| {
-        apps.iter().all(|a| net(a).peers.len() == 1) && apps.iter().any(|a| net(a).is_host)
-    });
-    assert!(
-        connected,
-        "the two instances never saw each other: {}",
-        describe(&apps)
-    );
+    let mut apps = connect("pair", &["A", "B"]);
 
     // Greetings first: every instance must have its seat before it can claim a
     // corner for it, so nothing is configured until the empty baseline roster
     // is agreed everywhere.
-    let greeted = wait_roster_agreement(&mut apps, Duration::from_secs(30));
-    assert!(
-        greeted,
-        "the greetings never settled before configuring: {}",
-        describe(&apps)
-    );
+    wait_greeted(&mut apps);
 
-    let host_i = apps.iter().position(|a| net(a).is_host).expect("a host");
+    let host_i = host_index(&apps);
     let guest_i = 1 - host_i;
-    let (host_name, guest_name) = (
-        net(&apps[host_i]).name.clone(),
-        net(&apps[guest_i]).name.clone(),
+    let host_name = net(&apps[host_i]).name.clone();
+    let guest_name = net(&apps[guest_i]).name.clone();
+    println!(
+        "[{host_name}] won the election; {guest_name} is the guest. The host configures the room, the guest logs its own setup and what it sees."
     );
-    log(&format!(
-        "[{}] won the election; {} is the guest. The host configures the room, the guest logs its own setup and what it sees.",
-        host_name, guest_name
-    ));
 
     // The host-configured scenario: the foreign-camp house rule on, an engine
     // at corner 0, a human claim at corner 1.
-    let host_app = &mut apps[host_i];
-    log(&format!(
-        "[{host_name}] configures: house rule on (F), corner 1 human, corner 0 engine"
-    ));
-    press(host_app, KeyCode::KeyF);
-    choose(host_app, CornerCommand::Human, 1);
-    choose(host_app, CornerCommand::Cpu, 0);
+    println!("[{host_name}] configures: house rule on (F), corner 1 human, corner 0 engine");
+    press(&mut apps[host_i], KeyCode::KeyF);
+    choose(&mut apps[host_i], CornerCommand::Human, 1);
+    choose(&mut apps[host_i], CornerCommand::Cpu, 0);
 
     // The guest's own setup: it claims corner 4, then logs what the host's
     // configuration looks like over the wire.
-    let guest_app = &mut apps[guest_i];
-    log(&format!("[{guest_name}] sets up itself: corner 4 human"));
-    choose(guest_app, CornerCommand::Human, 4);
+    println!("[{guest_name}] sets up itself: corner 4 human");
+    choose(&mut apps[guest_i], CornerCommand::Human, 4);
 
-    let expected = vec![0, 1, 4];
-    let configured = wait_players(&mut apps, &expected, Duration::from_secs(30));
-    assert!(
-        configured,
-        "the configured table never settled on corners {expected:?}: {}",
-        describe(&apps)
-    );
-    assert!(
-        apps.iter().all(|a| roster_players(net(a)) == expected),
-        "everyone must agree on corners {expected:?}: {}",
-        describe(&apps)
-    );
-    log(&format!(
-        "[{}] after the host's setup I see the roster {}",
-        guest_name,
+    wait_players(&mut apps, &[0, 1, 4], "the configured table never settled");
+    println!(
+        "[{guest_name}] after the host's setup I see the roster {}",
         fmt_roster(net(&apps[guest_i]))
-    ));
+    );
 
     // The host just starts; readiness is not part of the setup any more.
-    press(&mut apps[host_i], KeyCode::Enter);
+    start(&mut apps, host_i, "the game never started everywhere");
+    println!("[{host_name}] started the game; everyone is in.");
 
-    let started = wait_in_game(&mut apps, Duration::from_secs(30));
-    assert!(
-        started,
-        "the game never started everywhere: {}",
-        describe(&apps)
-    );
-    log(&format!("[{host_name}] started the game; everyone is in."));
-
-    let host_session = apps[host_i].world().resource::<Session>();
-    let guest_session = apps[guest_i].world().resource::<Session>();
-    let all_players = [Player::ALL[0], Player::ALL[1], Player::ALL[4]];
-    for (i, app) in apps.iter().enumerate() {
-        let session = app.world().resource::<Session>();
-        assert_eq!(session.players, all_players, "instance {i} dealt wrong");
-    }
-    assert_eq!(host_session.ai_players, vec![Player::ALL[0]]);
-    assert_eq!(guest_session.ai_players, Vec::<Player>::new());
-    assert_eq!(host_session.local_player(), Some(Player::ALL[1]));
-    assert_eq!(guest_session.local_player(), Some(Player::ALL[4]));
+    assert_dealt(&apps, &[0, 1, 4]);
+    let host = session(&apps[host_i]);
+    let guest = session(&apps[guest_i]);
+    assert_eq!(host.ai_players, vec![Player::ALL[0]]);
+    assert_eq!(guest.ai_players, Vec::<Player>::new());
+    assert_eq!(host.local_player(), Some(Player::ALL[1]));
+    assert_eq!(guest.local_player(), Some(Player::ALL[4]));
 
     // The foreign-camp rule toggled by the host must have crossed the wire in
     // the Start: every peer now plays under the host's switch.
@@ -413,16 +325,16 @@ fn two_instances_share_one_engine_table() {
             "the host's rule must reach every peer"
         );
     }
-    log(&format!(
+    println!(
         "[{host_name}] dealt {}, I play player 1",
-        session_text(host_session)
-    ));
-    log(&format!(
+        session_text(host)
+    );
+    println!(
         "[{guest_name}] dealt {}, I play player 4",
-        session_text(guest_session)
-    ));
-    log(
-        "PASS: two instances share one engine table; the guest logged exactly what the host set up.",
+        session_text(guest)
+    );
+    println!(
+        "PASS: two instances share one engine table; the guest logged exactly what the host set up."
     );
 }
 
@@ -433,152 +345,65 @@ fn two_instances_share_one_engine_table() {
 #[test]
 #[ignore = "runs live WebRTC peers on an in-process signaling server"]
 fn three_instances_criss_cross() {
-    let port = start_signaling_server();
-    let room = fresh_room("triple");
-    let mut apps = vec![
-        instance("A", &room, port),
-        instance("B", &room, port),
-        instance("C", &room, port),
-    ];
-
-    let connected = wait_for(&mut apps, Duration::from_secs(45), |apps| {
-        apps.iter().all(|a| net(a).peers.len() == 2) && apps.iter().any(|a| net(a).is_host)
-    });
-    assert!(
-        connected,
-        "the three instances never saw each other: {}",
-        describe(&apps)
-    );
-    let greeted = wait_roster_agreement(&mut apps, Duration::from_secs(30));
-    assert!(
-        greeted,
-        "the greetings never settled before configuring: {}",
-        describe(&apps)
-    );
-    let host_i = apps.iter().position(|a| net(a).is_host).expect("a host");
-    log(&format!(
-        "[{}] won the election among three.",
-        net(&apps[host_i]).name
-    ));
+    let mut apps = connect("triple", &["A", "B", "C"]);
+    wait_greeted(&mut apps);
+    let host_i = host_index(&apps);
+    let host_name = net(&apps[host_i]).name.clone();
+    println!("[{host_name}] won the election among three.");
 
     // The host sets its own camp and seats the engine.
-    let host_name = net(&apps[host_i]).name.clone();
     choose(&mut apps[host_i], CornerCommand::Human, 5);
     choose(&mut apps[host_i], CornerCommand::Cpu, 0);
-    log(&format!(
-        "[{host_name}] configured: corner 5 human, corner 0 engine"
-    ));
+    println!("[{host_name}] configured: corner 5 human, corner 0 engine");
 
     // The two guests each claim a different corner; the smaller peer id goes
     // first so the test knows who should end up where.
     let mut guests: Vec<usize> = (0..apps.len()).filter(|&i| i != host_i).collect();
     guests.sort_by_key(|&i| net(&apps[i]).my_id.map(|id| id.to_string()));
-    let corners: [u32; 2] = [4, 1];
-    let claimed: Vec<u32> = guests
-        .iter()
-        .zip(corners)
-        .map(|(guest_i, corner)| {
-            let name = net(&apps[*guest_i]).name.clone();
-            choose(&mut apps[*guest_i], CornerCommand::Human, corner as usize);
-            log(&format!(
-                "[{name}] configured itself: corner {corner} human"
-            ));
-            corner
-        })
-        .collect();
+    let corners = [4, 1];
+    for (&guest_i, corner) in guests.iter().zip(corners) {
+        choose(&mut apps[guest_i], CornerCommand::Human, corner);
+        let name = &net(&apps[guest_i]).name;
+        println!("[{name}] configured itself: corner {corner} human");
+    }
 
-    let expected = vec![0, 1, 4, 5];
-    let configured = wait_players(&mut apps, &expected, Duration::from_secs(30));
-    assert!(
-        configured,
-        "the configured table never settled on corners {expected:?}: {}",
-        describe(&apps)
-    );
-    assert!(
-        apps.iter().all(|a| roster_players(net(a)) == expected),
-        "everyone must agree on corners {expected:?}: {}",
-        describe(&apps)
+    wait_players(
+        &mut apps,
+        &[0, 1, 4, 5],
+        "the configured table never settled",
     );
     let engine_seats: usize = net(&apps[0]).seats.iter().filter(|s| s.engine).count();
     assert_eq!(engine_seats, 1, "exactly one engine, seated by the host");
 
-    let host_name = net(&apps[host_i]).name.clone();
-    log(&format!("[{host_name}] starting."));
-    press(&mut apps[host_i], KeyCode::Enter);
+    println!("[{host_name}] starting.");
+    start(&mut apps, host_i, "the game never started everywhere");
+    assert_dealt(&apps, &[0, 1, 4, 5]);
 
-    let started = wait_in_game(&mut apps, Duration::from_secs(30));
-    assert!(
-        started,
-        "the game never started everywhere: {}",
-        describe(&apps)
-    );
-
-    let all_players = [
-        Player::ALL[0],
-        Player::ALL[1],
-        Player::ALL[4],
-        Player::ALL[5],
-    ];
-    for (i, app) in apps.iter().enumerate() {
-        let session = app.world().resource::<Session>();
-        assert_eq!(session.players, all_players, "instance {i} dealt wrong");
-    }
     // The criss-cross landed where the claims went: every human camp has one
     // driver, the engine camp is driven by the host alone.
-    let host_session = apps[host_i].world().resource::<Session>();
-    let host_locals = (host_session.local_player(), host_session.ai_players.clone());
-    let mut guest_locals: Vec<(String, Option<Player>)> = guests
-        .iter()
-        .map(|&i| {
-            let app = &apps[i];
-            (
-                net(app).name.clone(),
-                app.world().resource::<Session>().local_player(),
-            )
-        })
-        .collect();
-    guest_locals.sort_by(|a, b| a.0.cmp(&b.0));
-
-    assert_eq!(host_locals.0, Some(Player::ALL[5]));
-    assert_eq!(host_locals.1, vec![Player::ALL[0]]);
-    for (i, app) in apps.iter().enumerate() {
-        if i != host_i {
-            assert!(
-                app.world().resource::<Session>().ai_players.is_empty(),
-                "only the host runs the engine"
-            );
-        }
-    }
+    let host = session(&apps[host_i]);
+    assert_eq!(host.local_player(), Some(Player::ALL[5]));
+    assert_eq!(host.ai_players, vec![Player::ALL[0]]);
+    println!(
+        "[{host_name}] dealt {}, I play player 5, engine drives player 0",
+        session_text(host)
+    );
     // Each guest ended driving the corner it claimed.
-    for (&guest_i, corner) in guests.iter().zip(&claimed) {
-        let local = apps[guest_i].world().resource::<Session>().local_player();
+    for (&guest_i, corner) in guests.iter().zip(corners) {
+        let name = &net(&apps[guest_i]).name;
+        let guest = session(&apps[guest_i]);
+        assert!(guest.ai_players.is_empty(), "only the host runs the engine");
         assert_eq!(
-            local,
-            Some(Player::ALL[*corner as usize]),
-            "guest {} must drive its own claim at corner {corner}",
-            net(&apps[guest_i]).name
+            guest.local_player(),
+            Some(Player::ALL[corner]),
+            "guest {name} must drive its own claim at corner {corner}"
+        );
+        println!(
+            "[{name}] dealt {}, I play player {corner}",
+            session_text(guest)
         );
     }
-    log(&format!(
-        "[{}] dealt {}, I play player 5, engine drives player 0",
-        host_name,
-        session_text(host_session)
-    ));
-    for (name, local) in &guest_locals {
-        let player = local.expect("a guest must drive its claim");
-        log(&format!(
-            "[{name}] dealt {}, I play player {}",
-            session_text(
-                apps.iter()
-                    .find(|a| net(a).name == *name)
-                    .expect("back to the app")
-                    .world()
-                    .resource::<Session>()
-            ),
-            u32::from(player.index())
-        ));
-    }
-    log("PASS: three instances criss-cross; each drives its own camp of one shared game.");
+    println!("PASS: three instances criss-cross; each drives its own camp of one shared game.");
 }
 
 /// Three instances again, but one takes no camp: the observer watches. The
@@ -587,47 +412,22 @@ fn three_instances_criss_cross() {
 #[test]
 #[ignore = "runs live WebRTC peers on an in-process signaling server"]
 fn a_spectator_watches_the_pair() {
-    let port = start_signaling_server();
-    let room = fresh_room("watch");
-    let mut apps = vec![
-        instance("A", &room, port),
-        instance("B", &room, port),
-        instance("C", &room, port),
-    ];
-
-    let connected = wait_for(&mut apps, Duration::from_secs(45), |apps| {
-        apps.iter().all(|a| net(a).peers.len() == 2) && apps.iter().any(|a| net(a).is_host)
-    });
-    assert!(
-        connected,
-        "the three instances never saw each other: {}",
-        describe(&apps)
-    );
-    let greeted = wait_roster_agreement(&mut apps, Duration::from_secs(30));
-    assert!(
-        greeted,
-        "the greetings never settled before configuring: {}",
-        describe(&apps)
-    );
-    let host_i = apps.iter().position(|a| net(a).is_host).expect("a host");
+    let mut apps = connect("watch", &["A", "B", "C"]);
+    wait_greeted(&mut apps);
+    let host_i = host_index(&apps);
     // The spectator is the peer with the largest id, which can never also be
     // the host (the host is the smallest id), so the election cannot fold a
     // watcher into the active pair. Whichever physical instance that is.
-    let spectator_i = apps
-        .iter()
-        .enumerate()
-        .max_by_key(|(_, a)| net(a).my_id.map(|id| id.to_string()))
-        .expect("three instances")
-        .0;
-    let spectator_name = net(&apps[spectator_i]).name.clone();
-    let active: Vec<usize> = (0..apps.len()).filter(|&i| i != spectator_i).collect();
-    debug_assert!(active.contains(&host_i), "the host is one of the players");
-    let player_i = *active
-        .iter()
-        .find(|&&i| i != host_i)
+    let spectator_i = (0..apps.len())
+        .max_by_key(|&i| net(&apps[i]).my_id.map(|id| id.to_string()))
+        .expect("three instances");
+    debug_assert_ne!(spectator_i, host_i, "the host is one of the players");
+    let player_i = (0..apps.len())
+        .find(|&i| i != spectator_i && i != host_i)
         .expect("two active peers");
     let host_name = net(&apps[host_i]).name.clone();
     let player_name = net(&apps[player_i]).name.clone();
+    let spectator_name = net(&apps[spectator_i]).name.clone();
 
     // The host seats the engine on its own corner and claims it; the other
     // active peer claims its corner. The spectator configures and readies
@@ -635,38 +435,15 @@ fn a_spectator_watches_the_pair() {
     choose(&mut apps[host_i], CornerCommand::Human, 2);
     choose(&mut apps[host_i], CornerCommand::Cpu, 0);
     choose(&mut apps[player_i], CornerCommand::Human, 4);
-    log(&format!(
+    println!(
         "[{host_name}] configures: corner 2 human, corner 0 engine; [{player_name}] claims corner 4; [{spectator_name}] watches."
-    ));
-
-    let expected = vec![0, 2, 4];
-    let configured = wait_players(&mut apps, &expected, Duration::from_secs(30));
-    assert!(
-        configured,
-        "the configured table never settled on corners {expected:?}: {}",
-        describe(&apps)
-    );
-    assert!(
-        apps.iter().all(|a| roster_players(net(a)) == expected),
-        "everyone must agree on corners {expected:?}: {}",
-        describe(&apps)
     );
 
-    press(&mut apps[host_i], KeyCode::Enter);
+    wait_players(&mut apps, &[0, 2, 4], "the configured table never settled");
+    start(&mut apps, host_i, "the game never started everywhere");
+    assert_dealt(&apps, &[0, 2, 4]);
 
-    let started = wait_in_game(&mut apps, Duration::from_secs(30));
-    assert!(
-        started,
-        "the game never started everywhere: {}",
-        describe(&apps)
-    );
-
-    let all_players = [Player::ALL[0], Player::ALL[2], Player::ALL[4]];
-    for (i, app) in apps.iter().enumerate() {
-        let session = app.world().resource::<Session>();
-        assert_eq!(session.players, all_players, "instance {i} dealt wrong");
-    }
-    let watcher = apps[spectator_i].world().resource::<Session>();
+    let watcher = session(&apps[spectator_i]);
     assert_eq!(
         watcher.local_player(),
         None,
@@ -676,11 +453,11 @@ fn a_spectator_watches_the_pair() {
         watcher.spectating,
         "the observer must know it is only watching"
     );
-    log(&format!(
+    println!(
         "[{spectator_name}] dealt {} and spectates; nobody commands me, I watch the pair.",
         session_text(watcher)
-    ));
-    log("PASS: a spectator observes the pair and receives the same game.");
+    );
+    println!("PASS: a spectator observes the pair and receives the same game.");
 }
 
 /// This instance's own id, as its socket reports it.
@@ -691,12 +468,6 @@ fn socket_id(app: &mut App) -> Option<PeerId> {
 /// End the round in one instance, as a win, a draw or an abandonment would.
 fn finish_round(app: &mut App) {
     app.world_mut().resource_mut::<Session>().game.abandon();
-}
-
-fn back_to_lobby(app: &mut App) {
-    app.world_mut()
-        .resource_mut::<NextState<AppState>>()
-        .set(AppState::Lobby);
 }
 
 /// A finished round rematches over the socket it was played on.
@@ -710,51 +481,30 @@ fn back_to_lobby(app: &mut App) {
 #[test]
 #[ignore = "runs live WebRTC peers on an in-process signaling server"]
 fn a_finished_round_rematches_over_the_same_socket() {
-    let port = start_signaling_server();
-    let room = fresh_room("rematch");
-    let mut apps = vec![instance("A", &room, port), instance("B", &room, port)];
-
-    let connected = wait_for(&mut apps, Duration::from_secs(45), |apps| {
-        apps.iter().all(|a| net(a).peers.len() == 1) && apps.iter().any(|a| net(a).is_host)
-    });
-    assert!(connected, "never connected: {}", describe(&apps));
-    assert!(
-        wait_roster_agreement(&mut apps, Duration::from_secs(30)),
-        "the greetings never settled: {}",
-        describe(&apps)
-    );
-    let host_i = apps.iter().position(|a| net(a).is_host).expect("a host");
+    let mut apps = connect("rematch", &["A", "B"]);
+    wait_greeted(&mut apps);
+    let host_i = host_index(&apps);
     let guest_i = 1 - host_i;
 
     choose(&mut apps[host_i], CornerCommand::Human, 0);
     choose(&mut apps[guest_i], CornerCommand::Human, 3);
-    assert!(
-        wait_players(&mut apps, &[0, 3], Duration::from_secs(30)),
-        "the claims never settled: {}",
-        describe(&apps)
-    );
-    press(&mut apps[host_i], KeyCode::Enter);
-    assert!(
-        wait_in_game(&mut apps, Duration::from_secs(30)),
-        "the first round never started: {}",
-        describe(&apps)
-    );
+    wait_players(&mut apps, &[0, 3], "the claims never settled");
+    start(&mut apps, host_i, "the first round never started");
 
     let ids: Vec<Option<PeerId>> = apps.iter_mut().map(socket_id).collect();
     let peers: Vec<Vec<PeerId>> = apps.iter().map(|a| net(a).peers.clone()).collect();
-    log(&format!("[round 1] ids {ids:?}; both in the game"));
+    println!("[round 1] ids {ids:?}; both in the game");
 
     // Both finish and come back.
     for app in apps.iter_mut() {
         finish_round(app);
-        back_to_lobby(app);
+        set_state(app, AppState::Lobby);
     }
-    assert!(
-        wait_for(&mut apps, Duration::from_secs(10), |apps| apps
-            .iter()
-            .all(|a| !in_game(a))),
-        "never returned to the lobby: {}",
-        describe(&apps)
+    wait_for(
+        &mut apps,
+        Duration::from_secs(10),
+        "never returned to the lobby",
+        |apps| apps.iter().all(|a| !in_game(a)),
     );
     for (i, app) in apps.iter_mut().enumerate() {
         assert_eq!(socket_id(app), ids[i], "instance {i} opened a new socket");
@@ -767,45 +517,27 @@ fn a_finished_round_rematches_over_the_same_socket() {
         "the corners carry over into the rematch"
     );
 
-    press(&mut apps[host_i], KeyCode::Enter);
-    assert!(
-        wait_for(&mut apps, Duration::from_secs(30), |apps| apps.iter().all(
-            |a| in_game(a) && !a.world().resource::<Session>().game.is_over()
-        )),
-        "the rematch never started everywhere: {}",
-        describe(&apps)
-    );
-    log("[round 2] the rematch dealt on both peers");
+    start(&mut apps, host_i, "the rematch never started everywhere");
+    println!("[round 2] the rematch dealt on both peers");
 
     // The guest lingers on the game-over card; only the host goes back.
     for app in apps.iter_mut() {
         finish_round(app);
     }
-    back_to_lobby(&mut apps[host_i]);
-    assert!(
-        wait_for(&mut apps, Duration::from_secs(10), |apps| !in_game(
-            &apps[host_i]
-        )),
-        "the host never returned: {}",
-        describe(&apps)
+    set_state(&mut apps[host_i], AppState::Lobby);
+    wait_for(
+        &mut apps,
+        Duration::from_secs(10),
+        "the host never returned",
+        |apps| !in_game(&apps[host_i]),
     );
-    press(&mut apps[host_i], KeyCode::Enter);
-    assert!(
-        wait_for(&mut apps, Duration::from_secs(30), |apps| apps.iter().all(
-            |a| in_game(a) && !a.world().resource::<Session>().game.is_over()
-        )),
-        "the host's Start never pulled the lingering guest in: {}",
-        describe(&apps)
+    start(
+        &mut apps,
+        host_i,
+        "the host's Start never pulled the lingering guest in",
     );
-    for (i, app) in apps.iter().enumerate() {
-        let session = app.world().resource::<Session>();
-        assert_eq!(
-            session.players,
-            [Player::ALL[0], Player::ALL[3]],
-            "instance {i} dealt the wrong corners"
-        );
-    }
-    log("PASS: two rematches over one socket, one of them from the game-over card.");
+    assert_dealt(&apps, &[0, 3]);
+    println!("PASS: two rematches over one socket, one of them from the game-over card.");
 }
 
 /// A stalled engine-only race ends on every peer. Only the host drives the
@@ -818,35 +550,15 @@ fn an_abandoned_engine_race_ends_everywhere() {
     use bevy::ecs::system::RunSystemOnce;
     use checkers_core::rules::Outcome;
 
-    let port = start_signaling_server();
-    let room = fresh_room("abandon");
-    let mut apps = vec![instance("A", &room, port), instance("B", &room, port)];
-
-    let connected = wait_for(&mut apps, Duration::from_secs(45), |apps| {
-        apps.iter().all(|a| net(a).peers.len() == 1) && apps.iter().any(|a| net(a).is_host)
-    });
-    assert!(connected, "never connected: {}", describe(&apps));
-    assert!(
-        wait_roster_agreement(&mut apps, Duration::from_secs(30)),
-        "the greetings never settled: {}",
-        describe(&apps)
-    );
-    let host_i = apps.iter().position(|a| net(a).is_host).expect("a host");
+    let mut apps = connect("abandon", &["A", "B"]);
+    wait_greeted(&mut apps);
+    let host_i = host_index(&apps);
     let guest_i = 1 - host_i;
 
     choose(&mut apps[host_i], CornerCommand::Cpu, 0);
     choose(&mut apps[host_i], CornerCommand::Cpu, 3);
-    assert!(
-        wait_players(&mut apps, &[0, 3], Duration::from_secs(30)),
-        "the engines were never seated: {}",
-        describe(&apps)
-    );
-    press(&mut apps[host_i], KeyCode::Enter);
-    assert!(
-        wait_in_game(&mut apps, Duration::from_secs(30)),
-        "the race never started: {}",
-        describe(&apps)
-    );
+    wait_players(&mut apps, &[0, 3], "the engines were never seated");
+    start(&mut apps, host_i, "the race never started");
 
     // What the host's engine driver does when the stall detector trips.
     apps[host_i]
@@ -860,22 +572,13 @@ fn an_abandoned_engine_race_ends_everywhere() {
         )
         .expect("the abandonment runs");
 
-    let ended = wait_for(&mut apps, Duration::from_secs(10), |apps| {
-        apps[guest_i].world().resource::<Session>().game.outcome() == Some(Outcome::Abandoned)
-    });
-    assert!(
-        ended,
-        "the guest never learned the race was abandoned: {}",
-        describe(&apps)
+    wait_for(
+        &mut apps,
+        Duration::from_secs(10),
+        "the guest never learned the race was abandoned",
+        |apps| session(&apps[guest_i]).game.outcome() == Some(Outcome::Abandoned),
     );
-    log("PASS: the host's abandonment ended the round on the guest too.");
-}
-
-fn status(app: &App) -> String {
-    app.world()
-        .resource::<checkers_bevy::lobby::LobbyStatus>()
-        .0
-        .clone()
+    println!("PASS: the host's abandonment ended the round on the guest too.");
 }
 
 /// Two instances that drew the same name end up with two names, the host
@@ -884,57 +587,41 @@ fn status(app: &App) -> String {
 #[test]
 #[ignore = "runs live WebRTC peers on an in-process signaling server"]
 fn a_shared_name_is_settled_and_a_claim_answered() {
-    let port = start_signaling_server();
-    let room = fresh_room("clash");
-    let mut apps = vec![
-        instance("gecko", &room, port),
-        instance("gecko", &room, port),
-    ];
-
-    let connected = wait_for(&mut apps, Duration::from_secs(45), |apps| {
-        apps.iter().all(|a| net(a).peers.len() == 1) && apps.iter().any(|a| net(a).is_host)
-    });
-    assert!(connected, "never connected: {}", describe(&apps));
-    let host_i = apps.iter().position(|a| net(a).is_host).expect("a host");
+    let mut apps = connect("clash", &["gecko", "gecko"]);
+    let host_i = host_index(&apps);
     let guest_i = 1 - host_i;
 
-    let settled = wait_for(&mut apps, Duration::from_secs(30), |apps| {
-        let names: Vec<Vec<&str>> = apps
-            .iter()
-            .map(|a| {
-                let mut n: Vec<&str> = net(a).seats.iter().map(|s| s.name.as_str()).collect();
-                n.sort_unstable();
-                n
-            })
-            .collect();
-        names[0].len() == 2 && names[0][0] != names[0][1] && names[0] == names[1]
-    });
-    assert!(settled, "the clash was never settled: {}", describe(&apps));
+    wait_for(
+        &mut apps,
+        Duration::from_secs(30),
+        "the clash was never settled",
+        |apps| {
+            let names: Vec<Vec<&str>> = apps
+                .iter()
+                .map(|a| {
+                    let mut n: Vec<&str> = net(a).seats.iter().map(|s| s.name.as_str()).collect();
+                    n.sort_unstable();
+                    n
+                })
+                .collect();
+            names[0].len() == 2 && names[0][0] != names[0][1] && names[0] == names[1]
+        },
+    );
     assert_eq!(net(&apps[host_i]).name, "gecko", "the host keeps its name");
     assert_ne!(net(&apps[guest_i]).name, "gecko", "the guest gives way");
-    log(&format!(
-        "[clash] the guest is now {}",
-        net(&apps[guest_i]).name
-    ));
+    println!("[clash] the guest is now {}", net(&apps[guest_i]).name);
 
     choose(&mut apps[guest_i], CornerCommand::Human, 3);
-    let answered = wait_for(&mut apps, Duration::from_secs(30), |apps| {
-        status(&apps[guest_i]) == "You hold corner 3."
-    });
-    assert!(
-        answered,
-        "the claim was never answered: status {:?}, {}",
-        status(&apps[guest_i]),
-        describe(&apps)
+    wait_for(
+        &mut apps,
+        Duration::from_secs(30),
+        "the claim was never answered",
+        |apps| status(&apps[guest_i]) == "You hold corner 3.",
     );
-    log("PASS: the name clash was settled and the guest's claim answered.");
+    println!("PASS: the name clash was settled and the guest's claim answered.");
 }
 
 fn session_text(session: &Session) -> String {
-    let players: Vec<u32> = session
-        .players
-        .iter()
-        .map(|p| u32::from(p.index()))
-        .collect();
+    let players: Vec<u8> = session.players.iter().map(|p| p.index()).collect();
     format!("players {players:?}")
 }
