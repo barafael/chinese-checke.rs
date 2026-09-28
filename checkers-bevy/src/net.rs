@@ -9,10 +9,11 @@
 use bevy::prelude::*;
 use bevy_matchbox::prelude::*;
 use checkers_core::position::{Move, Player};
+use checkers_core::rules::Outcome;
 use checkers_net::{CH_RELIABLE, NetMsg, NetState, WireMove, broadcast, decode, send_to};
 
 use crate::lobby::{ChosenVariants, accept_start};
-use crate::{AppState, Session, audit};
+use crate::{AppState, Selection, Session, audit};
 
 /// Fold the socket's peer changes into [`NetState`]: connected peers are
 /// added, disconnected ones dropped. Shared by the in-game pump and the
@@ -167,15 +168,26 @@ pub(crate) fn apply(net: &mut NetState, session: &mut Session, seq: u32, wire: W
         return;
     };
 
-    let mover = session.game.turn();
-    session.commit(&mv);
+    let name = session.roster_name(net, session.game.turn());
+    apply_resolved(session, &mv, name.unwrap_or_default(), Some(seq));
     net.last_applied_seq = Some(seq);
-    session.selection = crate::Selection::None;
-    log_move(
-        mover,
-        session.roster_name(net, mover).unwrap_or_default(),
-        &flown(session, &mv),
-        Some(seq),
+}
+
+/// Play a move the rules accepted, log it and settle the turn: the tail of
+/// both [`apply`] and [`apply_outbox_directly`]. `seq` is the host's sequence
+/// number in shared games; solo play has none. `name` is the roster's, empty
+/// in solo play. Players are numbered from 0, as the lobby, `moves.log` and
+/// the record number them.
+fn apply_resolved(session: &mut Session, mv: &Move, name: &str, seq: Option<u32>) {
+    let mover = session.game.turn();
+    session.commit(mv);
+    session.selection = Selection::None;
+    info!(
+        move_seq = seq,
+        player = mover.index(),
+        name = %name,
+        mv = %crate::move_log::describe(&flown(session, mv)),
+        "move applied",
     );
     after_turn(session);
 }
@@ -192,29 +204,12 @@ fn flown(session: &Session, mv: &Move) -> Move {
     }
 }
 
-/// A move was played. `seq` is the host's sequence number in shared games;
-/// solo play has none. `name` is the roster's, empty in solo play. Players
-/// are numbered from 0, as the lobby, `moves.log` and the record number them.
-fn log_move(mover: Player, name: &str, mv: &Move, seq: Option<u32>) {
-    info!(
-        move_seq = seq,
-        player = mover.index(),
-        name = %name,
-        mv = %crate::move_log::describe(mv),
-        "move applied",
-    );
-}
-
 /// No socket: apply straight away. Keeps the board playable rather than
 /// silently swallowing moves.
 pub(crate) fn apply_outbox_directly(session: &mut Session) {
     for mv in std::mem::take(&mut session.outbox) {
         if !session.game.is_over() && session.game.legal_moves().contains(&mv) {
-            let mover = session.game.turn();
-            session.commit(&mv);
-            session.selection = crate::Selection::None;
-            log_move(mover, "", &flown(session, &mv), None);
-            after_turn(session);
+            apply_resolved(session, &mv, "", None);
         }
     }
 }
@@ -263,7 +258,7 @@ pub fn abandon_round(session: &mut Session, socket: Option<&mut MatchboxSocket>,
 
 fn end_stalled(session: &mut Session) {
     session.game.abandon();
-    session.selection = crate::Selection::None;
+    session.selection = Selection::None;
     session.message = "Game abandoned: the race stalled".to_string();
     log_outcome(session.game.outcome().expect("abandoning sets an outcome"));
 }
@@ -271,18 +266,12 @@ fn end_stalled(session: &mut Session) {
 /// Log how the game ended. Called once from every path that ends the game —
 /// [`after_turn`] after the move or pass that did it, and at the two endings
 /// that skip it: a resignation and an engine abandonment.
-pub fn log_outcome(outcome: checkers_core::rules::Outcome) {
+pub fn log_outcome(outcome: Outcome) {
     match outcome {
-        checkers_core::rules::Outcome::Winner(p) => {
-            info!(player = p.index(), "game over: filled the target camp");
-        }
-        checkers_core::rules::Outcome::Resigned(p) => {
-            info!(player = p.index(), "game over: resigned");
-        }
-        checkers_core::rules::Outcome::Draw => info!("game over: draw - everyone is blocked"),
-        checkers_core::rules::Outcome::Abandoned => {
-            info!("game over: abandoned - the race stalled");
-        }
+        Outcome::Winner(p) => info!(player = p.index(), "game over: filled the target camp"),
+        Outcome::Resigned(p) => info!(player = p.index(), "game over: resigned"),
+        Outcome::Draw => info!("game over: draw - everyone is blocked"),
+        Outcome::Abandoned => info!("game over: abandoned - the race stalled"),
     }
 }
 
@@ -290,6 +279,7 @@ pub fn log_outcome(outcome: checkers_core::rules::Outcome) {
 mod tests {
     use super::*;
     use crate::setup::Seating;
+    use checkers_core::rules::{Game, Variants, two_hop_position};
 
     /// A move that reaches a finished game — sequenced by the host, or still
     /// in the local outbox — is dropped. The winner's pieces still have moves
@@ -313,16 +303,10 @@ mod tests {
     /// "jump (0,0) -> (4,0)" for a two-hop chain.
     #[test]
     fn a_wire_jump_is_logged_with_its_hops() {
-        let (position, origin) = checkers_core::rules::two_hop_position();
-        let mut session = Session::for_players(
-            &[Player::ALL[0], Player::ALL[1]],
-            checkers_core::rules::Variants::default(),
-        );
-        session.game = checkers_core::rules::Game::compose(
-            position,
-            Player::ALL[0],
-            &[Player::ALL[0], Player::ALL[1]],
-        );
+        let (position, origin) = two_hop_position();
+        let players = [Player::ALL[0], Player::ALL[1]];
+        let mut session = Session::for_players(&players, Variants::default());
+        session.game = Game::compose(position, players[0], &players);
         let wire = WireMove {
             origin: (origin.q, origin.r),
             destination: (origin.q + 4, origin.r),
