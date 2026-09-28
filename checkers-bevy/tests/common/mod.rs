@@ -1,5 +1,5 @@
-//! Helpers shared by the integration tests that drive the app headless: the
-//! app itself, and keys and buttons pressed the way the window presses them.
+//! Helpers shared by the integration tests: the app run headless, keys and
+//! buttons pressed the way the window presses them, and small fixtures.
 
 // Each file under `tests/` is its own crate and uses only part of this module.
 #![allow(dead_code)]
@@ -13,6 +13,8 @@ use checkers_bevy::lobby::{
     ChosenVariants, CornerCommand, LobbyButton, LobbyStatus, PendingClaim, SelectedCorner, Table,
 };
 use checkers_bevy::{AppState, Session};
+use checkers_core::geometry::Coord;
+use checkers_core::position::{Player, Position};
 use checkers_net::{NetState, Seat};
 
 /// An app with no window, no renderer and no socket: only the input and state
@@ -129,4 +131,16 @@ pub fn seat(peer: &str, name: &str, player: Option<u32>) -> Seat {
         player,
         engine: false,
     }
+}
+
+/// The first of `player`'s pieces that `destinations` offers anywhere to go,
+/// and the first hole it offers.
+pub fn first_offered(
+    pos: &Position,
+    player: Player,
+    destinations: fn(&Position, Coord) -> Vec<Coord>,
+) -> Option<(Coord, Coord)> {
+    pos.pieces_of(player)
+        .into_iter()
+        .find_map(|origin| Some((origin, *destinations(pos, origin).first()?)))
 }

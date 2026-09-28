@@ -6,10 +6,13 @@
 //! around them: which seat gives up, what happens to the staged state, and
 //! that a second resignation is inert.
 
+mod common;
+
 use checkers_bevy::setup::Seating;
 use checkers_bevy::{Selection, Session};
 use checkers_core::rules::Outcome;
 use checkers_core::turn::step_destinations;
+use common::first_offered;
 
 /// Hotseat resignation: every seat is local, so the seat to move gives up.
 #[test]
@@ -19,14 +22,8 @@ fn resigning_ends_the_round_and_clears_the_staged_state() {
 
     // Stage a step first, so the test proves resignation sweeps the staged
     // state rather than only ending an untouched turn.
-    let origin = session
-        .game
-        .position()
-        .pieces_of(player)
-        .into_iter()
-        .find(|c| !step_destinations(session.game.position(), *c).is_empty())
+    let (origin, dest) = first_offered(session.game.position(), player, step_destinations)
         .expect("the initial board offers steps");
-    let dest = step_destinations(session.game.position(), origin)[0];
     session.select(origin);
     session.activate(dest);
     assert!(matches!(session.selection, Selection::Pend { .. }));

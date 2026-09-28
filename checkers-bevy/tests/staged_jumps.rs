@@ -10,12 +10,15 @@
 //! calls is sound, and that the distinctions the UI draws — step vs. hop, commit
 //! vs. abandon — match the rules.
 
+mod common;
+
 use checkers_bevy::{Selection, Session};
 use checkers_core::audit::audit_position;
 use checkers_core::geometry::Coord;
 use checkers_core::position::{MoveKind, Player, Position};
 use checkers_core::rules::{Game, jump_destinations, legal_moves, two_hop_position};
 use checkers_core::turn::{CommitError, JumpTurn, single_hop_destinations, step_destinations};
+use common::first_offered;
 
 /// The premise of the whole interaction: one hop is offered, never the closure.
 #[test]
@@ -43,11 +46,7 @@ fn cancelling_leaves_the_game_untouched() {
     let before = game.position().clone();
     let player = game.turn();
 
-    let origin = game
-        .position()
-        .pieces_of(player)
-        .into_iter()
-        .find(|c| !single_hop_destinations(game.position(), *c).is_empty())
+    let (origin, _) = first_offered(game.position(), player, single_hop_destinations)
         .expect("the initial position has jumps");
 
     let mut turn = JumpTurn::begin(game.position(), player, origin).unwrap();
@@ -97,12 +96,8 @@ fn a_turn_returning_to_its_origin_is_refused_with_its_own_reason() {
 fn a_committed_chain_is_accepted_by_the_rules() {
     let mut game = Game::new();
     let player = game.turn();
-    let origin = game
-        .position()
-        .pieces_of(player)
-        .into_iter()
-        .find(|c| !single_hop_destinations(game.position(), *c).is_empty())
-        .unwrap();
+    let (origin, _) = first_offered(game.position(), player, single_hop_destinations)
+        .expect("the initial position has jumps");
 
     let mut turn = JumpTurn::begin(game.position(), player, origin).unwrap();
     let dest = turn.next_hops()[0];
@@ -197,16 +192,8 @@ fn a_step_is_staged_until_confirmed() {
 
     // Find a piece of the current player with at least one step destination
     // (adjacent hole) so the interaction is guaranteed to take the step path.
-    let (origin, dest) = {
-        let mut found = None;
-        for c in session.game.position().pieces_of(player) {
-            if let Some(d) = step_destinations(session.game.position(), c).first() {
-                found = Some((c, *d));
-                break;
-            }
-        }
-        found.expect("the initial board offers steps")
-    };
+    let (origin, dest) = first_offered(session.game.position(), player, step_destinations)
+        .expect("the initial board offers steps");
 
     session.select(origin);
     session.activate(dest);
@@ -256,14 +243,8 @@ fn a_hop_is_mutually_exclusive_with_a_staged_step() {
     let mut session = Session::default();
     let player = session.game.turn();
 
-    let origin = session
-        .game
-        .position()
-        .pieces_of(player)
-        .into_iter()
-        .find(|c| !single_hop_destinations(session.game.position(), *c).is_empty())
+    let (origin, hopped) = first_offered(session.game.position(), player, single_hop_destinations)
         .expect("the initial position has jumps");
-    let hopped = single_hop_destinations(session.game.position(), origin)[0];
 
     session.select(origin);
     session.activate(hopped);
