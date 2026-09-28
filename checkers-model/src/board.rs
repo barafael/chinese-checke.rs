@@ -47,20 +47,17 @@ impl Board {
 
     /// Build the star: hexagon plus the six rotations of `C_0` (§5).
     pub fn new() -> Self {
+        Self::from_base_camp(&Self::base_camp())
+    }
+
+    /// The hexagon plus the six rotations of an arbitrary `base` camp, so the
+    /// tests can build look-alike boards the same way.
+    fn from_base_camp(base: &HashSet<Coord>) -> Self {
         let hex = Self::central_hex();
-        let base = Self::base_camp();
-
-        let camps: [HashSet<Coord>; NUM_PLAYERS] = std::array::from_fn(|i| {
-            base.iter()
-                .map(|c| c.rotate60_n(i as u32))
-                .collect::<HashSet<_>>()
-        });
-
+        let camps: [HashSet<Coord>; NUM_PLAYERS] =
+            std::array::from_fn(|i| base.iter().map(|c| c.rotate60_n(i as u32)).collect());
         let mut holes = hex.clone();
-        for camp in &camps {
-            holes.extend(camp.iter().copied());
-        }
-
+        holes.extend(camps.iter().flatten());
         Self { holes, hex, camps }
     }
 
@@ -156,10 +153,8 @@ impl Board {
         };
 
         let min_off = self.holes().map(|c| 2 * c.q + c.r).min().unwrap_or(0);
-        let (min_r, max_r) = (
-            self.holes().map(|c| c.r).min().unwrap_or(0),
-            self.holes().map(|c| c.r).max().unwrap_or(0),
-        );
+        let min_r = self.holes().map(|c| c.r).min().unwrap_or(0);
+        let max_r = self.holes().map(|c| c.r).max().unwrap_or(0);
 
         let mut out = String::new();
         for r in min_r..=max_r {
@@ -219,29 +214,19 @@ mod tests {
     /// passes every cardinality check but is not a star.
     #[test]
     fn inward_camp_is_rejected() {
-        let hex = Board::central_hex();
         let inward: HashSet<Coord> = (5..=8)
             .flat_map(|q| (-q + 5..=0).map(move |r| Coord::new(q, r)))
             .collect();
+        let lookalike = Board::from_base_camp(&inward);
 
         // Cardinality checks all pass ...
         assert_eq!(inward.len(), CAMP_SIZE);
-        let camps: Vec<HashSet<Coord>> = (0..6)
-            .map(|i| inward.iter().map(|c| c.rotate60_n(i)).collect())
-            .collect();
-        let mut all = hex.clone();
-        for c in &camps {
-            all.extend(c.iter().copied());
-        }
-        assert_eq!(all.len(), HOLES, "the look-alike also has 121 holes");
+        let holes = lookalike.holes().count();
+        assert_eq!(holes, HOLES, "the look-alike also has 121 holes");
 
         // ... but the contact invariant catches it: 1 contact, not 8.
-        for camp in &camps {
-            let contacts = camp
-                .iter()
-                .flat_map(|c| Dir::ALL.map(|d| c.add(d)))
-                .filter(|n| hex.contains(n))
-                .count();
+        for i in 0..6 {
+            let contacts = lookalike.camp_hex_contacts(i);
             assert_eq!(contacts, 1, "inward camps touch the hexagon once");
         }
     }
