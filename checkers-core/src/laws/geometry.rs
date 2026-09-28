@@ -9,7 +9,7 @@
 //! Laws marked [`Evidence::Exhaustive`] enumerate a finite domain directly.
 
 use crate::geometry::{
-    COORD_BOUND, Coord, Dir, all_holes, camp_of, in_base_camp, in_camp, in_hex, in_inward_camp,
+    Coord, Dir, all_holes, bounding_box, camp_of, in_base_camp, in_camp, in_hex, in_inward_camp,
     on_board, rotate_n, rotate60,
 };
 use crate::law::{Evidence, Law};
@@ -18,13 +18,33 @@ use crate::spec::Chapter;
 
 /// Coordinates in the bounding box: the domain the geometry laws range over.
 fn bounded_coords() -> Vec<Coord> {
-    let mut v = Vec::new();
-    for q in -COORD_BOUND..=COORD_BOUND {
-        for r in -COORD_BOUND..=COORD_BOUND {
-            v.push(Coord::new(q, r));
+    bounding_box().collect()
+}
+
+/// How many of `c`'s six neighbours lie in the hexagon — for a camp hole, the
+/// contact pairs it contributes.
+fn hex_contacts(c: Coord) -> usize {
+    Dir::ALL.iter().filter(|d| in_hex(c.neighbour(**d))).count()
+}
+
+/// The region sizes the cardinality laws pin, counted over `coords`: 61
+/// hexagon holes, ten in each camp, and 121 on the board.
+fn check_region_sizes(coords: &[Coord]) -> Result<(), String> {
+    let hex = coords.iter().filter(|c| in_hex(**c)).count();
+    if hex != 61 {
+        return Err(format!("hexagon has {hex} holes, expected 61"));
+    }
+    for i in 0..6 {
+        let n = coords.iter().filter(|c| in_camp(**c, i)).count();
+        if n != 10 {
+            return Err(format!("camp {i} has {n} holes, expected 10"));
         }
     }
-    v
+    let board = coords.iter().filter(|c| on_board(**c)).count();
+    if board != 121 {
+        return Err(format!("board has {board} holes, expected 121"));
+    }
+    Ok(())
 }
 
 /// $R^6 = \mathrm{id}$
@@ -71,14 +91,11 @@ impl Law for RotationCubedIsNegation {
     type Subject = Coord;
 
     fn holds(c: &Coord) -> Result<(), String> {
-        if rotate_n(*c, 3) == c.negate() {
+        let (r3, negated) = (rotate_n(*c, 3), c.negate());
+        if r3 == negated {
             Ok(())
         } else {
-            Err(format!(
-                "R^3{c:?} = {:?}, not {:?}",
-                rotate_n(*c, 3),
-                c.negate()
-            ))
+            Err(format!("R^3{c:?} = {r3:?}, not {negated:?}"))
         }
     }
 
@@ -137,13 +154,12 @@ impl Law for BoardIsCentrallySymmetric {
     type Subject = Coord;
 
     fn holds(c: &Coord) -> Result<(), String> {
-        if on_board(*c) == on_board(c.negate()) {
+        let (here, there) = (on_board(*c), on_board(c.negate()));
+        if here == there {
             Ok(())
         } else {
             Err(format!(
-                "{c:?} on board = {}, but its negation = {}",
-                on_board(*c),
-                on_board(c.negate())
+                "{c:?} on board = {here}, but its negation = {there}"
             ))
         }
     }
@@ -273,21 +289,7 @@ impl Law for BoardCardinality {
     type Subject = ();
 
     fn holds((): &()) -> Result<(), String> {
-        let holes = all_holes();
-        if holes.len() != 121 {
-            return Err(format!("board has {} holes, expected 121", holes.len()));
-        }
-        let hex = holes.iter().filter(|c| in_hex(**c)).count();
-        if hex != 61 {
-            return Err(format!("hexagon has {hex} holes, expected 61"));
-        }
-        for i in 0..6 {
-            let n = holes.iter().filter(|c| in_camp(**c, i)).count();
-            if n != 10 {
-                return Err(format!("camp {i} has {n} holes, expected 10"));
-            }
-        }
-        Ok(())
+        check_region_sizes(&all_holes())
     }
 
     fn subjects() -> Vec<()> {
@@ -316,12 +318,11 @@ impl Law for CampContactCount {
     type Subject = u32;
 
     fn holds(camp: &u32) -> Result<(), String> {
-        let contacts = all_holes()
+        let contacts: usize = all_holes()
             .into_iter()
             .filter(|c| in_camp(*c, *camp))
-            .flat_map(|c| Dir::ALL.map(move |d| c.neighbour(d)))
-            .filter(|n| in_hex(*n))
-            .count();
+            .map(hex_contacts)
+            .sum();
         if contacts == 8 {
             Ok(())
         } else {
@@ -360,8 +361,7 @@ impl Law for InwardCampIsDegenerate {
         if !in_inward_camp(*c) {
             return Ok(());
         }
-        let touches = Dir::ALL.iter().any(|d| in_hex(c.neighbour(*d)));
-        if touches && *c != Coord::new(5, 0) {
+        if hex_contacts(*c) > 0 && *c != Coord::new(5, 0) {
             return Err(format!("unexpected inward-camp contact hole {c:?}"));
         }
         Ok(())
@@ -389,21 +389,13 @@ impl Law for CampOfIsConsistent {
 
     fn holds(c: &Coord) -> Result<(), String> {
         match camp_of(*c) {
-            Some(i) => {
-                if !in_camp(*c, i) {
-                    return Err(format!("camp_of({c:?}) = {i} but not in that camp"));
-                }
-                if in_hex(*c) {
-                    return Err(format!("{c:?} is in a camp and the hexagon"));
-                }
+            Some(i) if !in_camp(*c, i) => Err(format!("camp_of({c:?}) = {i} but not in that camp")),
+            Some(_) if in_hex(*c) => Err(format!("{c:?} is in a camp and the hexagon")),
+            None if (0..6).any(|i| in_camp(*c, i)) => {
+                Err(format!("camp_of({c:?}) = None but it is in a camp"))
             }
-            None => {
-                if (0..6).any(|i| in_camp(*c, i)) {
-                    return Err(format!("camp_of({c:?}) = None but it is in a camp"));
-                }
-            }
+            _ => Ok(()),
         }
-        Ok(())
     }
 
     fn subjects() -> Vec<Coord> {
@@ -468,33 +460,23 @@ impl Law for InwardCampContactCount {
     type Subject = ();
 
     fn holds((): &()) -> Result<(), String> {
-        let inward_pairs = bounded_coords()
-            .into_iter()
-            .filter(|c| in_inward_camp(*c))
-            .flat_map(|c| Dir::ALL.map(move |d| c.neighbour(d)))
-            .filter(|n| in_hex(*n))
-            .count();
+        let inward: Vec<Coord> = bounding_box().filter(|&c| in_inward_camp(c)).collect();
+        let inward_pairs: usize = inward.iter().map(|&c| hex_contacts(c)).sum();
         if inward_pairs != 1 {
             return Err(format!(
                 "inward camp has {inward_pairs} hexagon contact pairs, expected 1"
             ));
         }
 
-        let inward_holes = bounded_coords()
-            .into_iter()
-            .filter(|c| in_inward_camp(*c))
-            .filter(|c| Dir::ALL.iter().any(|d| in_hex(c.neighbour(*d))))
-            .count();
+        let inward_holes = inward.iter().filter(|&&c| hex_contacts(c) > 0).count();
         if inward_holes != 1 {
             return Err(format!(
                 "inward camp has {inward_holes} contact holes, expected 1"
             ));
         }
 
-        let outward_holes = bounded_coords()
-            .into_iter()
-            .filter(|c| in_base_camp(*c))
-            .filter(|c| Dir::ALL.iter().any(|d| in_hex(c.neighbour(*d))))
+        let outward_holes = bounding_box()
+            .filter(|&c| in_base_camp(c) && hex_contacts(c) > 0)
             .count();
         if outward_holes != 4 {
             return Err(format!(
@@ -598,25 +580,7 @@ impl Law for RegionsAreNonVacuous {
     type Subject = ();
 
     fn holds((): &()) -> Result<(), String> {
-        let coords = bounded_coords();
-
-        let hex = coords.iter().filter(|c| in_hex(**c)).count();
-        if hex != 61 {
-            return Err(format!("hexagon has {hex} holes, expected 61"));
-        }
-
-        for i in 0..6 {
-            let n = coords.iter().filter(|c| in_camp(**c, i)).count();
-            if n != 10 {
-                return Err(format!("camp {i} has {n} holes, expected 10"));
-            }
-        }
-
-        let board = coords.iter().filter(|c| on_board(**c)).count();
-        if board != 121 {
-            return Err(format!("board has {board} holes, expected 121"));
-        }
-        Ok(())
+        check_region_sizes(&bounded_coords())
     }
 
     fn subjects() -> Vec<()> {

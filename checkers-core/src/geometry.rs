@@ -200,18 +200,16 @@ pub const fn camp_of(c: Coord) -> Option<u32> {
 /// enumeration can be restricted to it.
 pub const COORD_BOUND: i32 = 8;
 
+/// Every coordinate within [`COORD_BOUND`] of the origin on both axes, in
+/// sorted order.
+pub(crate) fn bounding_box() -> impl Iterator<Item = Coord> {
+    (-COORD_BOUND..=COORD_BOUND)
+        .flat_map(|q| (-COORD_BOUND..=COORD_BOUND).map(move |r| Coord::new(q, r)))
+}
+
 /// Every playable hole, in sorted order.
 pub fn all_holes() -> Vec<Coord> {
-    let mut holes = Vec::with_capacity(121);
-    for q in -COORD_BOUND..=COORD_BOUND {
-        for r in -COORD_BOUND..=COORD_BOUND {
-            let c = Coord::new(q, r);
-            if on_board(c) {
-                holes.push(c);
-            }
-        }
-    }
-    holes
+    bounding_box().filter(|&c| on_board(c)).collect()
 }
 
 // ---------------------------------------------------------------------------
