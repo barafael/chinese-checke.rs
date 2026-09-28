@@ -223,7 +223,7 @@ impl Default for StatusVisible {
     }
 }
 
-/// The two turn-control buttons.
+/// The in-game buttons: the turn controls and the game-over card's `Menu`.
 #[derive(Component, Clone, Copy, PartialEq, Eq)]
 enum ControlButton {
     Confirm,
@@ -360,28 +360,13 @@ fn spawn_ui(mut commands: Commands) {
                     BackgroundColor(Color::NONE),
                     TurnSwatch,
                 ));
-                row.spawn((
-                    Text::new(""),
-                    TextFont {
-                        font_size: FontSize::Px(15.0),
-                        ..default()
-                    },
-                    TextColor(Color::srgb(0.85, 0.85, 0.88)),
-                    TurnText,
-                ));
+                row.spawn((text("", 15.0, TEXT), TurnText));
             });
-            col.spawn((
-                Text::new(""),
-                TextFont {
-                    font_size: FontSize::Px(15.0),
-                    ..default()
-                },
-                TextColor(Color::srgb(0.85, 0.85, 0.88)),
-                StatusText,
-            ));
+            col.spawn((text("", 15.0, TEXT), StatusText));
         });
 
-    // Turn controls, centred at the top: Confirm, Cancel, Resign.
+    // Turn controls, centred at the top: Confirm, Cancel, Resign, and the
+    // record controls.
     commands
         .spawn((
             Node {
@@ -404,28 +389,49 @@ fn spawn_ui(mut commands: Commands) {
                 (ControlButton::Open, "Open"),
                 (ControlButton::Replay, "Replay"),
             ] {
-                row.spawn((
-                    Button,
-                    Node {
-                        padding: UiRect::axes(Val::Px(12.0), Val::Px(7.0)),
-                        // In Bevy 0.19 BorderRadius is a Node field, not a
-                        // standalone component.
-                        border_radius: BorderRadius::all(Val::Px(4.0)),
-                        ..default()
-                    },
-                    BackgroundColor(Color::srgb(0.18, 0.18, 0.21)),
-                    which,
-                ))
-                .with_child((
-                    Text::new(label),
-                    TextFont {
-                        font_size: FontSize::Px(13.0),
-                        ..default()
-                    },
-                    TextColor(Color::srgb(0.9, 0.9, 0.92)),
-                ));
+                control_button(row, which, label);
             }
         });
+}
+
+// Text greys, brightest first: the status panel and per-player statistics,
+// then the game-over card's totals, then its headings and hints.
+const TEXT: Color = Color::srgb(0.85, 0.85, 0.88);
+const TEXT_DIM: Color = Color::srgb(0.72, 0.72, 0.78);
+const TEXT_FAINT: Color = Color::srgb(0.62, 0.62, 0.68);
+
+/// A control button at rest.
+const IDLE: Color = Color::srgb(0.18, 0.18, 0.21);
+
+/// One line of UI text at a pixel size and colour.
+fn text(content: impl Into<String>, size: f32, colour: Color) -> impl Bundle {
+    (
+        Text::new(content),
+        TextFont {
+            font_size: FontSize::Px(size),
+            ..default()
+        },
+        TextColor(colour),
+    )
+}
+
+/// One control button. Factored out because the turn controls and the
+/// game-over card's `Menu` must not drift apart in padding, radius, or text.
+fn control_button(parent: &mut ChildSpawnerCommands, which: ControlButton, label: &str) {
+    parent
+        .spawn((
+            Button,
+            Node {
+                padding: UiRect::axes(Val::Px(12.0), Val::Px(7.0)),
+                // In Bevy 0.19 BorderRadius is a Node field, not a
+                // standalone component.
+                border_radius: BorderRadius::all(Val::Px(4.0)),
+                ..default()
+            },
+            BackgroundColor(IDLE),
+            which,
+        ))
+        .with_child(text(label, 13.0, Color::srgb(0.9, 0.9, 0.92)));
 }
 
 /// Leaving the round tears down everything the round owns: the board meshes,
@@ -930,11 +936,11 @@ fn sync_buttons(
                 Color::srgb(0.36, 0.27, 0.22)
             }
             ControlButton::Save | ControlButton::Open => Color::srgb(0.22, 0.28, 0.38),
-            _ => Color::srgb(0.18, 0.18, 0.21),
+            _ => IDLE,
         };
         let colour = match interaction {
             Interaction::Pressed => base.darker(0.15),
-            Interaction::Hovered if base != Color::srgb(0.18, 0.18, 0.21) => base.lighter(0.15),
+            Interaction::Hovered if base != IDLE => base.lighter(0.15),
             _ => base,
         };
         if bg.0 != colour {
@@ -1000,7 +1006,6 @@ fn sync_turn_indicator(
         Some(Outcome::Abandoned) => (Color::srgb(0.7, 0.62, 0.42), "Game over - abandoned".into()),
         None => {
             let active = session.game.turn();
-            let colour = player_colour(active);
             let label = if session.local_player() == Some(active) {
                 "Your home base - you to move".to_string()
             } else {
@@ -1012,7 +1017,7 @@ fn sync_turn_indicator(
                 };
                 format!("Home base to move: {who}{waiting}")
             };
-            (colour, label)
+            (player_colour(active), label)
         }
     };
 
@@ -1085,23 +1090,17 @@ fn sync_game_over(
         return;
     }
 
+    // This peer's own seat reads as "you", anyone else's by name.
+    let said_by = |p: Player, you: &str, they: &str| {
+        if session.local_player() == Some(p) {
+            you.to_string()
+        } else {
+            format!("{} {they}", player_label(&net, &session, p))
+        }
+    };
     let (title, title_colour) = match session.game.outcome() {
-        Some(Outcome::Winner(p)) => {
-            let title = if session.local_player() == Some(p) {
-                "You win!".to_string()
-            } else {
-                format!("{} wins!", player_label(&net, &session, p))
-            };
-            (title, player_colour(p))
-        }
-        Some(Outcome::Resigned(p)) => {
-            let title = if session.local_player() == Some(p) {
-                "You resign.".to_string()
-            } else {
-                format!("{} resigns.", player_label(&net, &session, p))
-            };
-            (title, player_colour(p))
-        }
+        Some(Outcome::Winner(p)) => (said_by(p, "You win!", "wins!"), player_colour(p)),
+        Some(Outcome::Resigned(p)) => (said_by(p, "You resign.", "resigns."), player_colour(p)),
         Some(Outcome::Draw) | None => ("Draw: every player is blocked.".to_string(), Color::WHITE),
         Some(Outcome::Abandoned) => (
             "Game over: the race stalled without result.".to_string(),
@@ -1116,6 +1115,7 @@ fn sync_game_over(
     };
     sounds.play(&mut commands, *on, ending);
 
+    let stats = &session.stats;
     commands
         .spawn((
             Node {
@@ -1140,84 +1140,35 @@ fn sync_game_over(
                 BackgroundColor(Color::srgba(0.10, 0.10, 0.13, 0.97)),
             ))
             .with_children(|panel| {
-                panel.spawn((
-                    Text::new(title),
-                    TextFont {
-                        font_size: FontSize::Px(30.0),
-                        ..default()
-                    },
-                    TextColor(title_colour),
-                ));
-                panel.spawn((
-                    Text::new("Statistics"),
-                    TextFont {
-                        font_size: FontSize::Px(15.0),
-                        ..default()
-                    },
-                    TextColor(Color::srgb(0.62, 0.62, 0.68)),
-                ));
+                panel.spawn(text(title, 30.0, title_colour));
+                panel.spawn(text("Statistics", 15.0, TEXT_FAINT));
                 for p in session.players.iter().copied() {
                     let i = p.index() as usize;
                     let mut line = format!(
                         "{}:  {} moves  ({} by jump)",
                         player_label(&net, &session, p),
-                        session.stats.moves[i],
-                        session.stats.jumps[i]
+                        stats.moves[i],
+                        stats.jumps[i]
                     );
-                    if let Some(pct) =
-                        (100 * session.stats.hops_over_others[i]).checked_div(session.stats.hops[i])
-                    {
-                        line.push_str(&format!(
-                            ",  {} hops ({pct}% over others)",
-                            session.stats.hops[i]
-                        ));
+                    let hops = stats.hops[i];
+                    if let Some(pct) = (100 * stats.hops_over_others[i]).checked_div(hops) {
+                        line.push_str(&format!(",  {hops} hops ({pct}% over others)"));
                     }
-                    panel.spawn((
-                        Text::new(line),
-                        TextFont {
-                            font_size: FontSize::Px(15.0),
-                            ..default()
-                        },
-                        TextColor(Color::srgb(0.85, 0.85, 0.88)),
-                    ));
+                    panel.spawn(text(line, 15.0, TEXT));
                 }
-                panel.spawn((
-                    Text::new(format!(
-                        "{} moves total, {} passed turns",
-                        session.stats.total_moves(),
-                        session.stats.passes
-                    )),
-                    TextFont {
-                        font_size: FontSize::Px(14.0),
-                        ..default()
-                    },
-                    TextColor(Color::srgb(0.72, 0.72, 0.78)),
-                ));
-                if let Some(d) = session.stats.round_duration(time.elapsed()) {
-                    panel.spawn((
-                        Text::new(format!("Round lasted {}", format_round_duration(d))),
-                        TextFont {
-                            font_size: FontSize::Px(14.0),
-                            ..default()
-                        },
-                        TextColor(Color::srgb(0.72, 0.72, 0.78)),
-                    ));
+                let moves = stats.total_moves();
+                let totals = format!("{moves} moves total, {} passed turns", stats.passes);
+                panel.spawn(text(totals, 14.0, TEXT_DIM));
+                if let Some(d) = stats.round_duration(time.elapsed()) {
+                    let lasted = format!("Round lasted {}", format_round_duration(d));
+                    panel.spawn(text(lasted, 14.0, TEXT_DIM));
                 }
-                if session.stats.longest_jump > 0 {
-                    let by = Player::new(session.stats.longest_jump_by)
+                if stats.longest_jump > 0 {
+                    let by = Player::new(stats.longest_jump_by)
                         .expect("longest-jump player is below six");
-                    panel.spawn((
-                        Text::new(format!(
-                            "Longest jump: {} hops ({})",
-                            session.stats.longest_jump,
-                            player_label(&net, &session, by)
-                        )),
-                        TextFont {
-                            font_size: FontSize::Px(14.0),
-                            ..default()
-                        },
-                        TextColor(Color::srgb(0.72, 0.72, 0.78)),
-                    ));
+                    let who = player_label(&net, &session, by);
+                    let longest = format!("Longest jump: {} hops ({who})", stats.longest_jump);
+                    panel.spawn(text(longest, 14.0, TEXT_DIM));
                 }
                 panel
                     .spawn(Node {
@@ -1227,35 +1178,11 @@ fn sync_game_over(
                         ..default()
                     })
                     .with_children(|row| {
-                        row.spawn((
-                            Button,
-                            Node {
-                                padding: UiRect::axes(Val::Px(12.0), Val::Px(7.0)),
-                                border_radius: BorderRadius::all(Val::Px(4.0)),
-                                ..default()
-                            },
-                            BackgroundColor(Color::srgb(0.18, 0.18, 0.21)),
-                            ControlButton::Menu,
-                        ))
-                        .with_child((
-                            Text::new("Menu (M)"),
-                            TextFont {
-                                font_size: FontSize::Px(13.0),
-                                ..default()
-                            },
-                            TextColor(Color::srgb(0.9, 0.9, 0.92)),
-                        ));
+                        control_button(row, ControlButton::Menu, "Menu (M)");
                         // `R` re-deals a solo table only; a shared round is
                         // restarted by the host, from the lobby.
                         if !session.shared {
-                            row.spawn((
-                                Text::new("R deals a new game"),
-                                TextFont {
-                                    font_size: FontSize::Px(13.0),
-                                    ..default()
-                                },
-                                TextColor(Color::srgb(0.62, 0.62, 0.68)),
-                            ));
+                            row.spawn(text("R deals a new game", 13.0, TEXT_FAINT));
                         }
                     });
             });
