@@ -59,7 +59,7 @@ pub enum RegistryError {
         detail: String,
     },
     /// The file on disk is not what this generator would write.
-    Stale { path: String },
+    Stale,
 }
 
 impl std::fmt::Display for RegistryError {
@@ -76,22 +76,11 @@ impl std::fmt::Display for RegistryError {
                 "the register_law! scan found {scanned} law(s) but the linker \
                  collected {linked}: {detail}"
             ),
-            RegistryError::Stale { path } => write!(
+            RegistryError::Stale => write!(
                 f,
-                "{path} is stale. Regenerate with:\n  \
+                "{GENERATED_PATH} is stale. Regenerate with:\n  \
                  cargo run -p checkers-spec-gen -- --emit-registry"
             ),
-        }
-    }
-}
-
-impl std::error::Error for RegistryError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            RegistryError::Read { source, .. } | RegistryError::Write { source, .. } => {
-                Some(source)
-            }
-            _ => None,
         }
     }
 }
@@ -122,14 +111,9 @@ fn scan(source: &str, module: &str) -> Vec<Registration> {
         let args = after.split(')').next().unwrap_or_default();
         let type_name = args.split(',').next().unwrap_or_default().trim();
         // A `$law:ty` metavariable or anything else that is not a type name.
-        if !type_name
-            .chars()
-            .next()
-            .is_some_and(|c| c.is_ascii_uppercase())
+        if !type_name.starts_with(|c: char| c.is_ascii_uppercase())
+            || !type_name.chars().all(|c| c.is_alphanumeric() || c == '_')
         {
-            continue;
-        }
-        if !type_name.chars().all(|c| c.is_alphanumeric() || c == '_') {
             continue;
         }
 
@@ -162,9 +146,8 @@ pub fn collect(root: &Path) -> Result<Vec<Registration>, RegistryError> {
             scanned: found.len(),
             linked: linked.len(),
             detail: format!(
-                "scanned types: {:?}. A law registered by a macro-generated or \
-                 non-literal register_law! call cannot be discovered by the scan.",
-                scanned_names
+                "scanned types: {scanned_names:?}. A law registered by a macro-generated \
+                 or non-literal register_law! call cannot be discovered by the scan."
             ),
         });
     }
@@ -190,9 +173,9 @@ pub fn render(laws: &[Registration]) -> String {
 
     // The IDs the linker reported, so the native cross-check can compare law
     // *identities* and not merely how many there are. A law swapped for another
-    // keeps the count the same.
-    let _ = writeln!(out, "// law-ids: {}", ids_from_linker().join(","));
-    out.push('\n');
+    // keeps the count the same. `all_sorted` lists them by ID.
+    let ids: Vec<&str> = all_sorted().iter().map(|l| l.id).collect();
+    let _ = writeln!(out, "// law-ids: {}\n", ids.join(","));
 
     let _ = writeln!(
         out,
@@ -207,41 +190,30 @@ pub fn render(laws: &[Registration]) -> String {
     out
 }
 
-/// Every law ID, sorted, as the linker sees them.
-fn ids_from_linker() -> Vec<&'static str> {
-    let mut ids: Vec<&'static str> = all_sorted().iter().map(|l| l.id).collect();
-    ids.sort_unstable();
-    ids
-}
-
 pub fn emit(root: &Path) -> Result<usize, RegistryError> {
     let laws = collect(root)?;
-    let rendered = render(&laws);
-    let path = root.join(GENERATED_PATH);
-    std::fs::write(&path, &rendered).map_err(|source| RegistryError::Write {
-        path: GENERATED_PATH.to_string(),
-        source,
+    std::fs::write(root.join(GENERATED_PATH), render(&laws)).map_err(|source| {
+        RegistryError::Write {
+            path: GENERATED_PATH.to_string(),
+            source,
+        }
     })?;
     Ok(laws.len())
 }
 
 pub fn check(root: &Path) -> Result<usize, RegistryError> {
     let laws = collect(root)?;
-    let rendered = render(&laws);
-    let path = root.join(GENERATED_PATH);
-    let existing = std::fs::read_to_string(&path).unwrap_or_default();
-    if existing.replace("\r\n", "\n") == rendered {
+    if crate::is_current(&root.join(GENERATED_PATH), &render(&laws)) {
         Ok(laws.len())
     } else {
-        Err(RegistryError::Stale {
-            path: GENERATED_PATH.to_string(),
-        })
+        Err(RegistryError::Stale)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::workspace_root;
 
     #[test]
     fn the_scan_reads_a_registration() {
@@ -301,13 +273,5 @@ register_law!(Real, REAL);
         if let Err(e) = check(&root) {
             panic!("{e}");
         }
-    }
-
-    fn workspace_root() -> std::path::PathBuf {
-        // CARGO_MANIFEST_DIR is checkers-spec-gen/; the workspace is its parent.
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .expect("the crate has a parent directory")
-            .to_path_buf()
     }
 }

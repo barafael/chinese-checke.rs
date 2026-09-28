@@ -17,7 +17,7 @@ mod registry;
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use checkers_core::law::{Evidence, LawInfo, all_in_reading_order, for_chapter};
@@ -166,42 +166,64 @@ fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
+/// Whether the file at `path` already holds `rendered`, reading CRLF line
+/// endings as LF. A file that cannot be read does not.
+fn is_current(path: &Path, rendered: &str) -> bool {
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .replace("\r\n", "\n")
+        == rendered
+}
+
+/// `--check`: the specification at `path` must be exactly what `render` makes.
+fn check_spec(path: &str) -> Result<String, String> {
+    if !is_current(Path::new(path), &render()) {
+        return Err(format!(
+            "{path} is stale. Regenerate with:\n  cargo run -p checkers-spec-gen -- {path}"
+        ));
+    }
+    let laws = all_in_reading_order().len();
+    Ok(format!(
+        "{path} is up to date: {} chapters, {laws} laws",
+        Chapter::ALL.len()
+    ))
+}
+
+/// Write the specification to `path`, creating its directory if need be.
+fn write_spec(path: &str) -> Result<String, String> {
+    if let Some(parent) = Path::new(path).parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("failed to create {}: {e}", parent.display()))?;
+    }
+    std::fs::write(path, render()).map_err(|e| format!("failed to write {path}: {e}"))?;
+
+    let laws = all_in_reading_order();
+    let proven = laws
+        .iter()
+        .filter(|l| l.evidence == Evidence::Proof)
+        .count();
+    Ok(format!(
+        "wrote {path}: {} chapters, {} laws ({proven} Kani-proven)",
+        Chapter::ALL.len(),
+        laws.len()
+    ))
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
-    // Registry modes take no path: the destination is fixed, because the file is
-    // `include!`d from a known location in checkers-core.
-    match args.as_slice() {
-        [flag] if flag == "--emit-registry" => {
-            return match registry::emit(&workspace_root()) {
-                Ok(n) => {
-                    println!("wrote {}: {n} laws", registry::GENERATED_PATH);
-                    ExitCode::SUCCESS
-                }
-                Err(e) => {
-                    eprintln!("{e}");
-                    ExitCode::FAILURE
-                }
-            };
-        }
-        [flag] if flag == "--check-registry" => {
-            return match registry::check(&workspace_root()) {
-                Ok(n) => {
-                    println!("{} is up to date: {n} laws", registry::GENERATED_PATH);
-                    ExitCode::SUCCESS
-                }
-                Err(e) => {
-                    eprintln!("{e}");
-                    ExitCode::FAILURE
-                }
-            };
-        }
-        _ => {}
-    }
-
-    let (check_only, path) = match args.as_slice() {
-        [flag, path] if flag == "--check" => (true, path.clone()),
-        [path] => (false, path.clone()),
+    // Every mode ends in a summary on stdout or an error on stderr.
+    let outcome = match args.as_slice() {
+        // Registry modes take no path: the destination is fixed, because the
+        // file is `include!`d from a known location in checkers-core.
+        [flag] if flag == "--emit-registry" => registry::emit(&workspace_root())
+            .map(|n| format!("wrote {}: {n} laws", registry::GENERATED_PATH))
+            .map_err(|e| e.to_string()),
+        [flag] if flag == "--check-registry" => registry::check(&workspace_root())
+            .map(|n| format!("{} is up to date: {n} laws", registry::GENERATED_PATH))
+            .map_err(|e| e.to_string()),
+        [flag, path] if flag == "--check" => check_spec(path),
+        [path] => write_spec(path),
         _ => {
             eprintln!(
                 "usage: checkers-spec-gen [--check] <output.md>\n       \
@@ -210,46 +232,13 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-
-    let rendered = render();
-    let laws = all_in_reading_order();
-    let proven = laws
-        .iter()
-        .filter(|l| l.evidence == Evidence::Proof)
-        .count();
-
-    if check_only {
-        let existing = std::fs::read_to_string(&path).unwrap_or_default();
-        if existing.replace("\r\n", "\n") == rendered {
-            println!(
-                "{path} is up to date: {} chapters, {} laws",
-                Chapter::ALL.len(),
-                laws.len()
-            );
-            return ExitCode::SUCCESS;
-        }
-        eprintln!("{path} is stale. Regenerate with:\n  cargo run -p checkers-spec-gen -- {path}");
-        return ExitCode::FAILURE;
-    }
-
-    if let Some(parent) = std::path::Path::new(&path).parent()
-        && let Err(e) = std::fs::create_dir_all(parent)
-    {
-        eprintln!("failed to create {}: {e}", parent.display());
-        return ExitCode::FAILURE;
-    }
-
-    match std::fs::write(&path, &rendered) {
-        Ok(()) => {
-            println!(
-                "wrote {path}: {} chapters, {} laws ({proven} Kani-proven)",
-                Chapter::ALL.len(),
-                laws.len()
-            );
+    match outcome {
+        Ok(summary) => {
+            println!("{summary}");
             ExitCode::SUCCESS
         }
-        Err(e) => {
-            eprintln!("failed to write {path}: {e}");
+        Err(error) => {
+            eprintln!("{error}");
             ExitCode::FAILURE
         }
     }
