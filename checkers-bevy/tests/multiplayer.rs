@@ -55,11 +55,8 @@ fn start_signaling_server() -> u16 {
                 .build()
                 .expect("a tokio runtime for the signaling server");
             let server =
-                matchbox_signaling::SignalingServer::full_mesh_builder(std::net::SocketAddr::new(
-                    std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)),
-                    port,
-                ))
-                .build();
+                matchbox_signaling::SignalingServer::full_mesh_builder(([127, 0, 0, 1], port))
+                    .build();
             runtime
                 .block_on(server.serve())
                 .expect("the signaling server ran");
@@ -68,6 +65,12 @@ fn start_signaling_server() -> u16 {
 
     port
 }
+
+/// How long to wait for the peers to find each other, for the room to settle
+/// on what was configured, and for a step that needs no handshake.
+const CONNECT: Duration = Duration::from_secs(45);
+const SETTLE: Duration = Duration::from_secs(30);
+const BRIEF: Duration = Duration::from_secs(10);
 
 static ROOM_SEQ: AtomicU64 = AtomicU64::new(0);
 
@@ -129,7 +132,7 @@ fn connect(label: &str, names: &[&str]) -> Vec<App> {
     let others = apps.len() - 1;
     wait_for(
         &mut apps,
-        Duration::from_secs(45),
+        CONNECT,
         &format!("the {} instances never saw each other", names.len()),
         |apps| {
             apps.iter().all(|a| net(a).peers.len() == others) && apps.iter().any(|a| net(a).is_host)
@@ -154,15 +157,10 @@ fn roster_players(net: &NetState) -> Vec<u32> {
 
 /// Wait until every instance sees exactly the same roster.
 fn wait_greeted(apps: &mut [App]) {
-    wait_for(
-        apps,
-        Duration::from_secs(30),
-        "the greetings never settled",
-        |apps| {
-            let first = &net(&apps[0]).seats;
-            apps.iter().all(|a| &net(a).seats == first)
-        },
-    );
+    wait_for(apps, SETTLE, "the greetings never settled", |apps| {
+        let first = &net(&apps[0]).seats;
+        apps.iter().all(|a| &net(a).seats == first)
+    });
 }
 
 /// Wait until every instance's roster carries exactly these players. Unlike
@@ -172,7 +170,7 @@ fn wait_greeted(apps: &mut [App]) {
 fn wait_players(apps: &mut [App], expected: &[u32], what: &str) {
     wait_for(
         apps,
-        Duration::from_secs(30),
+        SETTLE,
         &format!("{what} on corners {expected:?}"),
         |apps| apps.iter().all(|a| roster_players(net(a)) == expected),
     );
@@ -182,7 +180,7 @@ fn wait_players(apps: &mut [App], expected: &[u32], what: &str) {
 /// the game, and not still on the game-over card of the last one.
 fn start(apps: &mut [App], host_i: usize, what: &str) {
     press(&mut apps[host_i], KeyCode::Enter);
-    wait_for(apps, Duration::from_secs(30), what, |apps| {
+    wait_for(apps, SETTLE, what, |apps| {
         apps.iter()
             .all(|a| in_game(a) && !session(a).game.is_over())
     });
@@ -190,20 +188,16 @@ fn start(apps: &mut [App], host_i: usize, what: &str) {
 
 /// A compact, readable rendering of a roster for the logs.
 fn fmt_roster(net: &NetState) -> String {
-    let seats = net
+    let seats: Vec<String> = net
         .seats
         .iter()
         .map(|s| {
-            format!(
-                "{}@{} {}",
-                s.name,
-                s.player.map_or("-".into(), |p| p.to_string()),
-                if s.engine { "(engine)" } else { "" }
-            )
+            let corner = s.player.map_or("-".into(), |p| p.to_string());
+            let engine = if s.engine { "(engine)" } else { "" };
+            format!("{}@{corner} {engine}", s.name)
         })
-        .collect::<Vec<_>>()
-        .join(" ");
-    format!("[{}]", seats)
+        .collect();
+    format!("[{}]", seats.join(" "))
 }
 
 /// Pump every instance until `ok`, failing with `what` and every instance's
@@ -500,12 +494,9 @@ fn a_finished_round_rematches_over_the_same_socket() {
         finish_round(app);
         set_state(app, AppState::Lobby);
     }
-    wait_for(
-        &mut apps,
-        Duration::from_secs(10),
-        "never returned to the lobby",
-        |apps| apps.iter().all(|a| !in_game(a)),
-    );
+    wait_for(&mut apps, BRIEF, "never returned to the lobby", |apps| {
+        apps.iter().all(|a| !in_game(a))
+    });
     for (i, app) in apps.iter_mut().enumerate() {
         assert_eq!(socket_id(app), ids[i], "instance {i} opened a new socket");
         assert_eq!(net(app).my_id, ids[i], "instance {i} forgot its id");
@@ -525,12 +516,9 @@ fn a_finished_round_rematches_over_the_same_socket() {
         finish_round(app);
     }
     set_state(&mut apps[host_i], AppState::Lobby);
-    wait_for(
-        &mut apps,
-        Duration::from_secs(10),
-        "the host never returned",
-        |apps| !in_game(&apps[host_i]),
-    );
+    wait_for(&mut apps, BRIEF, "the host never returned", |apps| {
+        !in_game(&apps[host_i])
+    });
     start(
         &mut apps,
         host_i,
@@ -574,7 +562,7 @@ fn an_abandoned_engine_race_ends_everywhere() {
 
     wait_for(
         &mut apps,
-        Duration::from_secs(10),
+        BRIEF,
         "the guest never learned the race was abandoned",
         |apps| session(&apps[guest_i]).game.outcome() == Some(Outcome::Abandoned),
     );
@@ -591,33 +579,25 @@ fn a_shared_name_is_settled_and_a_claim_answered() {
     let host_i = host_index(&apps);
     let guest_i = 1 - host_i;
 
-    wait_for(
-        &mut apps,
-        Duration::from_secs(30),
-        "the clash was never settled",
-        |apps| {
-            let names: Vec<Vec<&str>> = apps
-                .iter()
-                .map(|a| {
-                    let mut n: Vec<&str> = net(a).seats.iter().map(|s| s.name.as_str()).collect();
-                    n.sort_unstable();
-                    n
-                })
-                .collect();
-            names[0].len() == 2 && names[0][0] != names[0][1] && names[0] == names[1]
-        },
-    );
+    wait_for(&mut apps, SETTLE, "the clash was never settled", |apps| {
+        let names: Vec<Vec<&str>> = apps
+            .iter()
+            .map(|a| {
+                let mut n: Vec<&str> = net(a).seats.iter().map(|s| s.name.as_str()).collect();
+                n.sort_unstable();
+                n
+            })
+            .collect();
+        names[0].len() == 2 && names[0][0] != names[0][1] && names[0] == names[1]
+    });
     assert_eq!(net(&apps[host_i]).name, "gecko", "the host keeps its name");
     assert_ne!(net(&apps[guest_i]).name, "gecko", "the guest gives way");
     println!("[clash] the guest is now {}", net(&apps[guest_i]).name);
 
     choose(&mut apps[guest_i], CornerCommand::Human, 3);
-    wait_for(
-        &mut apps,
-        Duration::from_secs(30),
-        "the claim was never answered",
-        |apps| status(&apps[guest_i]) == "You hold corner 3.",
-    );
+    wait_for(&mut apps, SETTLE, "the claim was never answered", |apps| {
+        status(&apps[guest_i]) == "You hold corner 3."
+    });
     println!("PASS: the name clash was settled and the guest's claim answered.");
 }
 
