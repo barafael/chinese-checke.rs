@@ -42,8 +42,8 @@ use checkers_core::rules::Variants;
 
 /// Push the host's roster to every peer. The roster broadcast follows every
 /// roster change, so it lives in one place.
-fn publish_roster(socket: &mut MatchboxSocket, net: &NetState, peers: &[PeerId]) {
-    broadcast(socket, peers, &NetMsg::Roster(net.seats.clone()));
+fn publish_roster(socket: &mut MatchboxSocket, net: &NetState) {
+    broadcast(socket, &net.peers, &NetMsg::Roster(net.seats.clone()));
 }
 
 /// Marker for everything spawned by the lobby, so leaving despawns it wholesale.
@@ -328,8 +328,7 @@ fn sync_button_styles(
 ) {
     let solo = net.peers.is_empty();
     let active = selected.0.map(|i| {
-        let p = Player::new(i as u8).expect("corner indices are below six");
-        let cmd = if solo {
+        if solo {
             match &table.0[i] {
                 CornerState::Empty => CornerCommand::Off,
                 CornerState::Human => CornerCommand::Human,
@@ -343,14 +342,13 @@ fn sync_button_styles(
                 Some(seat) if seat.engine => CornerCommand::Cpu,
                 Some(_) => CornerCommand::Human,
             }
-        };
-        (p, cmd)
+        }
     });
 
     for (interaction, button, mut bg) in buttons.iter_mut() {
         let selected = match button {
             LobbyButton::ForeignCamps => variants.0.forbid_foreign_camps,
-            LobbyButton::CornerAction(cmd) => active.is_some_and(|(_, a)| a == *cmd),
+            LobbyButton::CornerAction(cmd) => active == Some(*cmd),
             LobbyButton::Start | LobbyButton::Preset(_) => false,
         };
         let colour = match interaction {
@@ -1250,7 +1248,6 @@ pub fn pump_socket(socket: Option<ResMut<MatchboxSocket>>, lobby: LobbyWorld) {
 
     // Announce ourselves to peers we have not greeted yet: once when we first
     // have a name, and afterwards only to peers that join later.
-    let peers = net.peers.clone();
     let me = net.my_id.map(|id| id.to_string()).unwrap_or_default();
 
     // The host prunes seats whose peer has left the mesh: a refresh (or a
@@ -1262,14 +1259,15 @@ pub fn pump_socket(socket: Option<ResMut<MatchboxSocket>>, lobby: LobbyWorld) {
         let seats = net.seats.len();
         prune_departed(&mut net);
         if net.seats.len() != seats {
-            publish_roster(&mut socket, &net, &peers);
+            publish_roster(&mut socket, &net);
         }
     }
 
     if net.name.is_empty() && !me.is_empty() {
         net.name = format!("player-{}", &me[..me.len().min(4)]);
     }
-    let unacquainted: Vec<PeerId> = peers
+    let unacquainted: Vec<PeerId> = net
+        .peers
         .iter()
         .filter(|p| !net.greeted.contains(p))
         .copied()
@@ -1285,7 +1283,7 @@ pub fn pump_socket(socket: Option<ResMut<MatchboxSocket>>, lobby: LobbyWorld) {
         // ignore a Hello (only the sequencer acts on one), and nothing else
         // would republish the roster with the new name.
         if net.sequences() && sync_host_seat(&mut net, &me) {
-            publish_roster(&mut socket, &net, &peers);
+            publish_roster(&mut socket, &net);
         }
         info!(name = %net.name, greeted = unacquainted.len(), "greeted the room");
         net.greeted.extend(unacquainted);
@@ -1306,58 +1304,45 @@ pub fn pump_socket(socket: Option<ResMut<MatchboxSocket>>, lobby: LobbyWorld) {
                     if let Some(seat) = net.seats.iter_mut().find(|s| s.peer == from.to_string()) {
                         if seat.name != name {
                             seat.name = name;
-                            publish_roster(&mut socket, &net, &peers);
+                            publish_roster(&mut socket, &net);
                         }
                     } else {
                         seat_for(&mut net, &from.to_string(), &name);
-                        publish_roster(&mut socket, &net, &peers);
+                        publish_roster(&mut socket, &net);
                     }
                 }
             }
             NetMsg::Claim(claim) => {
                 if net.sequences() {
                     let key = from.to_string();
+                    let corner = claim.filter(|&c| c < 6);
                     // Read the roster before mutating it: the grant must see
                     // the corners as the peers do, and the sender's own hold.
-                    let claims = match claim {
-                        Some(c) if c < 6 => {
-                            let free = !net.seats.iter().any(|s| s.player == Some(c));
-                            let mine = net
-                                .seats
-                                .iter()
-                                .any(|s| s.peer == key && s.player == Some(c));
-                            Some((c, free, mine))
-                        }
-                        _ => None,
-                    };
-                    match claims {
-                        Some((corner, free, mine)) => {
-                            if let Some(seat) = net.seats.iter_mut().find(|s| s.peer == key) {
-                                // Grant a free corner, or the sender's own; a
-                                // move to a new corner frees the old one on the
-                                // same grant.
-                                if free || mine {
-                                    if !mine {
-                                        seat.player = None;
-                                    }
-                                    seat.player = Some(corner);
-                                    status.0 = format!("{} claimed corner {corner}.", seat.name);
-                                    info!(
-                                        name = %seat.name,
-                                        corner,
-                                        "claimed a corner",
-                                    );
-                                }
+                    let grantable = corner.is_some_and(|c| {
+                        let free = !net.seats.iter().any(|s| s.player == Some(c));
+                        let mine = net
+                            .seats
+                            .iter()
+                            .any(|s| s.peer == key && s.player == Some(c));
+                        free || mine
+                    });
+                    if let Some(seat) = net.seats.iter_mut().find(|s| s.peer == key) {
+                        match corner {
+                            // Grant a free corner, or the sender's own; a
+                            // move to a new corner frees the old one on the
+                            // same grant.
+                            Some(corner) if grantable => {
+                                seat.player = Some(corner);
+                                status.0 = format!("{} claimed corner {corner}.", seat.name);
+                                info!(name = %seat.name, corner, "claimed a corner");
                             }
-                        }
-                        // Releasing, or an impossible corner number: drop the claim.
-                        _ => {
-                            if let Some(seat) = net.seats.iter_mut().find(|s| s.peer == key) {
-                                seat.player = None;
-                            }
+                            // Someone else's corner: the seat stays as it was.
+                            Some(_) => {}
+                            // Releasing, or an impossible corner number: drop the claim.
+                            None => seat.player = None,
                         }
                     }
-                    publish_roster(&mut socket, &net, &peers);
+                    publish_roster(&mut socket, &net);
                 }
             }
             // Guests take the host's roster verbatim; it is the only authority.
@@ -1680,7 +1665,7 @@ fn send_claim(
         if let Some(seat) = net.seats.iter_mut().find(|s| s.peer == me) {
             seat.player = claim;
         }
-        publish_roster(socket, net, &net.peers);
+        publish_roster(socket, net);
         pending.0 = None;
         return match claim {
             Some(c) => format!("You hold corner {c}."),
@@ -1928,14 +1913,14 @@ pub fn handle_buttons(
             Ok(CornerEffect::AddEngine(c)) => {
                 seat_engine_at(&mut net, c as usize);
                 if let Some(s) = socket.as_mut() {
-                    publish_roster(s, &net, &net.peers);
+                    publish_roster(s, &net);
                 }
                 status.0 = format!("Engine seated at corner {c}.");
             }
             Ok(CornerEffect::RemoveEngine(c)) => {
                 remove_engine_at(&mut net, c as usize);
                 if let Some(s) = socket.as_mut() {
-                    publish_roster(s, &net, &net.peers);
+                    publish_roster(s, &net);
                 }
                 status.0 = format!("Corner {c}: engine removed.");
             }
@@ -1945,12 +1930,11 @@ pub fn handle_buttons(
                     .iter_mut()
                     .find(|s| s.player == Some(c) && !s.engine)
                 {
-                    let name = seat.name.clone();
                     seat.player = None;
+                    status.0 = format!("{} was un-seated from corner {c}.", seat.name);
                     if let Some(s) = socket.as_mut() {
-                        publish_roster(s, &net, &net.peers);
+                        publish_roster(s, &net);
                     }
-                    status.0 = format!("{} was un-seated from corner {c}.", name);
                 }
             }
             Err(why) => status.0 = why,
