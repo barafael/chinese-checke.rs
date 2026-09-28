@@ -9,7 +9,7 @@
 //! Where a claim is about a set, the law compares sets rather than sizes; where it
 //! is about a count, it pins the count from both sides.
 
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 
 use crate::geometry::{Coord, Dir, all_holes, in_camp, on_board};
 use crate::law::{Evidence, Law};
@@ -202,8 +202,8 @@ impl Law for TargetCampIsOpposite {
     type Subject = Player;
 
     fn holds(player: &Player) -> Result<(), String> {
-        let start: HashSet<Coord> = player.start_camp().iter().copied().collect();
-        let target: HashSet<Coord> = player.target_camp().iter().copied().collect();
+        let start: BTreeSet<Coord> = player.start_camp().iter().copied().collect();
+        let target: BTreeSet<Coord> = player.target_camp().iter().copied().collect();
 
         let (s, t) = (start.len(), target.len());
         if s != PIECES_PER_PLAYER || t != PIECES_PER_PLAYER {
@@ -218,7 +218,7 @@ impl Law for TargetCampIsOpposite {
             return Err("the opposite-player relation is not an involution".into());
         }
         // The target is the point reflection of the start.
-        let reflected: HashSet<Coord> = start.iter().map(|c| c.negate()).collect();
+        let reflected: BTreeSet<Coord> = start.iter().map(|c| c.negate()).collect();
         if reflected != target {
             return Err("the target camp is not the reflection of the start camp".into());
         }
@@ -253,14 +253,14 @@ impl Law for StepLegality {
     fn holds(pos: &Position) -> Result<(), String> {
         for player in Player::ALL {
             // What the specification says the step set is.
-            let expected: HashSet<(Coord, Coord)> = pos
+            let expected: BTreeSet<(Coord, Coord)> = pos
                 .pieces_of(player)
                 .into_iter()
                 .flat_map(|origin| Dir::ALL.map(|d| (origin, origin.neighbour(d))))
                 .filter(|&(_, to)| on_board(to) && pos.is_empty_hole(to))
                 .collect();
             // What the generator produced.
-            let produced: HashSet<(Coord, Coord)> = legal_moves(pos, player)
+            let produced: BTreeSet<(Coord, Coord)> = legal_moves(pos, player)
                 .into_iter()
                 .filter(|m| m.kind == MoveKind::Step)
                 .map(|m| (m.origin, m.destination))
@@ -517,7 +517,7 @@ impl Law for JumpClosureIsExact {
 
     fn holds((pos, origin): &(Position, Coord)) -> Result<(), String> {
         let bfs = jump_destinations(pos, *origin);
-        let by_route: HashSet<Coord> = jump_routes(pos, *origin, HOLES)
+        let by_route: BTreeSet<Coord> = jump_routes(pos, *origin, HOLES)
             .into_iter()
             .filter_map(|r| r.last().copied())
             .filter(|c| c != origin)
@@ -565,7 +565,7 @@ impl Law for OccupancyIsPositionDetermined {
     type Subject = (Position, Coord);
 
     fn holds((pos, origin): &(Position, Coord)) -> Result<(), String> {
-        let omega: HashSet<Coord> = pos.occupied_except(*origin).into_iter().collect();
+        let omega: BTreeSet<Coord> = pos.occupied_except(*origin).into_iter().collect();
 
         // The moving piece is never in Omega, so it cannot block itself.
         if omega.contains(origin) {
@@ -576,7 +576,7 @@ impl Law for OccupancyIsPositionDetermined {
         for route in jump_routes(pos, *origin, 4) {
             let dest = *route.last().unwrap();
             let after = apply_route(pos, &Move::jump(*origin, dest).with_route(route.clone()));
-            let after_omega: HashSet<Coord> = after.occupied_except(dest).into_iter().collect();
+            let after_omega: BTreeSet<Coord> = after.occupied_except(dest).into_iter().collect();
             if after_omega != omega {
                 return Err(format!(
                     "Omega changed along route {route:?}: {} holes differ",
@@ -714,7 +714,7 @@ impl Law for MoveGenerationIsDeduplicated {
         for player in Player::ALL {
             let moves = legal_moves(pos, player);
 
-            let unique: HashSet<&Move> = moves.iter().collect();
+            let unique: BTreeSet<_> = moves.iter().map(Move::key).collect();
             if unique.len() != moves.len() {
                 return Err(format!(
                     "player {} got {} moves but only {} distinct",
@@ -726,7 +726,7 @@ impl Law for MoveGenerationIsDeduplicated {
 
             // The jump moves match the closure exactly, per origin.
             for origin in pos.pieces_of(player) {
-                let produced: HashSet<Coord> = moves
+                let produced: BTreeSet<Coord> = moves
                     .iter()
                     .filter(|m| m.kind == MoveKind::Jump && m.origin == origin)
                     .map(|m| m.destination)
@@ -873,7 +873,7 @@ impl Law for TurnOrderCycles {
 
     fn holds(player: &Player) -> Result<(), String> {
         let mut p = *player;
-        let mut seen = HashSet::new();
+        let mut seen = BTreeSet::new();
         for _ in 0..PLAYERS {
             if !seen.insert(p) {
                 return Err(format!("player {} repeated within one cycle", p.index()));
@@ -1278,9 +1278,9 @@ impl Law for SingleHopsReachTheClosure {
         };
 
         // Breadth-first over single hops, as a player clicking would explore.
-        let mut seen = HashSet::from([*origin]);
+        let mut seen = BTreeSet::from([*origin]);
         let mut frontier = vec![*origin];
-        let mut reached = HashSet::new();
+        let mut reached = BTreeSet::new();
 
         while let Some(cur) = frontier.pop() {
             // Blockers never move during a turn, so the piece's own position is

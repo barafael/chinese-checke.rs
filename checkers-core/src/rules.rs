@@ -1,6 +1,6 @@
 //! Move generation and turn sequencing (chapters 9–15).
 
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 
 use crate::geometry::{Coord, Dir, all_holes, camp_of, on_board};
 use crate::position::{Move, PLAYERS, Player, Position, is_legal_step};
@@ -47,12 +47,12 @@ impl Variants {
 ///
 /// The origin is excluded from the result: a turn ending where it began is
 /// indistinguishable from not moving.
-pub fn jump_destinations(pos: &Position, origin: Coord) -> HashSet<Coord> {
-    let omega: HashSet<Coord> = pos.occupied_except(origin).into_iter().collect();
+pub fn jump_destinations(pos: &Position, origin: Coord) -> BTreeSet<Coord> {
+    let omega: BTreeSet<Coord> = pos.occupied_except(origin).into_iter().collect();
 
-    let mut visited = HashSet::from([origin]);
+    let mut visited = BTreeSet::from([origin]);
     let mut frontier = vec![origin];
-    let mut reachable = HashSet::new();
+    let mut reachable = BTreeSet::new();
 
     while !frontier.is_empty() {
         let mut next = Vec::new();
@@ -79,7 +79,7 @@ pub fn jump_destinations(pos: &Position, origin: Coord) -> HashSet<Coord> {
 ///
 /// Within a turn this is the whole jump rule, since only the moving piece
 /// moves; [`jump_destinations`] and [`jump_routes`] both explore by it.
-fn jump_landings(omega: &HashSet<Coord>, cur: Coord) -> impl Iterator<Item = Coord> + '_ {
+fn jump_landings(omega: &BTreeSet<Coord>, cur: Coord) -> impl Iterator<Item = Coord> + '_ {
     Dir::ALL.into_iter().filter_map(move |d| {
         let (mid, dest) = (cur.neighbour(d), cur.jump_dest(d));
         let open =
@@ -95,7 +95,7 @@ fn jump_landings(omega: &HashSet<Coord>, cur: Coord) -> impl Iterator<Item = Coo
 /// the current path bounds every route's length by the number of holes. This is
 /// a presentational restriction and does not change the destination set.
 pub fn jump_routes(pos: &Position, origin: Coord, max_hops: usize) -> Vec<Vec<Coord>> {
-    let omega: HashSet<Coord> = pos.occupied_except(origin).into_iter().collect();
+    let omega: BTreeSet<Coord> = pos.occupied_except(origin).into_iter().collect();
     let mut out = Vec::new();
     let mut path = vec![origin];
     walk_routes(&omega, origin, &mut path, max_hops, &mut out);
@@ -103,7 +103,7 @@ pub fn jump_routes(pos: &Position, origin: Coord, max_hops: usize) -> Vec<Vec<Co
 }
 
 fn walk_routes(
-    omega: &HashSet<Coord>,
+    omega: &BTreeSet<Coord>,
     cur: Coord,
     path: &mut Vec<Coord>,
     max_hops: usize,
@@ -445,7 +445,7 @@ pub fn blocked_position() -> Position {
     }
 
     // Block every hole a camp piece could land on.
-    let landings: HashSet<Coord> = camp
+    let landings: BTreeSet<Coord> = camp
         .iter()
         .flat_map(|c| Dir::ALL.map(|d| (c.neighbour(d), c.jump_dest(d))))
         .filter(|(mid, dest)| on_board(*mid) && on_board(*dest) && !pos.is_empty_hole(*mid))
@@ -687,6 +687,40 @@ mod variant_tests {
             forbid_foreign_camps: true,
         });
         assert!(game.variants().forbid_foreign_camps);
+    }
+
+    /// Every call lists the same moves in the same order. The jump closure
+    /// used to come back in a `HashSet`, whose order is random per instance,
+    /// so two calls on one position could list a piece's jumps differently;
+    /// the engine's tie-breaks and the rebuilt routes read that order.
+    #[test]
+    fn legal_moves_come_in_a_fixed_order() {
+        let order = |g: &Game| g.legal_moves().iter().map(Move::key).collect::<Vec<_>>();
+        let mut game = Game::for_players(&Player::ALL);
+        let mut order_at_stake = false;
+        for _ in 0..40 {
+            let first = order(&game);
+            for _ in 0..8 {
+                assert_eq!(
+                    order(&game),
+                    first,
+                    "two calls listed the moves differently"
+                );
+            }
+            let pos = game.position();
+            order_at_stake |= pos
+                .pieces_of(game.turn())
+                .into_iter()
+                .any(|c| jump_destinations(pos, c).len() > 1);
+            let Some(mv) = game.legal_moves().pop() else {
+                break;
+            };
+            game.play(&mv);
+        }
+        assert!(
+            order_at_stake,
+            "no piece ever had two jumps to order, so the check proved nothing"
+        );
     }
 
     /// The central-most hole of each camp, as a definite resting spot.

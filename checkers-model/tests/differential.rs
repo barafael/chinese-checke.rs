@@ -10,7 +10,7 @@
 //! A mismatch here means one of the two rule engines has drifted, and the
 //! one with the *simpler* implementation is the likelier truth.
 
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 
 use checkers_core::geometry::{Coord as CoreCoord, all_holes as core_all_holes, camp_of};
 use checkers_core::position::{
@@ -55,14 +55,14 @@ fn key_of_core(mv: &CoreMove) -> Key {
     )
 }
 
-fn move_keys_model(state: &ModelState, player: ModelPlayer) -> HashSet<Key> {
+fn move_keys_model(state: &ModelState, player: ModelPlayer) -> BTreeSet<Key> {
     model_legal(state, player)
         .iter()
         .map(key_of_model)
         .collect()
 }
 
-fn move_keys_core(pos: &CorePosition, player: CorePlayer) -> HashSet<Key> {
+fn move_keys_core(pos: &CorePosition, player: CorePlayer) -> BTreeSet<Key> {
     core_legal(pos, player).iter().map(key_of_core).collect()
 }
 
@@ -199,7 +199,7 @@ fn jump_closures_agree_everywhere() {
                 continue;
             }
             let core_set = core_jumps(&core_pos, to_core(c));
-            let model_set: HashSet<CoreCoord> = model_jumps(&model_state, c)
+            let model_set: BTreeSet<CoreCoord> = model_jumps(&model_state, c)
                 .into_iter()
                 .map(to_core)
                 .collect();
@@ -216,8 +216,8 @@ fn jump_closures_agree_everywhere() {
 fn board_geometry_agrees() {
     let board = Board::new();
 
-    let core_holes: HashSet<CoreCoord> = core_all_holes().into_iter().collect();
-    let model_holes: HashSet<CoreCoord> = board.holes().map(to_core).collect();
+    let core_holes: BTreeSet<CoreCoord> = core_all_holes().into_iter().collect();
+    let model_holes: BTreeSet<CoreCoord> = board.holes().map(to_core).collect();
     assert_eq!(
         core_holes, model_holes,
         "the two crates build different stars"

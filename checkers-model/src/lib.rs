@@ -6,7 +6,7 @@
 //! geometry, occupancy, legal move sets, jump closures, win flags, and
 //! outcomes after every ply. It shares no code with `checkers-core` — not even
 //! the PRNG — so agreement is evidence rather than tautology. It is not tuned
-//! and uses `HashMap`/`HashSet` throughout where a real engine would use a
+//! and uses plain `std` maps and sets throughout where a real engine would use a
 //! packed 121-cell array and bitboards.
 //!
 //! Normative claims live in `checkers-core` as registered `Law` impls; cite law

@@ -1,12 +1,12 @@
 //! Move representation and generation (Impl. Spec. §§11-12, 16, 19-20).
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{BTreeSet, VecDeque};
 
 use crate::board::{Board, Player};
 use crate::coord::{Coord, Dir};
 use crate::state::State;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum MoveKind {
     Step,
     Jump,
@@ -78,7 +78,7 @@ pub fn is_legal_step(state: &State, player: Player, origin: Coord, to: Coord) ->
 
 /// Landing holes of the single jumps out of `cur` (§10): over a hole of Ω,
 /// the occupied holes excluding the moving piece, into a board hole outside Ω.
-fn single_jumps(board: &Board, others: &HashSet<Coord>, cur: Coord) -> Vec<Coord> {
+fn single_jumps(board: &Board, others: &BTreeSet<Coord>, cur: Coord) -> Vec<Coord> {
     let mut out = Vec::new();
     for d in Dir::ALL {
         let (mid, dest) = (cur.add(d), cur.jump_dest(d));
@@ -101,13 +101,13 @@ fn single_jumps(board: &Board, others: &HashSet<Coord>, cur: Coord) -> Vec<Coord
 /// the forward closure of a graph fixed once per turn. A single visited set over
 /// **positions** suffices — keying on `(state, position)` is unnecessary and
 /// does not terminate (§17, §18).
-pub fn jump_destinations(state: &State, origin: Coord) -> HashSet<Coord> {
+pub fn jump_destinations(state: &State, origin: Coord) -> BTreeSet<Coord> {
     // Ω: occupied holes excluding the moving piece.
-    let others: HashSet<Coord> = state.occupied().filter(|&c| c != origin).collect();
+    let others: BTreeSet<Coord> = state.occupied().filter(|&c| c != origin).collect();
 
     // Breadth-first, with `reachable` as the visited set. Jumping back into the
     // origin is not a move, so the origin is never recorded.
-    let mut reachable = HashSet::new();
+    let mut reachable = BTreeSet::new();
     let mut queue = VecDeque::from([origin]);
     while let Some(cur) = queue.pop_front() {
         for dest in single_jumps(state.board(), &others, cur) {
@@ -124,12 +124,12 @@ pub fn jump_destinations(state: &State, origin: Coord) -> HashSet<Coord> {
 /// guard below is a presentational restriction and does not change the
 /// destination set computed by [`jump_destinations`].
 pub fn jump_routes(state: &State, origin: Coord, max_len: usize) -> Vec<Vec<Coord>> {
-    let others: HashSet<Coord> = state.occupied().filter(|&c| c != origin).collect();
+    let others: BTreeSet<Coord> = state.occupied().filter(|&c| c != origin).collect();
     let mut out = Vec::new();
 
     fn walk(
         board: &Board,
-        others: &HashSet<Coord>,
+        others: &BTreeSet<Coord>,
         cur: Coord,
         path: &mut Vec<Coord>,
         max_len: usize,
@@ -191,7 +191,7 @@ mod tests {
         let state = State::initial(Board::new());
         for p in 0..6 {
             let moves = legal_moves(&state, p);
-            let unique: HashSet<&Move> = moves.iter().collect();
+            let unique: BTreeSet<_> = moves.iter().map(Move::key).collect();
             assert_eq!(unique.len(), moves.len(), "duplicate moves for player {p}");
         }
     }
@@ -277,7 +277,7 @@ mod tests {
             let origin = occupied[rng.below(occupied.len() as u32) as usize];
 
             let bfs = jump_destinations(&state, origin);
-            let dfs: HashSet<Coord> = jump_routes(&state, origin, all.len())
+            let dfs: BTreeSet<Coord> = jump_routes(&state, origin, all.len())
                 .iter()
                 .map(|r| *r.last().unwrap())
                 .filter(|&c| c != origin)

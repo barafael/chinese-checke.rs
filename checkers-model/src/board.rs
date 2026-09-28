@@ -1,7 +1,7 @@
 //! Board geometry: the star, the camps, and the invariants that prove it is a
 //! star rather than a 121-hole look-alike (Impl. Spec. §§2-6).
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{BTreeSet, VecDeque};
 
 use crate::coord::{Coord, Dir};
 
@@ -16,9 +16,9 @@ pub type Player = u8;
 /// The board: the set of playable holes plus the six camps.
 #[derive(Debug, Clone)]
 pub struct Board {
-    holes: HashSet<Coord>,
-    hex: HashSet<Coord>,
-    camps: [HashSet<Coord>; NUM_PLAYERS],
+    holes: BTreeSet<Coord>,
+    hex: BTreeSet<Coord>,
+    camps: [BTreeSet<Coord>; NUM_PLAYERS],
 }
 
 impl Board {
@@ -26,7 +26,7 @@ impl Board {
     ///
     /// All three constraints are required: `|q+r| <= 4` alone describes an
     /// unbounded strip.
-    fn central_hex() -> HashSet<Coord> {
+    fn central_hex() -> BTreeSet<Coord> {
         (-4..=4)
             .flat_map(|q| (-4..=4).map(move |r| Coord::new(q, r)))
             .filter(|c| c.q.abs() <= 4 && c.r.abs() <= 4 && (c.q + c.r).abs() <= 4)
@@ -39,7 +39,7 @@ impl Board {
     /// The inward-pointing variant `-q+5 <= r <= 0` also yields 10 holes and a
     /// 121-hole board, but meets the hexagon in a single hole, so the camps hang
     /// off the corners. See `tests::inward_camp_is_rejected`.
-    fn base_camp() -> HashSet<Coord> {
+    fn base_camp() -> BTreeSet<Coord> {
         (5..=8)
             .flat_map(|q| (-4..=-(q - 4)).map(move |r| Coord::new(q, r)))
             .collect()
@@ -52,9 +52,9 @@ impl Board {
 
     /// The hexagon plus the six rotations of an arbitrary `base` camp, so the
     /// tests can build look-alike boards the same way.
-    fn from_base_camp(base: &HashSet<Coord>) -> Self {
+    fn from_base_camp(base: &BTreeSet<Coord>) -> Self {
         let hex = Self::central_hex();
-        let camps: [HashSet<Coord>; NUM_PLAYERS] =
+        let camps: [BTreeSet<Coord>; NUM_PLAYERS] =
             std::array::from_fn(|i| base.iter().map(|c| c.rotate60_n(i as u32)).collect());
         let mut holes = hex.clone();
         holes.extend(camps.iter().flatten());
@@ -70,16 +70,16 @@ impl Board {
     }
 
     #[cfg(test)]
-    pub(crate) fn hex(&self) -> &HashSet<Coord> {
+    pub(crate) fn hex(&self) -> &BTreeSet<Coord> {
         &self.hex
     }
 
-    pub fn camp(&self, player: Player) -> &HashSet<Coord> {
+    pub fn camp(&self, player: Player) -> &BTreeSet<Coord> {
         &self.camps[player as usize % NUM_PLAYERS]
     }
 
     /// Target camp `O_i = C_{(i+3) mod 6}` (§7).
-    pub fn target_camp(&self, player: Player) -> &HashSet<Coord> {
+    pub fn target_camp(&self, player: Player) -> &BTreeSet<Coord> {
         self.camp((player + 3) % NUM_PLAYERS as u8)
     }
 
@@ -97,7 +97,7 @@ impl Board {
         let Some(&start) = self.holes.iter().next() else {
             return true;
         };
-        let mut seen = HashSet::from([start]);
+        let mut seen = BTreeSet::from([start]);
         let mut queue = VecDeque::from([start]);
         while let Some(x) = queue.pop_front() {
             for d in Dir::ALL {
@@ -116,7 +116,7 @@ impl Board {
         assert_eq!(self.hex.len(), HEX_HOLES, "hexagon must have 61 holes");
 
         // Disjoint union: every hole covered exactly once.
-        let mut seen = HashSet::new();
+        let mut seen = BTreeSet::new();
         for region in std::iter::once(&self.hex).chain(&self.camps) {
             for &x in region {
                 assert!(seen.insert(x), "regions overlap at {x:?}");
@@ -131,7 +131,7 @@ impl Board {
                 8,
                 "camp {i} must sit flush against a hexagon edge (8 contacts)"
             );
-            let opposite: HashSet<Coord> = self.camp(i).iter().map(|c| c.negate()).collect();
+            let opposite: BTreeSet<Coord> = self.camp(i).iter().map(|c| c.negate()).collect();
             assert_eq!(
                 *self.target_camp(i),
                 opposite,
@@ -140,7 +140,7 @@ impl Board {
         }
 
         assert!(self.is_connected(), "board must be connected");
-        let mirrored: HashSet<Coord> = self.holes.iter().map(|c| c.negate()).collect();
+        let mirrored: BTreeSet<Coord> = self.holes.iter().map(|c| c.negate()).collect();
         assert_eq!(mirrored, self.holes, "board must be centrally symmetric");
     }
 
@@ -203,7 +203,7 @@ mod tests {
     fn opposite_camps_are_point_reflections() {
         let b = Board::new();
         for i in 0..6u8 {
-            let expect: HashSet<Coord> = b.camp(i).iter().map(|c| c.negate()).collect();
+            let expect: BTreeSet<Coord> = b.camp(i).iter().map(|c| c.negate()).collect();
             assert_eq!(*b.target_camp(i), expect);
             // and the relation is an involution
             assert_eq!(b.target_camp((i + 3) % 6), b.camp(i));
@@ -214,7 +214,7 @@ mod tests {
     /// passes every cardinality check but is not a star.
     #[test]
     fn inward_camp_is_rejected() {
-        let inward: HashSet<Coord> = (5..=8)
+        let inward: BTreeSet<Coord> = (5..=8)
             .flat_map(|q| (-q + 5..=0).map(move |r| Coord::new(q, r)))
             .collect();
         let lookalike = Board::from_base_camp(&inward);
