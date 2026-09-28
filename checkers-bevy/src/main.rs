@@ -535,19 +535,15 @@ fn handle_buttons(
             },
             ControlButton::Replay => match web::load_record() {
                 Ok(text) => match record::GameRecord::from_text(&text) {
-                    Ok(rec) => {
-                        let n = rec.moves.len();
-                        match Session::resumed_prefix(&rec, n) {
-                            Ok(s) => {
-                                *session = s;
-                                commands.insert_resource(replay::ReplayView::at_end(rec));
-                                session.message = format!(
-                                    "Replay: move {n} of {n} - arrows step, Space autoplay, Esc back"
-                                );
-                            }
-                            Err(f) => session.message = format!("Could not replay: {f}"),
+                    Ok(rec) => match Session::resumed_prefix(&rec, rec.moves.len()) {
+                        Ok(s) => {
+                            let view = replay::ReplayView::at_end(rec);
+                            *session = s;
+                            session.message = view.status();
+                            commands.insert_resource(view);
                         }
-                    }
+                        Err(f) => session.message = format!("Could not replay: {f}"),
+                    },
                     Err(f) => session.message = format!("Could not open: {f}"),
                 },
                 Err(e) => session.message = format!("Replay failed: {e}"),

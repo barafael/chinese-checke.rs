@@ -19,9 +19,8 @@ use checkers_core::geometry::Coord;
 use std::collections::VecDeque;
 use std::time::Duration;
 
-use crate::LastMove;
-use crate::Session;
 use crate::board_view::{HOLE_RADIUS, coord_to_world};
+use crate::{LastMove, Session};
 
 /// Which hole a piece stands on: attached to every piece by the piece sync,
 /// this is how the flight finds the one that just landed on the destination.
@@ -41,8 +40,8 @@ pub struct Replay {
     pending: VecDeque<Flight>,
     /// The animation in flight, if any.
     flight: Option<Flight>,
-    /// The last completed flight, shown as a static gray trace.
-    trace: Option<Trace>,
+    /// The holes of the last completed flight, shown as a static gray trace.
+    trace: Option<Vec<Coord>>,
     /// Bumped whenever `trace` is replaced or cleared, so [`sync_trace`] can
     /// tell a real change from a frame it has already drawn.
     trace_version: u64,
@@ -61,11 +60,6 @@ struct Flight {
     points: Vec<Vec2>,
     elapsed: f32,
     total: f32,
-}
-
-/// A completed flight, left on the board as a gray trace.
-struct Trace {
-    path: Vec<Coord>,
 }
 
 impl Replay {
@@ -134,10 +128,7 @@ pub fn advance(
     mut replay: ResMut<Replay>,
     mut pieces: Query<(&PieceCoord, &mut Transform)>,
 ) {
-    if replay.flight.is_none() {
-        replay.flight = replay.pending.pop_front();
-    }
-    let Some(mut flight) = replay.flight.take() else {
+    let Some(mut flight) = replay.flight.take().or_else(|| replay.pending.pop_front()) else {
         return;
     };
 
@@ -169,7 +160,7 @@ pub fn advance(
         replay.flight = Some(flight);
         return;
     }
-    replay.trace = Some(Trace { path: flight.path });
+    replay.trace = Some(flight.path);
     replay.trace_version += 1;
 }
 
@@ -213,7 +204,7 @@ pub fn sync_trace(
     for e in &existing {
         commands.entity(e).despawn();
     }
-    let Some(trace) = &replay.trace else {
+    let Some(path) = &replay.trace else {
         return;
     };
 
@@ -223,7 +214,7 @@ pub fn sync_trace(
     // dark neutral holes, which is what makes the path legible at a glance.
     let dot = meshes.add(Circle::new(HOLE_RADIUS * 0.8));
     let mat = materials.add(Color::srgba(0.82, 0.84, 0.88, 0.75));
-    for hole in &trace.path {
+    for hole in path {
         let p = coord_to_world(*hole);
         commands.spawn((
             Mesh2d(dot.clone()),
@@ -274,6 +265,16 @@ impl ReplayView {
             autoplay: false,
             next_at: None,
         }
+    }
+
+    /// The status line while the viewer is up: where the cursor stands, and
+    /// the keys that move it.
+    pub fn status(&self) -> String {
+        format!(
+            "Replay: move {} of {} - arrows step, Space autoplay, Esc back",
+            self.cursor,
+            self.record.moves.len()
+        )
     }
 }
 
@@ -330,11 +331,7 @@ pub fn handle_view_keys(
         match Session::resumed_prefix(&view.record, view.cursor) {
             Ok(s) => {
                 *session = s;
-                session.message = format!(
-                    "Replay: move {} of {} - arrows step, Space autoplay, Esc back",
-                    view.cursor,
-                    view.record.moves.len()
-                );
+                session.message = view.status();
             }
             Err(f) => {
                 // Our own record refused by our own rules can only mean a
@@ -420,9 +417,8 @@ mod tests {
         let mut app = App::new();
         app.insert_resource(Time::<()>::default())
             .insert_resource(Replay::default())
+            .insert_resource(Session::new(crate::setup::Seating::Two))
             .add_systems(Update, (watch, advance).chain());
-        app.world_mut()
-            .insert_resource(crate::Session::new(crate::setup::Seating::Two));
         app
     }
 
@@ -436,7 +432,7 @@ mod tests {
     }
 
     fn announce(app: &mut App, mover: Player, path: Vec<Coord>) {
-        app.world_mut().resource_mut::<crate::Session>().last_move = Some(LastMove { mover, path });
+        app.world_mut().resource_mut::<Session>().last_move = Some(LastMove { mover, path });
     }
 
     /// A move that lands while its predecessor is still airborne is replayed
@@ -459,20 +455,17 @@ mod tests {
         run(&mut app, Duration::from_millis(300)); // A lands; B must survive
 
         assert!(
-            !app.world().resource::<Replay>().pending.is_empty()
-                || app.world().resource::<Replay>().flight.is_some(),
+            app.world().resource::<Replay>().busy(),
             "B is queued or flying, never discarded"
         );
         run(&mut app, Duration::from_millis(300)); // B lands
         run(&mut app, Duration::from_millis(300)); // B finishes airtime
 
-        let trace = app
-            .world()
-            .resource::<Replay>()
-            .trace
-            .as_ref()
-            .expect("B's flight completed");
-        assert_eq!(trace.path, vec![Coord::new(1, 0), dest_b]);
+        assert_eq!(
+            app.world().resource::<Replay>().trace,
+            Some(vec![Coord::new(1, 0), dest_b]),
+            "B's flight completed"
+        );
     }
 
     /// A destination missing on one frame (a rebuild between the piece sync
@@ -498,12 +491,10 @@ mod tests {
         piece(app.world_mut(), dest_a);
         run(&mut app, Duration::from_millis(300)); // piece back, flight completes
 
-        let trace = app
-            .world()
-            .resource::<Replay>()
-            .trace
-            .as_ref()
-            .expect("A's flight completed");
-        assert_eq!(trace.path, vec![Coord::new(-1, 1), dest_a]);
+        assert_eq!(
+            app.world().resource::<Replay>().trace,
+            Some(vec![Coord::new(-1, 1), dest_a]),
+            "A's flight completed"
+        );
     }
 }
