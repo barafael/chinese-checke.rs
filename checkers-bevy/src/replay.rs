@@ -22,7 +22,6 @@ use std::time::Duration;
 use crate::LastMove;
 use crate::Session;
 use crate::board_view::{HOLE_RADIUS, coord_to_world};
-use crate::draw::DrawContext;
 
 /// Which hole a piece stands on: attached to every piece by the piece sync,
 /// this is how the flight finds the one that just landed on the destination.
@@ -199,17 +198,13 @@ fn flight_transform(points: &[Vec2], u: f32) -> Transform {
 /// the session changes that the selection highlights are rebuilt on every
 /// turn.
 pub fn sync_trace(
-    draw: DrawContext,
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
     replay: Res<Replay>,
     existing: Query<Entity, With<TraceMarker>>,
     mut drawn: Local<Option<u64>>,
 ) {
-    let DrawContext {
-        mut commands,
-        mut meshes,
-        mut materials,
-    } = draw;
-
     if *drawn == Some(replay.trace_version) {
         return;
     }

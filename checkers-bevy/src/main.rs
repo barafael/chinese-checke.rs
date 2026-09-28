@@ -172,10 +172,6 @@ fn main() {
 
 // --- marker components -----------------------------------------------------
 
-// The draw bundle lives in the library, so the replay module's trace system
-// shares it with these systems.
-use checkers_bevy::draw::DrawContext;
-
 #[derive(Component)]
 struct HoleMarker;
 
@@ -678,8 +674,8 @@ fn handle_clicks(
 
 /// Everything an input system drives in a live round: the session being
 /// played, the table and house rules it was dealt from, and the sound
-/// handler. One parameter in place of seven, exactly the
-/// [`crate::draw::DrawContext`] deal.
+/// handler. One parameter in place of seven, which keeps `handle_keys` under
+/// the clippy argument limit.
 #[derive(SystemParam)]
 struct PlayContext<'w, 's> {
     session: ResMut<'w, Session>,
@@ -778,15 +774,12 @@ fn sync_status_visibility(
 /// Redraw pieces from the position being displayed, despawn-and-respawn so
 /// the view cannot drift from the model.
 fn sync_pieces(
-    draw: DrawContext,
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
     existing: Query<Entity, With<PieceMarker>>,
     session: Res<Session>,
 ) {
-    let DrawContext {
-        mut commands,
-        mut meshes,
-        mut materials,
-    } = draw;
     if !session.is_changed() {
         return;
     }
@@ -820,12 +813,13 @@ fn sync_pieces(
     }
 }
 
-fn sync_highlights(draw: DrawContext, stale: Query<Entity, With<Overlay>>, session: Res<Session>) {
-    let DrawContext {
-        mut commands,
-        mut meshes,
-        mut materials,
-    } = draw;
+fn sync_highlights(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
+    stale: Query<Entity, With<Overlay>>,
+    session: Res<Session>,
+) {
     if !session.is_changed() {
         return;
     }
@@ -1037,15 +1031,12 @@ fn player_label(net: &NetState, session: &Session, p: Player) -> String {
 /// is visible on the board itself, not only in the status line. Rebuilt when
 /// the turn changes.
 fn sync_camp_indicator(
-    draw: DrawContext,
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
     stale: Query<Entity, With<CampMarker>>,
     session: Res<Session>,
 ) {
-    let DrawContext {
-        mut commands,
-        mut meshes,
-        mut materials,
-    } = draw;
     if !session.is_changed() {
         return;
     }

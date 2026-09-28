@@ -12,7 +12,6 @@
 
 pub mod ai;
 pub mod board_view;
-pub mod draw;
 pub mod lobby;
 pub mod move_log;
 pub mod net;

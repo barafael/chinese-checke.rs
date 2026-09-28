@@ -1373,9 +1373,8 @@ pub fn elect_host(socket: Option<ResMut<MatchboxSocket>>, mut net: ResMut<NetSta
 
 /// The world one lobby conversation reads and mutates: the roster and house
 /// rules being negotiated, and the window/cursor furniture for peer pointers.
-/// One parameter in place of eight, exactly the [`crate::draw::DrawContext`]
-/// deal: both lobby pumps would otherwise cross the clippy argument limit,
-/// and being a unit of type keeps `pump_socket` and `handle_buttons` from
+/// One parameter in place of eight: both lobby pumps would otherwise cross
+/// the clippy argument limit, and being a unit of type keeps `pump_socket` and `handle_buttons` from
 /// drifting apart. The socket is not here: it is an optional input, so each
 /// system takes it as its own parameter.
 #[derive(SystemParam)]

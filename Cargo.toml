@@ -13,7 +13,10 @@ checkers-net = { path = "checkers-net" }
 checkers-ai = { path = "checkers-ai" }
 linkme = "0.3"
 
-bevy = "0.19"
+# Bevy's defaults minus the `3d` group: the game draws flat meshes and UI, so
+# PBR, glTF, lights and the 3D post-processing chain would be dead weight in
+# every build, the web bundle above all.
+bevy = { version = "0.19", default-features = false, features = ["2d", "ui", "audio"] }
 # Pinned to the same fork omdurman uses: the crates.io release does not yet
 # support Bevy 0.19.
 bevy_matchbox = { git = "https://github.com/barafael/matchbox.git" }
