@@ -21,8 +21,6 @@ use std::time::Duration;
 
 use crate::LastMove;
 use crate::Session;
-use crate::board_amlah;
-use crate::board_style::{BoardStyle, BoardVisual};
 use crate::board_view::{HOLE_RADIUS, coord_to_world};
 use crate::draw::DrawContext;
 
@@ -134,7 +132,6 @@ pub fn watch(session: Res<Session>, mut replay: ResMut<Replay>) {
 /// and on landing leave the trace.
 pub fn advance(
     time: Res<Time>,
-    style: Res<BoardStyle>,
     mut replay: ResMut<Replay>,
     mut pieces: Query<(&PieceCoord, &mut Transform)>,
 ) {
@@ -165,7 +162,7 @@ pub fn advance(
         return;
     };
 
-    *transform = flight_transform(&flight.points, u, *style);
+    *transform = flight_transform(&flight.points, u);
 
     // The trace is only left once the whole path has flown, so a flight
     // interrupted at 90% leaves nothing half-explained on the board.
@@ -180,12 +177,10 @@ pub fn advance(
 /// The transform of a piece at fraction `u` along a flight path.
 ///
 /// Position lerps hole to hole; the arc peaks mid-flight so the piece visibly
-/// passes over whatever it jumps. Per style, the shared classic-plane path is
-/// mapped into that style's world, with the piece's own rest offset applied.
-/// In the classic style the board is seen straight down, so the arc is pure
-/// draw order: the flying piece lifts above every other sprite while in the
-/// air.
-fn flight_transform(points: &[Vec2], u: f32, style: BoardStyle) -> Transform {
+/// passes over whatever it jumps. The board is seen straight down, so the arc
+/// is pure draw order: the flying piece lifts above every other sprite while
+/// in the air.
+fn flight_transform(points: &[Vec2], u: f32) -> Transform {
     let lift = (std::f32::consts::PI * u).sin();
 
     // Walk the path: `segs` equal-duration segments, `u` in [0, 1] spread
@@ -196,42 +191,29 @@ fn flight_transform(points: &[Vec2], u: f32, style: BoardStyle) -> Transform {
     let t = scaled - (index - 1) as f32;
     let lerped = points[index - 1].lerp(points[index], t);
 
-    match style {
-        BoardStyle::Classic => Transform::from_xyz(lerped.x, lerped.y, 1.0 + lift * 1.2),
-        BoardStyle::Amlah => {
-            let w = board_amlah::plane_to_world3(lerped);
-            Transform::from_xyz(
-                w.x,
-                board_amlah::HOLE_FILL_Y + board_amlah::PEG_HEIGHT * 0.5 + lift * 0.25,
-                w.z,
-            )
-        }
-    }
+    Transform::from_xyz(lerped.x, lerped.y, 1.0 + lift * 1.2)
 }
 
 /// The trace: one gray translucent dot on every hole the opponent's move
-/// touched, in the current style. Rebuilt only when the trace or the style
-/// actually changed — it must survive the session changes that the selection
-/// highlights are rebuilt on every turn.
+/// touched. Rebuilt only when the trace actually changed — it must survive
+/// the session changes that the selection highlights are rebuilt on every
+/// turn.
 pub fn sync_trace(
     draw: DrawContext,
     replay: Res<Replay>,
-    style: Res<BoardStyle>,
     existing: Query<Entity, With<TraceMarker>>,
-    mut drawn: Local<Option<(u64, BoardStyle)>>,
+    mut drawn: Local<Option<u64>>,
 ) {
     let DrawContext {
         mut commands,
         mut meshes,
         mut materials,
-        mut std_materials,
     } = draw;
 
-    let key = (replay.trace_version, *style);
-    if *drawn == Some(key) {
+    if *drawn == Some(replay.trace_version) {
         return;
     }
-    *drawn = Some(key);
+    *drawn = Some(replay.trace_version);
 
     for e in &existing {
         commands.entity(e).despawn();
@@ -244,54 +226,23 @@ pub fn sync_trace(
     // and a dot peeking out beneath it reads as a shadow, not a claim.
     // Sized to fill most of the hole and bright enough to read against the
     // dark neutral holes, which is what makes the path legible at a glance.
-    match *style {
-        BoardStyle::Classic => {
-            let dot = meshes.add(Circle::new(HOLE_RADIUS * 0.8));
-            let mat = materials.add(Color::srgba(0.82, 0.84, 0.88, 0.75));
-            for hole in &trace.path {
-                let p = coord_to_world(*hole);
-                commands.spawn((
-                    Mesh2d(dot.clone()),
-                    MeshMaterial2d(mat.clone()),
-                    Transform::from_xyz(p.x, p.y, 0.9),
-                    TraceMarker,
-                    BoardVisual,
-                ));
-            }
-        }
-        BoardStyle::Amlah => {
-            // Flat on the board, just under the staged-jump trail (0.008) and
-            // just over the connection lines (0.005). Big enough to cover the
-            // hole fill, and dark enough that the cream plate does not wash
-            // it out — a mark on the plate rather than a hole in it.
-            let flat = Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2);
-            let dot = meshes.add(Circle::new(0.084));
-            let mat = std_materials.add(StandardMaterial {
-                base_color: Color::srgba(0.30, 0.30, 0.34, 0.8),
-                unlit: true,
-                alpha_mode: AlphaMode::Blend,
-                ..default()
-            });
-            for hole in &trace.path {
-                let w = board_amlah::plane_to_world3(coord_to_world(*hole));
-                commands.spawn((
-                    Mesh3d(dot.clone()),
-                    MeshMaterial3d(mat.clone()),
-                    Transform::from_rotation(flat).with_translation(Vec3::new(w.x, 0.006, w.z)),
-                    TraceMarker,
-                    BoardVisual,
-                ));
-            }
-        }
+    let dot = meshes.add(Circle::new(HOLE_RADIUS * 0.8));
+    let mat = materials.add(Color::srgba(0.82, 0.84, 0.88, 0.75));
+    for hole in &trace.path {
+        let p = coord_to_world(*hole);
+        commands.spawn((
+            Mesh2d(dot.clone()),
+            MeshMaterial2d(mat.clone()),
+            Transform::from_xyz(p.x, p.y, 0.9),
+            TraceMarker,
+        ));
     }
 }
 
 /// Marker for the gray trace left by the opponent's last move.
 ///
 /// Deliberately not the selection `Overlay` marker — that is cleared on every
-/// session change, while a trace must outlive the turn it arrived on. It
-/// carries `BoardVisual` so a style switch despawns it with the rest of the
-/// board; [`sync_trace`] redraws it in the new style.
+/// session change, while a trace must outlive the turn it arrived on.
 #[derive(Component)]
 pub struct TraceMarker;
 
@@ -449,36 +400,20 @@ mod tests {
     #[test]
     fn the_flight_walks_the_path_from_origin_to_destination() {
         let points = vec![Vec2::ZERO, Vec2::new(34.0, 0.0), Vec2::new(34.0, 34.0)];
-        for style in [BoardStyle::Classic, BoardStyle::Amlah] {
-            let start = flight_transform(&points, 0.0, style);
-            let end = flight_transform(&points, 1.0, style);
-            match style {
-                BoardStyle::Classic => {
-                    assert!(start.translation.xy().distance(points[0]) < 1e-4);
-                    assert!(end.translation.xy().distance(points[2]) < 1e-4);
-                }
-                BoardStyle::Amlah => {
-                    let from = board_amlah::plane_to_world3(points[0]);
-                    let to = board_amlah::plane_to_world3(points[2]);
-                    assert!(start.translation.xz().distance(Vec2::new(from.x, from.z)) < 1e-4);
-                    assert!(end.translation.xz().distance(Vec2::new(to.x, to.z)) < 1e-4);
-                }
-            }
-        }
+        let start = flight_transform(&points, 0.0);
+        let end = flight_transform(&points, 1.0);
+        assert!(start.translation.xy().distance(points[0]) < 1e-4);
+        assert!(end.translation.xy().distance(points[2]) < 1e-4);
     }
 
-    /// The arc peaks at mid-flight: in 3D the piece lifts above its rest
-    /// height, and in 2D above every other sprite's layer.
+    /// The arc peaks at mid-flight: the piece lifts above every other
+    /// sprite's layer.
     #[test]
     fn the_flight_arcs_above_the_rest_position() {
         let points = vec![Vec2::ZERO, Vec2::new(34.0, 0.0)];
-        let rest = flight_transform(&points, 0.0, BoardStyle::Classic);
-        let peak = flight_transform(&points, 0.5, BoardStyle::Classic);
+        let rest = flight_transform(&points, 0.0);
+        let peak = flight_transform(&points, 0.5);
         assert!(peak.translation.z > rest.translation.z + 0.5);
-
-        let rest = flight_transform(&points, 0.0, BoardStyle::Amlah);
-        let peak = flight_transform(&points, 0.5, BoardStyle::Amlah);
-        assert!(peak.translation.y > rest.translation.y + 0.1);
     }
 
     // The queue behaviour is exercised through the real systems, so the
@@ -489,7 +424,6 @@ mod tests {
     fn app() -> App {
         let mut app = App::new();
         app.insert_resource(Time::<()>::default())
-            .insert_resource(BoardStyle::Classic)
             .insert_resource(Replay::default())
             .add_systems(Update, (watch, advance).chain());
         app.world_mut()

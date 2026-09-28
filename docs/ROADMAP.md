@@ -128,13 +128,12 @@ the **`.cchkrs`** extension (decided).
 
 ## Phase 7 — Touch input
 
-- [x] One-finger drag orbits the amlah board; a two-finger pinch works the
-  radius (a touchscreen has neither a right button nor a wheel). Taps click
-  the board through their own path: on the web canvas winit prevents the
-  browser's emulated mouse events, so a finger lifting within a flick of
-  where it landed counts as a click, and a drag — which orbits — travels too
-  far to qualify. The viewport meta and `touch-action: none` were already in
-  place.
+- [x] Taps click the board through their own path: on the web canvas winit
+  prevents the browser's emulated mouse events, so a finger lifting within a
+  flick of where it landed counts as a click, and a drag travels too far to
+  qualify. The viewport meta and `touch-action: none` were already in place.
+  (The one-finger orbit and two-finger pinch zoom went with the 3D board
+  style, removed 2026-09-28: the game has one look.)
 - [ ] The manual spike remains: how it *feels* on real glass (tap threshold,
   hit-target sizing) can only be judged on a device.
 

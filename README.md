@@ -169,14 +169,12 @@ committed until you confirm, so any chain can be abandoned.
 | Save / Open / Replay buttons | Write a `.cchkrs` record, resume one, or walk through it (arrows step, Space autoplays, Esc back) |
 | S | Mute or unmute the sounds |
 | M (game over) | Back to the lobby |
-| One finger, two fingers, tap | Orbit the 3D board, pinch its zoom, and click, on a touchscreen |
+| Tap | Click, on a touchscreen |
 | U | Undo the last staged hop |
 | Escape | Clear the selection |
 | A | Let the computer play the current seat once |
 | T | Toggle the status panel |
-| V | Cycle board style: classic (2D) / amlah (3D) |
 | R | Restart with a fresh two-player deal |
-| Right-drag, wheel (amlah) | Orbit and zoom the 3D camera |
 
 Confirming before the piece has actually moved is refused. That is not a corner
 case to be tidied away: a piece can hop out over a blocker and straight back, so

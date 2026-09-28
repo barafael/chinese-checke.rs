@@ -9,17 +9,8 @@
 //! only when they come back **host-sequenced** ([`net`]) — solo play takes
 //! the same path, so the networked code is always exercised. Confirming a
 //! turn that never moved is refused (chapter 9).
-//!
-//! # Visualizations
-//!
-//! The session is board state; the visuals are a pure function of session +
-//! [`BoardStyle`](board_style::BoardStyle), rebuilt wholesale on change, so
-//! styles switch mid-game (`V`) without touching play. Two styles: `Classic`
-//! (flat 2D) and `Amlah` ([`board_amlah`], 3D).
 
 pub mod ai;
-pub mod board_amlah;
-pub mod board_style;
 pub mod board_view;
 pub mod draw;
 pub mod lobby;
