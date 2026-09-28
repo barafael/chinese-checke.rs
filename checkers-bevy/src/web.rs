@@ -44,12 +44,10 @@ pub fn room_from_url() -> Option<RoomId> {
 #[cfg(any(target_family = "wasm", test))]
 fn room_from_fragment(fragment: &str) -> Option<RoomId> {
     let fragment = fragment.strip_prefix('#').unwrap_or(fragment);
-    for pair in fragment.split(['&', ';']) {
-        if let Some(value) = pair.strip_prefix("room=") {
-            return RoomId::parse(value).ok();
-        }
-    }
-    None
+    let value = fragment
+        .split(['&', ';'])
+        .find_map(|pair| pair.strip_prefix("room="))?;
+    RoomId::parse(value).ok()
 }
 
 /// Publish the room in the URL so the address can be copied and shared. The
@@ -271,9 +269,8 @@ mod tests {
         for _ in 0..50 {
             assert_eq!(petname_avoiding(&taken), "otter", "the one free name");
         }
-        let everything: Vec<&str> = PET_NAMES.to_vec();
-        let numbered = petname_avoiding(&everything);
-        assert!(!everything.contains(&numbered.as_str()), "got {numbered}");
+        let numbered = petname_avoiding(PET_NAMES);
+        assert!(!PET_NAMES.contains(&numbered.as_str()), "got {numbered}");
     }
 
     #[test]
