@@ -65,16 +65,12 @@ impl core::fmt::Display for RecordFault {
             }
             RecordFault::Players(line) => write!(f, "unknown players: {line:?}"),
             RecordFault::Rules(line) => write!(f, "unknown rules: {line:?}"),
-            RecordFault::Move { line, text } => {
-                write!(f, "move {line} does not parse: {text:?}")
-            }
+            RecordFault::Move { line, text } => write!(f, "move {line} does not parse: {text:?}"),
             RecordFault::Count { declared, found } => write!(
                 f,
                 "the header says {declared} moves, but the record holds {found}"
             ),
-            RecordFault::Replay { ply, why } => {
-                write!(f, "move {} is not legal: {}", ply + 1, why)
-            }
+            RecordFault::Replay { ply, why } => write!(f, "move {} is not legal: {why}", ply + 1),
         }
     }
 }
@@ -84,31 +80,25 @@ impl core::error::Error for RecordFault {}
 impl GameRecord {
     /// The record as `.cchkrs` text.
     pub fn to_text(&self) -> String {
-        let mut out = String::from(HEADER);
-        out.push_str("\nplayers");
-        for p in &self.players {
-            out.push_str(&format!(" {}", p.index()));
-        }
-        out.push_str(if self.variants.forbid_foreign_camps {
-            "\nvariants foreign"
+        let variants = if self.variants.forbid_foreign_camps {
+            "foreign"
         } else {
-            "\nvariants standard"
-        });
-        out.push_str("\nai");
-        if self.ai_players.is_empty() {
-            out.push_str(" -");
+            "standard"
+        };
+        let ai = if self.ai_players.is_empty() {
+            " -".to_string()
         } else {
-            for p in &self.ai_players {
-                out.push_str(&format!(" {}", p.index()));
-            }
-        }
-        out.push_str(&format!("\nmoves {}", self.moves.len()));
+            indices(&self.ai_players)
+        };
+        let mut out = format!(
+            "{HEADER}\nplayers{}\nvariants {variants}\nai{ai}\nmoves {}",
+            indices(&self.players),
+            self.moves.len()
+        );
         for mv in &self.moves {
             let kind = if mv.jump { 'j' } else { 's' };
-            out.push_str(&format!(
-                "\n{kind} {},{} {},{}",
-                mv.origin.0, mv.origin.1, mv.destination.0, mv.destination.1
-            ));
+            let ((q0, r0), (q1, r1)) = (mv.origin, mv.destination);
+            out.push_str(&format!("\n{kind} {q0},{r0} {q1},{r1}"));
         }
         out
     }
@@ -137,23 +127,20 @@ impl GameRecord {
                 continue;
             }
             let (word, rest) = line.split_once(' ').unwrap_or((line, ""));
+            let move_fault = || RecordFault::Move {
+                line: n + 1,
+                text: line.to_string(),
+            };
             match word {
                 "players" => {
-                    let mut list = Vec::new();
-                    for tok in rest.split_whitespace() {
-                        let idx = tok
-                            .parse::<u8>()
-                            .ok()
-                            .filter(|i| Player::new(*i).is_some())
-                            .ok_or_else(|| RecordFault::Players(line.to_string()))?;
-                        list.push(Player::new(idx).expect("checked above"));
-                    }
+                    let list: Option<Vec<Player>> =
+                        rest.split_whitespace().map(parse_player).collect();
                     // A game needs a player: the replay would otherwise panic
                     // composing an empty game instead of refusing the record.
-                    if list.is_empty() {
-                        return Err(RecordFault::Players(line.to_string()));
+                    match list {
+                        Some(list) if !list.is_empty() => players = Some(list),
+                        _ => return Err(RecordFault::Players(line.to_string())),
                     }
-                    players = Some(list);
                 }
                 "variants" => {
                     variants = match rest.trim() {
@@ -170,30 +157,12 @@ impl GameRecord {
                     ai_players = rest
                         .split_whitespace()
                         .filter(|t| *t != "-")
-                        .filter_map(|t| t.parse::<u8>().ok())
-                        .filter_map(Player::new)
+                        .filter_map(parse_player)
                         .collect();
                 }
-                "moves" => {
-                    declared = Some(rest.trim().parse().map_err(|_| RecordFault::Move {
-                        line: n + 1,
-                        text: line.to_string(),
-                    })?);
-                }
-                "s" | "j" => {
-                    moves.push(
-                        parse_move(word == "j", rest).ok_or_else(|| RecordFault::Move {
-                            line: n + 1,
-                            text: line.to_string(),
-                        })?,
-                    );
-                }
-                _ => {
-                    return Err(RecordFault::Move {
-                        line: n + 1,
-                        text: line.to_string(),
-                    });
-                }
+                "moves" => declared = Some(rest.trim().parse().map_err(|_| move_fault())?),
+                "s" | "j" => moves.push(parse_move(word == "j", rest).ok_or_else(move_fault)?),
+                _ => return Err(move_fault()),
             }
         }
 
@@ -213,6 +182,16 @@ impl GameRecord {
             moves,
         })
     }
+}
+
+/// Player indices as a record line lists them, each after a space.
+fn indices(players: &[Player]) -> String {
+    players.iter().map(|p| format!(" {}", p.index())).collect()
+}
+
+/// One player index, if it names one of the six camps.
+fn parse_player(token: &str) -> Option<Player> {
+    token.parse().ok().and_then(Player::new)
 }
 
 /// Parse one `q,r q,r` pair of coordinates. Out-of-range coordinates fail
