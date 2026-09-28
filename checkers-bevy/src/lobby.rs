@@ -415,11 +415,12 @@ fn visible_if(shown: bool) -> Visibility {
 
 /// One button. Factored out because the lobby spawns rows of them and the
 /// padding, radius, and text styling must not drift between the rows.
-fn button(parent: &mut ChildSpawnerCommands, label: &str, tag: LobbyButton) {
+fn button(parent: &mut ChildSpawnerCommands, label: &str, tag: impl Bundle) {
     sized_button(parent, label, (14.0, 8.0), 15.0, tag);
 }
 
-/// A [`button`] one size smaller: the name row's Apply, and Computer.
+/// A [`button`] one size smaller, to sit level with a text field: the name
+/// row's Apply.
 fn small_button(parent: &mut ChildSpawnerCommands, label: &str, tag: impl Bundle) {
     sized_button(parent, label, (10.0, 6.0), 14.0, tag);
 }
@@ -597,7 +598,7 @@ fn spawn(mut commands: Commands, art: Res<SectorArt>) {
                             let human = LobbyButton::CornerAction(CornerCommand::Human);
                             let cpu = LobbyButton::CornerAction(CornerCommand::Cpu);
                             button(row, "Human", human);
-                            small_button(row, "Computer", (cpu, HostOnly));
+                            button(row, "Computer", (cpu, HostOnly));
                         });
 
                     // Cancel a claimed corner — yours (release), another
