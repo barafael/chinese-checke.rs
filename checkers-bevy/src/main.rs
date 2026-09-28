@@ -27,7 +27,7 @@ use checkers_bevy::setup::Seating;
 use checkers_bevy::{
     AppState, Selection, Session, audit, format_round_duration, lobby, net, record, sound, web,
 };
-use checkers_core::geometry::{all_holes, camp_of, on_board};
+use checkers_core::geometry::{Coord, all_holes, camp_of, on_board};
 use checkers_core::law::{LAWS, verify_all};
 use checkers_core::position::{Player, Position};
 use checkers_core::rules::Outcome;
@@ -488,18 +488,23 @@ fn spawn_board(
 
     for c in all_holes() {
         let material = if camp_of(c).is_some() {
-            camp_mat.clone()
+            &camp_mat
         } else {
-            hole_mat.clone()
+            &hole_mat
         };
-        let p = coord_to_world(c);
-        commands.spawn((
-            Mesh2d(hole_mesh.clone()),
-            MeshMaterial2d(material),
-            Transform::from_xyz(p.x, p.y, 0.0),
-            HoleMarker,
-        ));
+        commands.spawn((on_hole(&hole_mesh, material, c, 0.0), HoleMarker));
     }
+}
+
+/// A flat board mesh centred on hole `c`, at depth `z`: holes, pieces, and
+/// everything drawn over them.
+fn on_hole(mesh: &Handle<Mesh>, material: &Handle<ColorMaterial>, c: Coord, z: f32) -> impl Bundle {
+    let p = coord_to_world(c);
+    (
+        Mesh2d(mesh.clone()),
+        MeshMaterial2d(material.clone()),
+        Transform::from_xyz(p.x, p.y, z),
+    )
 }
 
 fn handle_buttons(
@@ -800,19 +805,13 @@ fn sync_pieces(
     let mesh = meshes.add(Circle::new(PIECE_RADIUS));
     // One material per player rather than per piece: the rebuild runs on
     // every committed turn, and 60 fresh handles are waste for six colours.
-    let mats: Vec<_> = Player::ALL
-        .iter()
-        .map(|&p| materials.add(player_colour(p)))
-        .collect();
+    let mats = Player::ALL.map(|p| materials.add(player_colour(p)));
     for &c in position.holes() {
         let Some(player) = position.occupant(c) else {
             continue;
         };
-        let p = coord_to_world(c);
         commands.spawn((
-            Mesh2d(mesh.clone()),
-            MeshMaterial2d(mats[player.index() as usize].clone()),
-            Transform::from_xyz(p.x, p.y, 1.0),
+            on_hole(&mesh, &mats[player.index() as usize], c, 1.0),
             PieceMarker,
             replay::PieceCoord(c),
         ));
@@ -837,14 +836,8 @@ fn sync_highlights(
     if let Selection::Jumping { turn } = &session.selection {
         let dot = meshes.add(Circle::new(HOLE_RADIUS * 0.55));
         let mat = materials.add(Color::srgba(1.0, 0.85, 0.4, 0.55));
-        for hole in turn.path() {
-            let p = coord_to_world(*hole);
-            commands.spawn((
-                Mesh2d(dot.clone()),
-                MeshMaterial2d(mat.clone()),
-                Transform::from_xyz(p.x, p.y, 1.5),
-                Overlay,
-            ));
+        for &hole in turn.path() {
+            commands.spawn((on_hole(&dot, &mat, hole, 1.5), Overlay));
         }
     }
 
@@ -856,26 +849,15 @@ fn sync_highlights(
         } else {
             Color::WHITE
         };
-        let p = coord_to_world(sel);
-        commands.spawn((
-            Mesh2d(ring),
-            MeshMaterial2d(materials.add(colour)),
-            Transform::from_xyz(p.x, p.y, 2.0),
-            Overlay,
-        ));
+        let mat = materials.add(colour);
+        commands.spawn((on_hole(&ring, &mat, sel, 2.0), Overlay));
     }
 
     // One hop ahead only.
     let dot = meshes.add(Circle::new(HOLE_RADIUS * 0.85));
     let mat = materials.add(Color::srgba(1.0, 1.0, 1.0, 0.8));
     for t in session.highlights() {
-        let p = coord_to_world(t);
-        commands.spawn((
-            Mesh2d(dot.clone()),
-            MeshMaterial2d(mat.clone()),
-            Transform::from_xyz(p.x, p.y, 2.0),
-            Overlay,
-        ));
+        commands.spawn((on_hole(&dot, &mat, t, 2.0), Overlay));
     }
 }
 
@@ -1053,17 +1035,11 @@ fn sync_camp_indicator(
     }
 
     // The player's own hue, over the neutral grey camp.
-    let colour = player_colour(session.game.turn());
+    let turn = session.game.turn();
     let ring = meshes.add(Annulus::new(PIECE_RADIUS + 1.0, PIECE_RADIUS + 3.0));
-    let mat = materials.add(colour.with_alpha(0.55));
-    for &c in session.game.turn().start_camp() {
-        let p = coord_to_world(c);
-        commands.spawn((
-            Mesh2d(ring.clone()),
-            MeshMaterial2d(mat.clone()),
-            Transform::from_xyz(p.x, p.y, 1.2),
-            CampMarker,
-        ));
+    let mat = materials.add(player_colour(turn).with_alpha(0.55));
+    for &c in turn.start_camp() {
+        commands.spawn((on_hole(&ring, &mat, c, 1.2), CampMarker));
     }
 }
 
