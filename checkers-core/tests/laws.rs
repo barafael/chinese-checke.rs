@@ -95,10 +95,9 @@ fn law_statements_have_balanced_delimiters() {
 
 #[test]
 fn proof_backed_laws_are_also_runtime_checked() {
-    let proven: Vec<&str> = LAWS
+    let proven: Vec<_> = LAWS
         .iter()
         .filter(|l| l.evidence == Evidence::Proof)
-        .map(|l| l.id)
         .collect();
 
     assert!(
@@ -106,7 +105,7 @@ fn proof_backed_laws_are_also_runtime_checked() {
         "expected some laws to be backed by Kani proofs"
     );
 
-    for law in LAWS.iter().filter(|l| l.evidence == Evidence::Proof) {
+    for law in proven {
         (law.verify)().unwrap_or_else(|e| panic!("proof-backed law failed its runtime check: {e}"));
     }
 }

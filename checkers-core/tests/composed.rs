@@ -38,19 +38,14 @@ const CONFIGS: [&[Player]; 2] = [
 
 /// A composed starting position: seated camps full, everything else empty.
 fn composed_initial(players: &[Player]) -> Position {
-    let mut pos = Position::empty();
-    for p in players {
-        for &c in p.start_camp() {
-            pos.set(c, Some(*p));
-        }
-    }
-    pos
+    Game::for_players(players).position().clone()
 }
 
-/// Positions reached by playing a fixed pseudo-random composed game.
+/// The composed starting position, then the positions reached by playing a
+/// fixed pseudo-random composed game from it.
 fn played_positions(players: &[Player], plies: usize, seed: u64) -> Vec<Position> {
     let mut rng = Xorshift::new(seed);
-    let mut game = Game::compose(composed_initial(players), players[0], players);
+    let mut game = Game::for_players(players);
     let mut out = vec![game.position().clone()];
     for _ in 0..plies {
         if game.is_over() {
@@ -60,7 +55,7 @@ fn played_positions(players: &[Player], plies: usize, seed: u64) -> Vec<Position
         if moves.is_empty() {
             game.pass();
         } else {
-            game.play(&moves[rng.below(moves.len())].clone());
+            game.play(&moves[rng.below(moves.len())]);
         }
         out.push(game.position().clone());
     }
@@ -76,12 +71,15 @@ fn pieces(pos: &Position) -> Vec<Coord> {
         .collect()
 }
 
+/// Check one law on one subject, naming the players and the law on failure.
+fn check<L: Law>(names: &[u8], subject: &L::Subject) {
+    L::holds(subject).unwrap_or_else(|e| panic!("players {names:?}: {}: {e}", L::ID));
+}
+
 fn check_players(players: &[Player]) {
     let names: Vec<u8> = players.iter().map(|p| p.index()).collect();
     let initial = composed_initial(players);
-    let played = played_positions(players, 40, 0x10CE);
-    let mut positions = vec![initial.clone()];
-    positions.extend(played.iter().cloned());
+    let positions = played_positions(players, 40, 0x10CE);
 
     // Bucket 2: the six-player invariants must FAIL on composed positions.
     for pos in &positions {
@@ -110,42 +108,28 @@ fn check_players(players: &[Player]) {
 
     // Bucket 1: position-level laws hold unchanged.
     for pos in &positions {
-        let subjects: Vec<(Position, Coord)> =
-            pieces(pos).into_iter().map(|c| (pos.clone(), c)).collect();
+        check::<StepLegality>(&names, pos);
+        check::<StepDisplacement>(&names, pos);
+        check::<MoveGenerationIsDeduplicated>(&names, pos);
+        check::<MovesStayOnBoard>(&names, pos);
+        check::<PlayPreservesInvariants>(&names, pos);
 
-        StepLegality::holds(pos).unwrap_or_else(|e| panic!("players {names:?}: StepLegality: {e}"));
-        StepDisplacement::holds(pos)
-            .unwrap_or_else(|e| panic!("players {names:?}: StepDisplacement: {e}"));
-        MoveGenerationIsDeduplicated::holds(pos)
-            .unwrap_or_else(|e| panic!("players {names:?}: MoveDedup: {e}"));
-        MovesStayOnBoard::holds(pos)
-            .unwrap_or_else(|e| panic!("players {names:?}: MovesStayOnBoard: {e}"));
-        PlayPreservesInvariants::holds(pos)
-            .unwrap_or_else(|e| panic!("players {names:?}: InvariantsPreserved: {e}"));
-
-        for subject in &subjects {
-            JumpLegality::holds(subject)
-                .unwrap_or_else(|e| panic!("players {names:?}: JumpLegality: {e}"));
-            JumpDoesNotCapture::holds(subject)
-                .unwrap_or_else(|e| panic!("players {names:?}: JumpNoCapture: {e}"));
-            JumpClosureIsExact::holds(subject)
-                .unwrap_or_else(|e| panic!("players {names:?}: JumpClosure: {e}"));
-            OccupancyIsPositionDetermined::holds(subject)
-                .unwrap_or_else(|e| panic!("players {names:?}: JumpOmega: {e}"));
-            RouteEqualsNetEffect::holds(subject)
-                .unwrap_or_else(|e| panic!("players {names:?}: RouteEqualsNet: {e}"));
-            SingleHopsReachTheClosure::holds(subject)
-                .unwrap_or_else(|e| panic!("players {names:?}: HopClosure: {e}"));
-            SingleHopIsOneJump::holds(subject)
-                .unwrap_or_else(|e| panic!("players {names:?}: HopIsOneJump: {e}"));
-            StagedTurnYieldsLegalMove::holds(subject)
-                .unwrap_or_else(|e| panic!("players {names:?}: StagedLegal: {e}"));
+        for origin in pieces(pos) {
+            let subject = (pos.clone(), origin);
+            check::<JumpLegality>(&names, &subject);
+            check::<JumpDoesNotCapture>(&names, &subject);
+            check::<JumpClosureIsExact>(&names, &subject);
+            check::<OccupancyIsPositionDetermined>(&names, &subject);
+            check::<RouteEqualsNetEffect>(&names, &subject);
+            check::<SingleHopsReachTheClosure>(&names, &subject);
+            check::<SingleHopIsOneJump>(&names, &subject);
+            check::<StagedTurnYieldsLegalMove>(&names, &subject);
         }
     }
 
     // Bucket 3: game-level behaviour over a composed game end to end.
     let mut rng = Xorshift::new(0x5EED);
-    let mut game = Game::compose(initial, players[0], players);
+    let mut game = Game::for_players(players);
     for ply in 0..60 {
         if game.is_over() {
             break;
@@ -155,7 +139,7 @@ fn check_players(players: &[Player]) {
             game.pass();
             continue;
         }
-        game.play(&moves[rng.below(moves.len())].clone());
+        game.play(&moves[rng.below(moves.len())]);
         assert_eq!(
             audit_position(game.position(), players),
             Ok(()),
@@ -187,11 +171,7 @@ fn the_laws_hold_for_three_player_games() {
 fn the_sweep_positions_are_genuinely_composed() {
     for players in CONFIGS {
         let pos = composed_initial(players);
-        let unseated: Vec<_> = Player::ALL
-            .iter()
-            .filter(|p| !players.contains(p))
-            .collect();
-        for p in unseated {
+        for p in Player::ALL.iter().filter(|p| !players.contains(p)) {
             assert_eq!(
                 pos.count_of(*p),
                 0,
