@@ -80,8 +80,7 @@ fn main() {
         .init_resource::<AiEngine>()
         .init_resource::<AiPace>()
         .init_resource::<replay::Replay>()
-        .add_plugins(lobby::plugin)
-        .add_plugins(sound::plugin)
+        .add_plugins((lobby::plugin, sound::plugin))
         .add_systems(Startup, setup)
         // Not state-scoped: the lobby is the first thing shown, and it is the
         // screen whose buttons the old size hid.
@@ -860,9 +859,7 @@ fn sync_buttons(
         } else {
             Visibility::Inherited
         };
-        if *vis != wanted {
-            *vis = wanted;
-        }
+        vis.set_if_neq(wanted);
         // Buttons do nothing on someone else's turn — dim them entirely so the
         // controls cannot look actionable. Confirm also needs a staged move to
         // submit, Cancel needs a selection to abandon. Save and Open are
@@ -886,9 +883,7 @@ fn sync_buttons(
             Interaction::Hovered if base != IDLE => base.lighter(0.15),
             _ => base,
         };
-        if bg.0 != colour {
-            bg.0 = colour;
-        }
+        bg.set_if_neq(BackgroundColor(colour));
     }
 }
 
