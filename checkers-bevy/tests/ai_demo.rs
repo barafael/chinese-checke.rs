@@ -38,12 +38,10 @@ fn a_paced_demo_race_is_followable_and_legal() {
         match pace.advance(&mut session, &mut ai, now) {
             Action::Wait => now += Duration::from_millis(100),
             Action::Play(mv) => {
-                if let Some(t) = last_action {
-                    assert!(
-                        now - t >= spacing,
-                        "a move came too soon after the last action"
-                    );
-                }
+                assert!(
+                    last_action.is_none_or(|t| now - t >= spacing),
+                    "a move came too soon after the last action"
+                );
                 last_action = Some(now);
                 let legal = session.game.legal_moves();
                 assert!(
@@ -65,9 +63,7 @@ fn a_paced_demo_race_is_followable_and_legal() {
                 now += Duration::from_millis(1100);
             }
             Action::Pass => {
-                if let Some(t) = last_action {
-                    assert!(now - t >= spacing);
-                }
+                assert!(last_action.is_none_or(|t| now - t >= spacing));
                 last_action = Some(now);
                 session.game.pass();
                 moves += 1;

@@ -57,17 +57,15 @@ fn simulated_play_never_violates_a_law() {
         plies += 1;
 
         // Per-ply: the linear position audit, exactly what the app runs.
-        if let Err(fault) = audit_position(game.position(), game.players()) {
-            panic!("position invariant violated after ply {plies}: {fault}");
-        }
+        audit_position(game.position(), game.players()).unwrap_or_else(|fault| {
+            panic!("position invariant violated after ply {plies}: {fault}")
+        });
     }
     assert!(plies > 0, "the simulation made no moves");
 
     // Once, at the end: the full registry. Running it per ply would take
     // minutes, since every law regenerates its own sample games.
-    if let Err(v) = verify_all() {
-        panic!("law violated: {v}");
-    }
+    verify_all().unwrap_or_else(|v| panic!("law violated: {v}"));
 }
 
 /// The selection logic must offer exactly the destinations the rules allow.

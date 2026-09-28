@@ -39,13 +39,13 @@ fn literals(source: &str) -> Vec<String> {
     while i < bytes.len() {
         match bytes[i] {
             // Skip line comments, including doc comments.
-            '/' if i + 1 < bytes.len() && bytes[i + 1] == '/' => {
+            '/' if bytes.get(i + 1) == Some(&'/') => {
                 while i < bytes.len() && bytes[i] != '\n' {
                     i += 1;
                 }
             }
             // Skip block comments.
-            '/' if i + 1 < bytes.len() && bytes[i + 1] == '*' => {
+            '/' if bytes.get(i + 1) == Some(&'*') => {
                 i += 2;
                 while i + 1 < bytes.len() && !(bytes[i] == '*' && bytes[i + 1] == '/') {
                     i += 1;
@@ -92,14 +92,12 @@ fn every_rendered_string_is_ascii() {
     let mut offenders = Vec::new();
     for (name, text) in sources() {
         for lit in literals(&text) {
-            for c in lit.chars() {
-                if !is_renderable(c) {
-                    offenders.push(format!(
-                        "{name}: U+{:04X} ({c:?}) in {:?}",
-                        c as u32,
-                        lit.chars().take(60).collect::<String>()
-                    ));
-                }
+            for c in lit.chars().filter(|&c| !is_renderable(c)) {
+                offenders.push(format!(
+                    "{name}: U+{:04X} ({c:?}) in {:?}",
+                    c as u32,
+                    lit.chars().take(60).collect::<String>()
+                ));
             }
         }
     }
