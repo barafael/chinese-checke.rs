@@ -36,6 +36,7 @@ use checkers_net::{CH_RELIABLE, NetMsg, NetState, RoomId, Seat, broadcast, decod
 
 use crate::board_view::player_colour;
 use crate::setup::Seating;
+use crate::ui::ui_text;
 use crate::{AppState, Session};
 use checkers_core::position::Player;
 use checkers_core::rules::Variants;
@@ -443,15 +444,6 @@ fn sized_button(
             tag,
         ))
         .with_child(ui_text(label, font_size, TEXT));
-}
-
-/// One line of lobby text: `label` at `size` pixels, in `colour`.
-fn ui_text(label: impl Into<String>, size: f32, colour: Color) -> (Text, TextFont, TextColor) {
-    (
-        Text::new(label),
-        TextFont::from_font_size(size),
-        TextColor(colour),
-    )
 }
 
 /// A row of controls, centred on one line.

@@ -19,7 +19,7 @@ use checkers_core::geometry::Coord;
 use std::collections::VecDeque;
 use std::time::Duration;
 
-use crate::board_view::{HOLE_RADIUS, coord_to_world};
+use crate::board_view::{HOLE_RADIUS, coord_to_world, on_hole};
 use crate::{LastMove, Session};
 
 /// Which hole a piece stands on: attached to every piece by the piece sync,
@@ -214,14 +214,8 @@ pub fn sync_trace(
     // dark neutral holes, which is what makes the path legible at a glance.
     let dot = meshes.add(Circle::new(HOLE_RADIUS * 0.8));
     let mat = materials.add(Color::srgba(0.82, 0.84, 0.88, 0.75));
-    for hole in path {
-        let p = coord_to_world(*hole);
-        commands.spawn((
-            Mesh2d(dot.clone()),
-            MeshMaterial2d(mat.clone()),
-            Transform::from_xyz(p.x, p.y, 0.9),
-            TraceMarker,
-        ));
+    for &hole in path {
+        commands.spawn((on_hole(&dot, &mat, hole, 0.9), TraceMarker));
     }
 }
 

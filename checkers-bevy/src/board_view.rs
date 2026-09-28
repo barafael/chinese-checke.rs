@@ -59,6 +59,22 @@ pub fn coord_to_world(c: Coord) -> Vec2 {
     )
 }
 
+/// A flat board mesh centred on hole `c`, at depth `z`: holes, pieces, and
+/// everything drawn over them.
+pub fn on_hole(
+    mesh: &Handle<Mesh>,
+    material: &Handle<ColorMaterial>,
+    c: Coord,
+    z: f32,
+) -> impl Bundle {
+    let p = coord_to_world(c);
+    (
+        Mesh2d(mesh.clone()),
+        MeshMaterial2d(material.clone()),
+        Transform::from_xyz(p.x, p.y, z),
+    )
+}
+
 /// Screen to axial, rounding to the nearest hole.
 ///
 /// Rounds in cube space, where the three coordinates sum to zero: round each,

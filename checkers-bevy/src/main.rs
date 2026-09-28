@@ -19,16 +19,17 @@ use bevy_matchbox::prelude::MatchboxSocket;
 use checkers_ai::{Ai, AiConfig};
 use checkers_bevy::ai::{Action, AiPace};
 use checkers_bevy::board_view::{
-    BOARD_FRAME, HOLE_RADIUS, HOLE_SPACING, PIECE_RADIUS, coord_to_world, player_colour,
+    BOARD_FRAME, HOLE_RADIUS, HOLE_SPACING, PIECE_RADIUS, coord_to_world, on_hole, player_colour,
     world_to_coord,
 };
 use checkers_bevy::replay::{self, TraceMarker};
 use checkers_bevy::setup::Seating;
+use checkers_bevy::ui::ui_text;
 use checkers_bevy::{
     AppState, Selection, Session, audit, format_round_duration, lobby, move_log, net, record,
     sound, web,
 };
-use checkers_core::geometry::{Coord, all_holes, camp_of, on_board};
+use checkers_core::geometry::{all_holes, camp_of, on_board};
 use checkers_core::law::{LAWS, verify_all};
 use checkers_core::position::{Player, Position};
 use checkers_core::rules::Outcome;
@@ -354,9 +355,9 @@ fn spawn_ui(mut commands: Commands) {
                     BackgroundColor(Color::NONE),
                     TurnSwatch,
                 ));
-                row.spawn((text("", 15.0, TEXT), TurnText));
+                row.spawn((ui_text("", 15.0, TEXT), TurnText));
             });
-            col.spawn((text("", 15.0, TEXT), StatusText));
+            col.spawn((ui_text("", 15.0, TEXT), StatusText));
         });
 
     // Turn controls, centred at the top: Confirm, Cancel, Resign, and the
@@ -397,18 +398,6 @@ const TEXT_FAINT: Color = Color::srgb(0.62, 0.62, 0.68);
 /// A control button at rest.
 const IDLE: Color = Color::srgb(0.18, 0.18, 0.21);
 
-/// One line of UI text at a pixel size and colour.
-fn text(content: impl Into<String>, size: f32, colour: Color) -> impl Bundle {
-    (
-        Text::new(content),
-        TextFont {
-            font_size: FontSize::Px(size),
-            ..default()
-        },
-        TextColor(colour),
-    )
-}
-
 /// One control button. Factored out because the turn controls and the
 /// game-over card's `Menu` must not drift apart in padding, radius, or text.
 fn control_button(parent: &mut ChildSpawnerCommands, which: ControlButton, label: &str) {
@@ -425,7 +414,7 @@ fn control_button(parent: &mut ChildSpawnerCommands, which: ControlButton, label
             BackgroundColor(IDLE),
             which,
         ))
-        .with_child(text(label, 13.0, Color::srgb(0.9, 0.9, 0.92)));
+        .with_child(ui_text(label, 13.0, Color::srgb(0.9, 0.9, 0.92)));
 }
 
 /// Leaving the round tears down everything the round owns: the board meshes,
@@ -476,17 +465,6 @@ fn spawn_board(
         };
         commands.spawn((on_hole(&hole_mesh, material, c, 0.0), HoleMarker));
     }
-}
-
-/// A flat board mesh centred on hole `c`, at depth `z`: holes, pieces, and
-/// everything drawn over them.
-fn on_hole(mesh: &Handle<Mesh>, material: &Handle<ColorMaterial>, c: Coord, z: f32) -> impl Bundle {
-    let p = coord_to_world(c);
-    (
-        Mesh2d(mesh.clone()),
-        MeshMaterial2d(material.clone()),
-        Transform::from_xyz(p.x, p.y, z),
-    )
 }
 
 fn handle_buttons(
@@ -1072,8 +1050,8 @@ fn sync_game_over(
                 BackgroundColor(Color::srgba(0.10, 0.10, 0.13, 0.97)),
             ))
             .with_children(|panel| {
-                panel.spawn(text(title, 30.0, title_colour));
-                panel.spawn(text("Statistics", 15.0, TEXT_FAINT));
+                panel.spawn(ui_text(title, 30.0, title_colour));
+                panel.spawn(ui_text("Statistics", 15.0, TEXT_FAINT));
                 for p in session.players.iter().copied() {
                     let i = p.index() as usize;
                     let mut line = format!(
@@ -1086,21 +1064,21 @@ fn sync_game_over(
                     if let Some(pct) = (100 * stats.hops_over_others[i]).checked_div(hops) {
                         line.push_str(&format!(",  {hops} hops ({pct}% over others)"));
                     }
-                    panel.spawn(text(line, 15.0, TEXT));
+                    panel.spawn(ui_text(line, 15.0, TEXT));
                 }
                 let moves = stats.total_moves();
                 let totals = format!("{moves} moves total, {} passed turns", stats.passes);
-                panel.spawn(text(totals, 14.0, TEXT_DIM));
+                panel.spawn(ui_text(totals, 14.0, TEXT_DIM));
                 if let Some(d) = stats.round_duration(time.elapsed()) {
                     let lasted = format!("Round lasted {}", format_round_duration(d));
-                    panel.spawn(text(lasted, 14.0, TEXT_DIM));
+                    panel.spawn(ui_text(lasted, 14.0, TEXT_DIM));
                 }
                 if stats.longest_jump > 0 {
                     let by = Player::new(stats.longest_jump_by)
                         .expect("longest-jump player is below six");
                     let who = player_label(&net, &session, by);
                     let longest = format!("Longest jump: {} hops ({who})", stats.longest_jump);
-                    panel.spawn(text(longest, 14.0, TEXT_DIM));
+                    panel.spawn(ui_text(longest, 14.0, TEXT_DIM));
                 }
                 panel
                     .spawn(Node {
@@ -1114,7 +1092,7 @@ fn sync_game_over(
                         // `R` re-deals a solo table only; a shared round is
                         // restarted by the host, from the lobby.
                         if !session.shared {
-                            row.spawn(text("R deals a new game", 13.0, TEXT_FAINT));
+                            row.spawn(ui_text("R deals a new game", 13.0, TEXT_FAINT));
                         }
                     });
             });
@@ -1147,10 +1125,12 @@ fn sync_status(session: Res<Session>, mut text: Query<&mut Text, With<StatusText
             };
             format!("  |  staging {} hop(s){why}", turn.hops())
         }
-        Selection::Pend { mv, .. } => format!(
-            "  |  staging a step to ({},{})",
-            mv.destination.q, mv.destination.r
-        ),
+        Selection::Pend { mv, .. } => {
+            format!(
+                "  |  staging a step to {}",
+                move_log::coords(mv.destination)
+            )
+        }
         _ => String::new(),
     };
 
@@ -1251,10 +1231,11 @@ fn ai_one_shot(
         return;
     }
     if let Some(mv) = engine.0.choose_move(&session.game) {
-        session.message = format!(
-            "The computer suggests ({},{}) -> ({},{})",
-            mv.origin.q, mv.origin.r, mv.destination.q, mv.destination.r
+        let (from, to) = (
+            move_log::coords(mv.origin),
+            move_log::coords(mv.destination),
         );
+        session.message = format!("The computer suggests {from} -> {to}");
         session.outbox.push(mv);
     }
 }

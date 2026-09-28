@@ -6,6 +6,7 @@
 //! [`describe`] is how a move reads in both logs: this file and the game-story
 //! lines the network code writes through `tracing`.
 
+use checkers_core::geometry::Coord;
 use checkers_core::position::{Move, MoveKind};
 
 #[cfg(not(target_family = "wasm"))]
@@ -26,22 +27,24 @@ pub fn log(line: &str) {
     bevy::log::info!("{line}");
 }
 
+/// A hole as the logs and the status line write it: `(q,r)`.
+pub fn coords(c: Coord) -> String {
+    format!("({},{})", c.q, c.r)
+}
+
 /// Describe a move the way the log reads it.
 pub fn describe(mv: &Move) -> String {
     let kind = match mv.kind {
         MoveKind::Step => "step",
         MoveKind::Jump => "jump",
     };
-    let mut out = format!(
-        "{kind} ({},{}) -> ({},{})",
-        mv.origin.q, mv.origin.r, mv.destination.q, mv.destination.r
-    );
+    let mut out = format!("{kind} {} -> {}", coords(mv.origin), coords(mv.destination));
     if let Some(route) = &mv.route
         && route.len() > 2
     {
         let via: Vec<String> = route[1..route.len() - 1]
             .iter()
-            .map(|c| format!("({},{})", c.q, c.r))
+            .map(|c| coords(*c))
             .collect();
         out.push_str(&format!(" via {}", via.join(", ")));
     }

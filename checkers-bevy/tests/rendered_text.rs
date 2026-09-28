@@ -78,7 +78,14 @@ fn literals(source: &str) -> Vec<String> {
 fn sources() -> Vec<(String, String)> {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut out = Vec::new();
-    for name in ["lobby.rs", "main.rs", "lib.rs", "net.rs", "setup.rs"] {
+    for name in [
+        "lobby.rs",
+        "main.rs",
+        "lib.rs",
+        "net.rs",
+        "replay.rs",
+        "setup.rs",
+    ] {
         let path = dir.join(name);
         let text = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));

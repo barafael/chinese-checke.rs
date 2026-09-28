@@ -133,7 +133,7 @@ From a Windows shell:
 MSYS_NO_PATHCONV=1 wsl.exe -d Debian bash /mnt/c/workspace/sources/amlah-spec/scripts/verify-proofs.sh
 ```
 
-Current status: **11 proof harnesses, all verifying.**
+Current status: **14 proof harnesses, all verifying.**
 
 ### Writing provable code
 

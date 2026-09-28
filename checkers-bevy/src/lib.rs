@@ -19,6 +19,7 @@ pub mod record;
 pub mod replay;
 pub mod setup;
 pub mod sound;
+pub mod ui;
 pub mod web;
 
 use bevy::prelude::*;
@@ -30,6 +31,7 @@ use checkers_core::turn::{JumpTurn, single_hop_destinations, step_destinations};
 use checkers_net::WireMove;
 use std::time::Duration;
 
+use crate::move_log::coords;
 use crate::record::{GameRecord, RecordFault};
 use crate::setup::Seating;
 
@@ -826,11 +828,6 @@ fn hop_message(turn: &JumpTurn, hole: Coord) -> String {
         remaining => format!("{remaining} further hop(s), or press Enter to confirm."),
     };
     format!("Hop {} to {}. {hint}", turn.hops(), coords(hole))
-}
-
-/// A hole as the status line writes it: `(q,r)`.
-fn coords(c: Coord) -> String {
-    format!("({},{})", c.q, c.r)
 }
 
 /// Panic if the live position violates its invariants. Six players: the
