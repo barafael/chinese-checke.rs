@@ -746,13 +746,8 @@ fn broadcast_cursor(
     if width <= 0.0 || height <= 0.0 {
         return;
     }
-    broadcast(
-        &mut socket,
-        &net.peers,
-        &NetMsg::Cursor {
-            pos: [pos.x / width, pos.y / height],
-        },
-    );
+    let fractions = [pos.x / width, pos.y / height];
+    broadcast(&mut socket, &net.peers, &NetMsg::Cursor { pos: fractions });
 }
 
 /// A cursor's colour is the corner its peer claimed — the same colour the
@@ -760,12 +755,8 @@ fn broadcast_cursor(
 fn cursor_identity(net: &NetState, peer: &str) -> (Color, String) {
     match net.seats.iter().find(|s| s.peer == peer) {
         Some(seat) => {
-            let colour = seat
-                .player
-                .and_then(|i| Player::new(i as u8))
-                .map(player_colour)
-                .unwrap_or(IDLE);
-            (colour, seat.name.clone())
+            let player = seat.player.and_then(|i| Player::new(i as u8));
+            (player.map_or(IDLE, player_colour), seat.name.clone())
         }
         None => (IDLE, format!("peer {}", &peer[..peer.len().min(4)])),
     }
@@ -867,18 +858,13 @@ fn point_in_triangle(p: Vec2, v: [Vec2; 3]) -> bool {
     (s1 >= 0.0 && s2 >= 0.0 && s3 >= 0.0) || (s1 <= 0.0 && s2 <= 0.0 && s3 <= 0.0)
 }
 
-/// Is container-local `p` inside corner `i`'s wedge?
-fn wedge_contains(i: usize, p: Vec2) -> bool {
-    point_in_triangle(p, wedge_vertices(i))
-}
-
 /// Which corner the cursor is over. `normalized` is [`RelativeCursorPosition`]'s
 /// centre-relative position (`-0.5 .. 0.5`, y down); it is mapped back into
 /// container coordinates so the wedges' own geometry can answer. `None` over
 /// the empty middle — the middle is the star, not a button.
 fn sector_at(normalized: Vec2) -> Option<usize> {
     let local = normalized * vec2(STAR_W, STAR_H) + vec2(STAR_W / 2.0, STAR_H / 2.0);
-    (0..6).find(|&i| wedge_contains(i, local))
+    (0..6).find(|&i| point_in_triangle(local, wedge_vertices(i)))
 }
 
 /// Where corner `i`'s two label lines sit: the wedge's centroid.
@@ -1617,23 +1603,19 @@ pub fn start_message(net: &NetState, variants: Variants) -> NetMsg {
 
 /// Which corner a keypress selects. `1`..`6` name the camps directly.
 fn corner_from_keys(keys: &ButtonInput<KeyCode>, current: Option<usize>) -> Option<usize> {
-    if let Some(digit) = (1..=6).find(|d| keys.just_pressed(key_for(*d))) {
-        return Some(digit as usize - 1);
-    }
-    current
+    let pressed = CORNER_KEYS.iter().position(|&key| keys.just_pressed(key));
+    pressed.or(current)
 }
 
-/// The key that selects corner `digit` (1-based).
-fn key_for(digit: u32) -> KeyCode {
-    match digit {
-        1 => KeyCode::Digit1,
-        2 => KeyCode::Digit2,
-        3 => KeyCode::Digit3,
-        4 => KeyCode::Digit4,
-        5 => KeyCode::Digit5,
-        _ => KeyCode::Digit6,
-    }
-}
+/// The key that selects each corner, in corner order.
+const CORNER_KEYS: [KeyCode; 6] = [
+    KeyCode::Digit1,
+    KeyCode::Digit2,
+    KeyCode::Digit3,
+    KeyCode::Digit4,
+    KeyCode::Digit5,
+    KeyCode::Digit6,
+];
 
 /// What clicking corner `sector` does, given the room.
 ///
@@ -1826,11 +1808,9 @@ pub fn corner_effect(
 /// Fill the whole table with a symmetric preset, replacing whatever was there,
 /// so the shortcut and the deal can never silently disagree.
 pub fn apply_preset(table: &mut Table, seating: Seating) {
-    for (i, corner) in table.0.iter_mut().enumerate() {
-        let seated = seating
-            .players()
-            .contains(&Player::new(i as u8).expect("corner indices are below six"));
-        *corner = if seated {
+    let seated = seating.players();
+    for (corner, player) in table.0.iter_mut().zip(Player::ALL) {
+        *corner = if seated.contains(&player) {
             CornerState::Human
         } else {
             CornerState::Empty
@@ -2092,7 +2072,6 @@ pub fn edit_field(
     };
     keys.clear();
 
-    let mut closed = false;
     for event in messages.read() {
         if event.state != ButtonState::Pressed {
             continue;
@@ -2113,11 +2092,10 @@ pub fn edit_field(
             EditAction::Ignore => {}
         }
         if edit.focus.is_none() {
-            closed = true;
             break;
         }
     }
-    if closed {
+    if edit.focus.is_none() {
         messages.clear();
     }
 }
@@ -2282,11 +2260,8 @@ fn draw_roster(
             out.push_str("Every corner is an engine - Enter starts as a spectator.\n");
         }
     } else {
-        out = format!(
-            "{}  |  {} peer(s) here\n\n",
-            if net.sequences() { "host" } else { "guest" },
-            net.peers.len()
-        );
+        let role = if net.sequences() { "host" } else { "guest" };
+        out = format!("{role}  |  {} peer(s) here\n\n", net.peers.len());
         if net.seats.is_empty() {
             out.push_str("No one here yet - share the room name.\n");
         }
@@ -2295,13 +2270,8 @@ fn draw_roster(
                 .player
                 .map_or_else(|| "no corner".into(), |p| format!("corner {p}"));
             let engine = if seat.engine { " (computer)" } else { "" };
-            out.push_str(&format!(
-                "  {} {}  {}{}\n",
-                if seat.peer == me { ">" } else { " " },
-                seat.name,
-                corner,
-                engine,
-            ));
+            let pointer = if seat.peer == me { ">" } else { " " };
+            out.push_str(&format!("  {pointer} {}  {corner}{engine}\n", seat.name));
         }
     }
 
@@ -2373,11 +2343,10 @@ fn draw_corner_labels(
     for (label, copies) in &lines {
         let i = label.0 / 2;
         let line = label.0 % 2;
-        let p = Player::new(i as u8).expect("corner indices are below six");
         let (title, sub) = if solo {
             match &table.0[i] {
                 CornerState::Empty => ("Empty".into(), "click to select".into()),
-                CornerState::Human => (format!("P{}", p.index()), "human".into()),
+                CornerState::Human => (format!("P{i}"), "human".into()),
                 CornerState::Cpu => ("Computer".into(), "CPU".into()),
             }
         } else if let Some(seat) = holder(&net, i as u32) {
@@ -2777,14 +2746,10 @@ mod tests {
     /// Digit keys select their corner; unrelated keys change nothing.
     #[test]
     fn the_digits_select_their_corner() {
-        for digit in 1..=6 {
+        for (corner, key) in CORNER_KEYS.into_iter().enumerate() {
             let mut keys = ButtonInput::default();
-            keys.press(key_for(digit));
-            assert_eq!(
-                corner_from_keys(&keys, None),
-                Some(digit as usize - 1),
-                "{digit}"
-            );
+            keys.press(key);
+            assert_eq!(corner_from_keys(&keys, None), Some(corner), "{key:?}");
         }
         let mut keys = ButtonInput::default();
         keys.press(KeyCode::KeyX);
