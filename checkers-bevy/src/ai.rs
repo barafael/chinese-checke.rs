@@ -12,6 +12,7 @@
 use crate::Session;
 use bevy::ecs::resource::Resource;
 use checkers_ai::Ai;
+use checkers_core::geometry::{Coord, rotate_n};
 use checkers_core::position::Move;
 use std::time::Duration;
 
@@ -63,12 +64,6 @@ pub const MAX_MOVES: u32 = 240;
 
 impl Default for AiPace {
     fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl AiPace {
-    fn new() -> Self {
         Self {
             next_allowed: None,
             result_logged: false,
@@ -77,16 +72,11 @@ impl AiPace {
             total_plies: 0,
         }
     }
+}
+
+impl AiPace {
     pub fn reset(&mut self) {
-        *self = Self::new();
-    }
-
-    fn ready(&self, now: Duration) -> bool {
-        self.next_allowed.is_none_or(|t| now >= t)
-    }
-
-    fn schedule(&mut self, now: Duration) {
-        self.next_allowed = Some(now + MOVE_INTERVAL);
+        *self = Self::default();
     }
 
     /// The progress metric for the stall detector: how much of the *best-placed*
@@ -100,11 +90,7 @@ impl AiPace {
         let pos = session.game.position();
         let mut best = 0;
         for &p in &session.ai_players {
-            let t = usize::from(p.index());
-            let apex = checkers_core::geometry::rotate_n(
-                checkers_core::geometry::Coord::new(8, -4),
-                ((t + 3) % 6) as u32,
-            );
+            let apex = rotate_n(Coord::new(8, -4), (u32::from(p.index()) + 3) % 6);
             let sum: i32 = pos
                 .pieces_of(p)
                 .iter()
@@ -147,8 +133,7 @@ impl AiPace {
         }
         (self.plies_stalled >= STALL_WINDOW).then(|| {
             Action::Abandon(format!(
-                "stall: the leading seat made no progress in {} plies",
-                STALL_WINDOW
+                "stall: the leading seat made no progress in {STALL_WINDOW} plies"
             ))
         })
     }
@@ -159,14 +144,9 @@ impl AiPace {
     /// move's flight is still on screen, so a move's execution is the last
     /// thing its turn shows.
     pub fn advance(&mut self, session: &mut Session, ai: &mut Ai, now: Duration) -> Action {
-        if session.game.is_over() {
-            return Action::Wait;
-        }
         let seat = session.game.turn();
-        if !session.ai_players.contains(&seat) {
-            return Action::Wait;
-        }
-        if !self.ready(now) {
+        let throttled = self.next_allowed.is_some_and(|t| now < t);
+        if session.game.is_over() || !session.ai_players.contains(&seat) || throttled {
             return Action::Wait;
         }
 
@@ -177,7 +157,7 @@ impl AiPace {
             None => return Action::Wait,
         };
 
-        self.schedule(now);
+        self.next_allowed = Some(now + MOVE_INTERVAL);
         if Self::watches(session)
             && let Some(abandon) = self.after_move(session)
         {
