@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 
-use crate::geometry::{Coord, Dir, camp_of, on_board};
+use crate::geometry::{Coord, Dir, all_holes, camp_of, on_board};
 use crate::position::{Move, PLAYERS, Player, Position, is_legal_step};
 
 /// House-rule switches that change how a game is played.
@@ -29,11 +29,10 @@ impl Variants {
     /// the *rules*; the toggle only switches the check on.
     pub fn may_rest(&self, mover: Player, hole: Coord) -> bool {
         match camp_of(hole) {
-            None => true,
             Some(camp) if self.forbid_foreign_camps => {
                 camp == mover.index() as u32 || camp == mover.opposite().index() as u32
             }
-            Some(_) => true,
+            _ => true,
         }
     }
 }
@@ -58,15 +57,8 @@ pub fn jump_destinations(pos: &Position, origin: Coord) -> HashSet<Coord> {
     while !frontier.is_empty() {
         let mut next = Vec::new();
         for cur in frontier {
-            for d in Dir::ALL {
-                let mid = cur.neighbour(d);
-                let dest = cur.jump_dest(d);
-                if on_board(mid)
-                    && on_board(dest)
-                    && omega.contains(&mid)
-                    && !omega.contains(&dest)
-                    && visited.insert(dest)
-                {
+            for dest in jump_landings(&omega, cur) {
+                if visited.insert(dest) {
                     reachable.insert(dest);
                     next.push(dest);
                 }
@@ -80,6 +72,20 @@ pub fn jump_destinations(pos: &Position, origin: Coord) -> HashSet<Coord> {
     // moving. No explicit removal is needed, and `CC-JUMP-REVISIT` checks it.
     debug_assert!(!reachable.contains(&origin));
     reachable
+}
+
+/// Where single jumps from `cur` land, in [`Dir::ALL`] order: over an occupied
+/// hole of $\Omega$ onto a free one, both on the board.
+///
+/// Within a turn this is the whole jump rule, since only the moving piece
+/// moves; [`jump_destinations`] and [`jump_routes`] both explore by it.
+fn jump_landings(omega: &HashSet<Coord>, cur: Coord) -> impl Iterator<Item = Coord> + '_ {
+    Dir::ALL.into_iter().filter_map(move |d| {
+        let (mid, dest) = (cur.neighbour(d), cur.jump_dest(d));
+        let open =
+            on_board(mid) && on_board(dest) && omega.contains(&mid) && !omega.contains(&dest);
+        open.then_some(dest)
+    })
 }
 
 /// Enumerate jump *routes*, with a simple-path guard (chapter 9).
@@ -106,15 +112,8 @@ fn walk_routes(
     if path.len() > max_hops {
         return;
     }
-    for d in Dir::ALL {
-        let mid = cur.neighbour(d);
-        let dest = cur.jump_dest(d);
-        if on_board(mid)
-            && on_board(dest)
-            && omega.contains(&mid)
-            && !omega.contains(&dest)
-            && !path.contains(&dest)
-        {
+    for dest in jump_landings(omega, cur) {
+        if !path.contains(&dest) {
             path.push(dest);
             out.push(path.clone());
             walk_routes(omega, dest, path, max_hops, out);
@@ -240,18 +239,17 @@ impl Game {
     /// turn order follows the seats around the board regardless of how the
     /// caller lists them.
     pub fn for_players(players: &[Player]) -> Self {
-        let mut players = players.to_vec();
-        players.sort_by_key(|p| p.index());
-        players.dedup();
-        assert!(!players.is_empty(), "a game needs at least one player");
-
+        let first = *players
+            .iter()
+            .min()
+            .expect("a game needs at least one player");
         let mut position = Position::empty();
-        for &p in &players {
+        for &p in players {
             for &c in p.start_camp() {
                 position.set(c, Some(p));
             }
         }
-        Self::compose(position, players[0], &players)
+        Self::compose(position, first, players)
     }
 
     /// A game over an explicit position, active player, and player set.
@@ -411,8 +409,7 @@ impl Game {
                 continue;
             }
             let idx = choose(&self.position, self.turn, &moves);
-            let mv = moves[idx].clone();
-            self.play(&mv);
+            self.play(&moves[idx]);
         }
         self.outcome
     }
@@ -439,13 +436,12 @@ pub fn blocked_position() -> Position {
     }
 
     // Block the camp's frontier.
-    let frontier: HashSet<Coord> = camp
+    let frontier = camp
         .iter()
         .flat_map(|c| Dir::ALL.map(|d| c.neighbour(d)))
-        .filter(|c| on_board(*c) && !camp.contains(c))
-        .collect();
-    for c in &frontier {
-        pos.set(*c, Some(blocker));
+        .filter(|c| on_board(*c) && !camp.contains(c));
+    for c in frontier {
+        pos.set(c, Some(blocker));
     }
 
     // Block every hole a camp piece could land on.
@@ -467,8 +463,7 @@ pub fn blocked_position() -> Position {
 /// A fully packed board: nobody can move at all.
 pub fn frozen_position() -> Position {
     let mut pos = Position::empty();
-    let holes = pos.holes().to_vec();
-    for (i, &c) in holes.iter().enumerate() {
+    for (i, c) in all_holes().into_iter().enumerate() {
         pos.set(c, Some(Player::wrapping((i % PLAYERS) as u8)));
     }
     pos
@@ -502,12 +497,10 @@ mod variant_tests {
         let mut game = Game::for_players(&[Player::ALL[0], Player::ALL[3]]);
         assert_eq!(game.turn(), Player::ALL[0]);
 
-        let mv = game.legal_moves().first().cloned().unwrap();
-        game.play(&mv);
+        game.play(&game.legal_moves()[0]);
         assert_eq!(game.turn(), Player::ALL[3], "the vacant seats are skipped");
 
-        let mv = game.legal_moves().first().cloned().unwrap();
-        game.play(&mv);
+        game.play(&game.legal_moves()[0]);
         assert_eq!(game.turn(), Player::ALL[0], "two players alternate");
     }
 
@@ -517,8 +510,7 @@ mod variant_tests {
     fn a_full_game_turns_as_before() {
         let mut game = Game::new();
         assert_eq!(game.players().len(), PLAYERS);
-        let mv = game.legal_moves().first().cloned().unwrap();
-        game.play(&mv);
+        game.play(&game.legal_moves()[0]);
         assert_eq!(game.turn(), Player::ALL[1]);
     }
 
@@ -527,12 +519,7 @@ mod variant_tests {
     #[test]
     fn unseated_camps_start_empty() {
         let game = Game::for_players(&[Player::ALL[0], Player::ALL[1]]);
-        for p in [
-            Player::ALL[2],
-            Player::ALL[3],
-            Player::ALL[4],
-            Player::ALL[5],
-        ] {
+        for &p in &Player::ALL[2..] {
             assert_eq!(
                 game.position().count_of(p),
                 0,
@@ -569,8 +556,7 @@ mod variant_tests {
     fn an_abandoned_game_takes_no_further_move() {
         let mut game = Game::for_players(&[Player::ALL[0], Player::ALL[3]]);
         game.abandon();
-        let mv = game.legal_moves().first().cloned().unwrap();
-        game.play(&mv);
+        game.play(&game.legal_moves()[0]);
     }
 
     /// A resigned game accepts no further move.
@@ -579,8 +565,7 @@ mod variant_tests {
     fn a_resigned_game_takes_no_further_move() {
         let mut game = Game::for_players(&[Player::ALL[0], Player::ALL[3]]);
         game.resign(Player::ALL[3]);
-        let mv = game.legal_moves().first().cloned().unwrap();
-        game.play(&mv);
+        game.play(&game.legal_moves()[0]);
     }
 
     /// Only a seated player can resign; the vacant camps are not in the game.
