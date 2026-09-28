@@ -18,7 +18,6 @@
 //! no-op there, so callers stay `cfg`-free.
 
 use checkers_net::RoomId;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 /// The room named in the URL, if any, validated like a typed room name. An
 /// invalid fragment is ignored rather than reported: a bad share link should
@@ -128,6 +127,7 @@ fn fresh_seed() -> u64 {
 #[cfg(not(target_family = "wasm"))]
 fn fresh_seed() -> u64 {
     use std::hash::{BuildHasher, Hash, Hasher};
+    use std::sync::atomic::{AtomicU64, Ordering};
     static CALLS: AtomicU64 = AtomicU64::new(0);
     static START: std::sync::OnceLock<bevy::platform::time::Instant> = std::sync::OnceLock::new();
     let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
