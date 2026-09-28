@@ -6,18 +6,18 @@
 //! changes the label and nothing else — the peer stays in the old room while the
 //! screen claims otherwise. No unit test of the parser would notice.
 
+mod common;
+
 use bevy::input::ButtonState;
-use bevy::input::InputPlugin;
-use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::prelude::*;
-use bevy::state::app::StatesPlugin;
 use checkers_bevy::AppState;
 use checkers_bevy::lobby::{
     ApplyName, EditAction, FieldEdit, FieldKind, LobbyStatus, NAME_MAX_LEN, PendingClaim,
     SelectedCorner, apply_name, edit_action, fields_plugin, not_editing, select_corner,
 };
 use checkers_bevy::sound::{self, SoundOn};
-use checkers_net::{NetState, RoomId, Seat};
+use checkers_net::{NetState, RoomId};
+use common::{key_message, net, seat, set_state};
 
 /// How many times the lobby has been entered — where the app opens the room's
 /// socket.
@@ -27,12 +27,8 @@ struct LobbyEntries(u32);
 /// The fields as the app registers them ([`fields_plugin`]), over the
 /// resources they commit to.
 fn app() -> App {
-    let mut app = App::new();
-    app.add_plugins((MinimalPlugins, InputPlugin, StatesPlugin))
-        .init_state::<AppState>()
-        // The app boots into the menu; these tests exercise lobby fields.
-        .insert_state(AppState::Lobby)
-        .insert_resource(RoomId::parse("room-1").expect("a valid room parses"))
+    let mut app = common::headless_app();
+    app.insert_resource(RoomId::parse("room-1").expect("a valid room parses"))
         .init_resource::<NetState>()
         .init_resource::<LobbyStatus>()
         .init_resource::<LobbyEntries>()
@@ -63,18 +59,6 @@ fn key_of(c: char) -> KeyCode {
     }
 }
 
-/// A keypress message as the window sends it, with layout-aware text.
-fn key_message(key: KeyCode, text: Option<&str>) -> KeyboardInput {
-    KeyboardInput {
-        key_code: key,
-        logical_key: Key::Character("x".into()),
-        state: ButtonState::Pressed,
-        text: text.map(Into::into),
-        repeat: false,
-        window: Entity::PLACEHOLDER,
-    }
-}
-
 /// Send a keypress and run a frame.
 ///
 /// Message only, never `ButtonInput::press`: `InputPlugin` derives the
@@ -82,7 +66,8 @@ fn key_message(key: KeyCode, text: Option<&str>) -> KeyboardInput {
 /// message feeds both the field (which reads messages) and every system that
 /// reads the resource.
 fn press(app: &mut App, key: KeyCode, text: Option<&str>) {
-    app.world_mut().write_message(key_message(key, text));
+    app.world_mut()
+        .write_message(key_message(key, ButtonState::Pressed, text));
     app.update();
 }
 
@@ -95,7 +80,8 @@ fn type_into(app: &mut App, text: &str) {
 /// Several keypresses arriving in one frame, as a fast typist's do.
 fn one_frame(app: &mut App, keys: &[(KeyCode, Option<&str>)]) {
     for (key, text) in keys {
-        app.world_mut().write_message(key_message(*key, *text));
+        app.world_mut()
+            .write_message(key_message(*key, ButtonState::Pressed, *text));
     }
     app.update();
 }
@@ -104,8 +90,11 @@ fn open(app: &mut App, kind: FieldKind) {
     app.world_mut().resource_mut::<FieldEdit>().open(kind, "");
 }
 
-fn open_room(app: &mut App) {
-    open(app, FieldKind::Room);
+/// Open a field, type `text` into it and press Enter.
+fn commit(app: &mut App, kind: FieldKind, text: &str) {
+    open(app, kind);
+    type_into(app, text);
+    press(app, KeyCode::Enter, None);
 }
 
 fn focus(app: &App) -> Option<FieldKind> {
@@ -116,14 +105,28 @@ fn buffer(app: &App) -> &str {
     &app.world().resource::<FieldEdit>().buffer
 }
 
+fn error(app: &App) -> &str {
+    &app.world().resource::<FieldEdit>().error
+}
+
 fn room(app: &App) -> &str {
     &app.world().resource::<RoomId>().0
+}
+
+/// A refused commit leaves the field open on `kind`, and says why.
+fn assert_refused(app: &App, kind: FieldKind) {
+    assert_eq!(
+        focus(app),
+        Some(kind),
+        "the field must stay open to be corrected"
+    );
+    assert!(!error(app).is_empty(), "the refusal must be explained");
 }
 
 #[test]
 fn typing_a_room_and_committing_changes_the_room() {
     let mut app = app();
-    open_room(&mut app);
+    open(&mut app, FieldKind::Room);
     type_into(&mut app, "kitchen-table");
     assert_eq!(buffer(&app), "kitchen-table");
 
@@ -141,9 +144,7 @@ fn typing_a_room_and_committing_changes_the_room() {
 fn committing_re_enters_the_lobby_so_the_socket_reopens() {
     let mut app = app();
     let before = lobby_entries(&app);
-    open_room(&mut app);
-    type_into(&mut app, "other-room");
-    press(&mut app, KeyCode::Enter, None);
+    commit(&mut app, FieldKind::Room, "other-room");
 
     assert_eq!(
         lobby_entries(&app),
@@ -163,19 +164,12 @@ fn changing_room_forgets_the_old_rooms_state() {
         net.next_seq = 7;
         net.last_applied_seq = Some(6);
         net.name = "ada".into();
-        net.seats = vec![Seat {
-            peer: "p".into(),
-            name: "p".into(),
-            player: Some(0),
-            engine: false,
-        }];
+        net.seats = vec![seat("p", "p", Some(0))];
     }
 
-    open_room(&mut app);
-    type_into(&mut app, "elsewhere");
-    press(&mut app, KeyCode::Enter, None);
+    commit(&mut app, FieldKind::Room, "elsewhere");
 
-    let net = app.world().resource::<NetState>();
+    let net = net(&app);
     assert!(!net.is_host, "host status belonged to the old room");
     assert!(net.seats.is_empty(), "seats were assigned by the old host");
     assert_eq!(net.next_seq, 0);
@@ -188,7 +182,7 @@ fn escape_abandons_the_edit_and_keeps_the_room() {
     let mut app = app();
     let before = room(&app).to_string();
 
-    open_room(&mut app);
+    open(&mut app, FieldKind::Room);
     type_into(&mut app, "typo");
     press(&mut app, KeyCode::Escape, None);
 
@@ -203,23 +197,12 @@ fn an_invalid_room_is_refused_with_a_reason() {
     let mut app = app();
     let before = room(&app).to_string();
 
-    open_room(&mut app);
-    type_into(&mut app, "bad/room");
-    press(&mut app, KeyCode::Enter, None);
+    commit(&mut app, FieldKind::Room, "bad/room");
 
-    let edit = app.world().resource::<FieldEdit>();
-    assert_eq!(
-        edit.focus,
-        Some(FieldKind::Room),
-        "the field must stay open to be corrected"
-    );
-    assert!(!edit.error.is_empty(), "the refusal must be explained");
-    assert!(
-        edit.error.contains('/'),
-        "must name the character: {}",
-        edit.error
-    );
-    assert_eq!(edit.buffer, "bad/room", "what was typed must survive");
+    assert_refused(&app, FieldKind::Room);
+    let error = error(&app);
+    assert!(error.contains('/'), "must name the character: {error}");
+    assert_eq!(buffer(&app), "bad/room", "what was typed must survive");
     assert_eq!(
         room(&app),
         before,
@@ -230,7 +213,7 @@ fn an_invalid_room_is_refused_with_a_reason() {
 #[test]
 fn backspace_deletes_the_last_character() {
     let mut app = app();
-    open_room(&mut app);
+    open(&mut app, FieldKind::Room);
     type_into(&mut app, "abc");
     press(&mut app, KeyCode::Backspace, None);
     assert_eq!(buffer(&app), "ab");
@@ -241,7 +224,7 @@ fn backspace_deletes_the_last_character() {
 #[test]
 fn the_buffer_stops_at_the_length_limit() {
     let mut app = app();
-    open_room(&mut app);
+    open(&mut app, FieldKind::Room);
     type_into(&mut app, &"a".repeat(RoomId::MAX_LEN + 10));
     assert_eq!(buffer(&app).chars().count(), RoomId::MAX_LEN);
 }
@@ -267,13 +250,11 @@ fn committing_the_same_room_does_not_rejoin() {
     let before = lobby_entries(&app);
     app.world_mut().resource_mut::<NetState>().is_host = true;
 
-    open_room(&mut app);
-    type_into(&mut app, &current);
-    press(&mut app, KeyCode::Enter, None);
+    commit(&mut app, FieldKind::Room, &current);
 
     assert_eq!(room(&app), current);
     assert!(
-        app.world().resource::<NetState>().is_host,
+        net(&app).is_host,
         "re-committing the same room must not reset the session"
     );
     assert_eq!(
@@ -292,7 +273,7 @@ fn the_classifier_matches_what_the_system_does() {
         EditAction::Insert('q')
     );
     let mut app = app();
-    open_room(&mut app);
+    open(&mut app, FieldKind::Room);
     press(&mut app, KeyCode::KeyQ, Some("q"));
     assert_eq!(buffer(&app), "q");
 }
@@ -304,7 +285,7 @@ fn the_classifier_matches_what_the_system_does() {
 fn keys_after_escape_in_the_same_frame_are_dropped() {
     let mut app = app();
     let before = room(&app).to_string();
-    open_room(&mut app);
+    open(&mut app, FieldKind::Room);
     one_frame(
         &mut app,
         &[
@@ -323,7 +304,7 @@ fn keys_after_escape_in_the_same_frame_are_dropped() {
 #[test]
 fn keys_after_a_commit_in_the_same_frame_are_dropped() {
     let mut app = app();
-    open_room(&mut app);
+    open(&mut app, FieldKind::Room);
     type_into(&mut app, "kitchen");
     one_frame(
         &mut app,
@@ -343,16 +324,12 @@ fn keys_after_a_commit_in_the_same_frame_are_dropped() {
 #[test]
 fn leaving_the_lobby_closes_the_field() {
     let mut app = app();
-    open_room(&mut app);
+    open(&mut app, FieldKind::Room);
     type_into(&mut app, "half");
 
-    app.world_mut()
-        .resource_mut::<NextState<AppState>>()
-        .set(AppState::InGame);
+    set_state(&mut app, AppState::InGame);
     app.update();
-    app.world_mut()
-        .resource_mut::<NextState<AppState>>()
-        .set(AppState::Lobby);
+    set_state(&mut app, AppState::Lobby);
     app.update();
 
     assert_eq!(focus(&app), None, "the field must not survive the round");
@@ -409,15 +386,7 @@ fn the_committing_keypress_does_not_leak_downstream() {
         .resource_mut::<FieldEdit>()
         .open(FieldKind::Room, "kitchen");
 
-    app.world_mut().write_message(KeyboardInput {
-        key_code: KeyCode::Enter,
-        logical_key: Key::Enter,
-        state: ButtonState::Pressed,
-        text: None,
-        repeat: false,
-        window: Entity::PLACEHOLDER,
-    });
-    app.update();
+    press(&mut app, KeyCode::Enter, None);
 
     assert_eq!(room(&app), "kitchen", "the commit itself must still work");
     assert!(
@@ -431,7 +400,7 @@ fn the_committing_keypress_does_not_leak_downstream() {
 #[test]
 fn a_closed_field_gives_the_keys_back() {
     let mut app = chained_app();
-    open_room(&mut app);
+    open(&mut app, FieldKind::Room);
     press(&mut app, KeyCode::Escape, None);
     press(&mut app, KeyCode::Digit3, Some("3"));
     assert_eq!(
@@ -445,7 +414,7 @@ fn a_closed_field_gives_the_keys_back() {
 #[test]
 fn a_digit_typed_into_the_room_field_does_not_select_a_corner() {
     let mut app = chained_app();
-    open_room(&mut app);
+    open(&mut app, FieldKind::Room);
     press(&mut app, KeyCode::Digit3, Some("3"));
 
     assert_eq!(buffer(&app), "3");
@@ -478,19 +447,12 @@ fn typing_does_not_toggle_the_sound() {
 // The name field and its Apply button.
 // ---------------------------------------------------------------------------
 
-fn open_name(app: &mut App) {
-    open(app, FieldKind::Name);
-}
-
 #[test]
 fn typing_a_name_and_committing_changes_the_name_and_re_greets() {
     let mut app = app();
-    open_name(&mut app);
-    type_into(&mut app, "ida");
-    press(&mut app, KeyCode::Enter, None);
+    commit(&mut app, FieldKind::Name, "ida");
 
-    let net = app.world().resource::<NetState>();
-    assert_eq!(net.name, "ida");
+    assert_eq!(net(&app).name, "ida");
     assert_eq!(focus(&app), None, "committing must close the field");
     assert!(buffer(&app).is_empty(), "the buffer is spent once applied");
 }
@@ -499,7 +461,7 @@ fn typing_a_name_and_committing_changes_the_name_and_re_greets() {
 #[test]
 fn the_name_stops_at_its_own_limit() {
     let mut app = app();
-    open_name(&mut app);
+    open(&mut app, FieldKind::Name);
     type_into(&mut app, &"a".repeat(NAME_MAX_LEN + 10));
     assert_eq!(buffer(&app).chars().count(), NAME_MAX_LEN);
 }
@@ -511,10 +473,7 @@ fn apply_app() -> App {
 }
 
 fn click_apply(app: &mut App) {
-    let entity = app.world_mut().spawn(ApplyName).id();
-    app.world_mut()
-        .entity_mut(entity)
-        .insert(Interaction::Pressed);
+    app.world_mut().spawn((ApplyName, Interaction::Pressed));
     app.update();
 }
 
@@ -533,23 +492,18 @@ fn applying_with_the_field_closed_focuses_it() {
         "the click opens the field"
     );
     assert_eq!(buffer(&app), "ada", "the current name seeds the buffer");
-    assert_eq!(app.world().resource::<NetState>().name, "ada");
+    assert_eq!(net(&app).name, "ada");
 }
 
 /// The real service: a second click, with the field open, commits.
 #[test]
 fn applying_with_the_field_open_commits() {
     let mut app = apply_app();
-    open_name(&mut app);
+    open(&mut app, FieldKind::Name);
     click_apply(&mut app);
 
-    let edit = app.world().resource::<FieldEdit>();
-    assert_eq!(
-        edit.focus,
-        Some(FieldKind::Name),
-        "an empty name is refused"
-    );
-    assert!(!edit.error.is_empty(), "the refusal must be explained");
+    // It did commit: the empty name was refused.
+    assert_refused(&app, FieldKind::Name);
 }
 
 /// A name someone else in the room already has is refused: the roster, the
@@ -557,20 +511,12 @@ fn applying_with_the_field_open_commits() {
 #[test]
 fn a_name_already_here_is_refused() {
     let mut app = app();
-    app.world_mut().resource_mut::<NetState>().seats = vec![Seat {
-        peer: "someone-else".into(),
-        name: "ada".into(),
-        player: None,
-        engine: false,
-    }];
-    open_name(&mut app);
-    type_into(&mut app, "ada");
-    press(&mut app, KeyCode::Enter, None);
+    app.world_mut().resource_mut::<NetState>().seats = vec![seat("someone-else", "ada", None)];
+    commit(&mut app, FieldKind::Name, "ada");
 
-    let edit = app.world().resource::<FieldEdit>();
-    assert_eq!(edit.focus, Some(FieldKind::Name), "the field stays open");
-    assert!(edit.error.contains("already"), "error: {}", edit.error);
-    assert_ne!(app.world().resource::<NetState>().name, "ada");
+    assert_refused(&app, FieldKind::Name);
+    assert!(error(&app).contains("already"), "error: {}", error(&app));
+    assert_ne!(net(&app).name, "ada");
 }
 
 /// An empty name must be refused, keeping the field and what was typed, rather
@@ -578,15 +524,7 @@ fn a_name_already_here_is_refused() {
 #[test]
 fn an_empty_name_is_refused() {
     let mut app = app();
-    open_name(&mut app);
-    type_into(&mut app, "   ");
-    press(&mut app, KeyCode::Enter, None);
+    commit(&mut app, FieldKind::Name, "   ");
 
-    let edit = app.world().resource::<FieldEdit>();
-    assert_eq!(
-        edit.focus,
-        Some(FieldKind::Name),
-        "the field must stay open to be corrected"
-    );
-    assert!(!edit.error.is_empty(), "the refusal must be explained");
+    assert_refused(&app, FieldKind::Name);
 }

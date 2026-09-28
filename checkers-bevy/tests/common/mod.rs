@@ -13,7 +13,7 @@ use checkers_bevy::lobby::{
     ChosenVariants, CornerCommand, LobbyButton, LobbyStatus, PendingClaim, SelectedCorner, Table,
 };
 use checkers_bevy::{AppState, Session};
-use checkers_net::NetState;
+use checkers_net::{NetState, Seat};
 
 /// An app with no window, no renderer and no socket: only the input and state
 /// plugins the lobby reads.
@@ -119,4 +119,14 @@ pub fn net(app: &App) -> &NetState {
 
 pub fn session(app: &App) -> &Session {
     app.world().resource::<Session>()
+}
+
+/// A person's seat in a roster (not an engine's).
+pub fn seat(peer: &str, name: &str, player: Option<u32>) -> Seat {
+    Seat {
+        peer: peer.into(),
+        name: name.into(),
+        player,
+        engine: false,
+    }
 }
