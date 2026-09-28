@@ -16,7 +16,7 @@ use bevy::prelude::*;
 // Not in the prelude, unlike the rest of the window API.
 use bevy::window::{Monitor, PrimaryMonitor};
 use bevy_matchbox::prelude::MatchboxSocket;
-use checkers_ai::{Ai, AiConfig};
+use checkers_ai::Ai;
 use checkers_bevy::ai::{Action, AiPace};
 use checkers_bevy::board_view::{
     BOARD_FRAME, HOLE_RADIUS, HOLE_SPACING, PIECE_RADIUS, coord_to_world, on_hole, player_colour,
@@ -99,7 +99,7 @@ fn main() {
                 // and a new engine carries no repetition memory from the last
                 // one.
                 |mut engine: ResMut<AiEngine>, mut pace: ResMut<AiPace>| {
-                    engine.0 = Ai::new(AiConfig::default());
+                    engine.0 = Ai::default();
                     pace.reset();
                 },
                 lobby::apply_seats,
@@ -1149,14 +1149,8 @@ fn sync_status(session: Res<Session>, mut text: Query<&mut Text, With<StatusText
 
 /// The persistent engine. It remembers the game's recent positions for the
 /// anti-shuffle rule, and forgets them when a new game is dealt.
-#[derive(Resource)]
+#[derive(Resource, Default)]
 struct AiEngine(Ai);
-
-impl Default for AiEngine {
-    fn default() -> Self {
-        Self(Ai::new(AiConfig::default()))
-    }
-}
 
 /// Let the computer play the current seat, if it owns one.
 ///

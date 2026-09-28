@@ -15,7 +15,7 @@ use checkers_bevy::lobby::{
 use checkers_bevy::{AppState, Session};
 use checkers_core::geometry::Coord;
 use checkers_core::position::{Player, Position};
-use checkers_net::{NetState, Seat};
+use checkers_net::NetState;
 
 /// An app with no window, no renderer and no socket: only the input and state
 /// plugins the lobby reads.
@@ -121,16 +121,6 @@ pub fn net(app: &App) -> &NetState {
 
 pub fn session(app: &App) -> &Session {
     app.world().resource::<Session>()
-}
-
-/// A person's seat in a roster (not an engine's).
-pub fn seat(peer: &str, name: &str, player: Option<u32>) -> Seat {
-    Seat {
-        peer: peer.into(),
-        name: name.into(),
-        player,
-        engine: false,
-    }
 }
 
 /// The first of `player`'s pieces that `destinations` offers anywhere to go,

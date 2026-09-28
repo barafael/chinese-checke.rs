@@ -43,11 +43,8 @@ fn a_paced_demo_race_is_followable_and_legal() {
                     "a move came too soon after the last action"
                 );
                 last_action = Some(now);
-                let legal = session.game.legal_moves();
                 assert!(
-                    legal.iter().any(|m| m.kind == mv.kind
-                        && m.origin == mv.origin
-                        && m.destination == mv.destination),
+                    session.game.legal_moves().contains(&mv),
                     "the driver committed {mv:?}, which the rules do not offer"
                 );
                 log.push(format!(

@@ -10,8 +10,7 @@ mod common;
 
 use checkers_core::position::{MoveKind, Player, Position};
 use checkers_core::rules::{Game, legal_moves};
-use checkers_net::{NetMsg, NetState, WireMove, decode, encode};
-use common::seat;
+use checkers_net::{NetMsg, NetState, Seat, WireMove, decode, encode};
 
 /// Simulates the host's sequencing arm without a socket: resolve against the
 /// rules, assign a seq, apply once.
@@ -179,8 +178,8 @@ fn the_wire_form_preserves_move_identity() {
 fn the_hosts_roster_reaches_the_guest_over_the_wire() {
     let net = NetState {
         seats: vec![
-            seat("host", "host", Some(0)),
-            seat("guest", "grace", Some(3)),
+            Seat::human("host", "host", Some(0)),
+            Seat::human("guest", "grace", Some(3)),
         ],
         ..Default::default()
     };

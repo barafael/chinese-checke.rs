@@ -16,8 +16,8 @@ use checkers_bevy::lobby::{
     SelectedCorner, apply_name, edit_action, fields_plugin, not_editing, select_corner,
 };
 use checkers_bevy::sound::{self, SoundOn};
-use checkers_net::{NetState, RoomId};
-use common::{key_message, net, seat, set_state};
+use checkers_net::{NetState, RoomId, Seat};
+use common::{key_message, net, set_state};
 
 /// How many times the lobby has been entered — where the app opens the room's
 /// socket.
@@ -164,7 +164,7 @@ fn changing_room_forgets_the_old_rooms_state() {
         net.next_seq = 7;
         net.last_applied_seq = Some(6);
         net.name = "ada".into();
-        net.seats = vec![seat("p", "p", Some(0))];
+        net.seats = vec![Seat::human("p", "p", Some(0))];
     }
 
     commit(&mut app, FieldKind::Room, "elsewhere");
@@ -511,7 +511,8 @@ fn applying_with_the_field_open_commits() {
 #[test]
 fn a_name_already_here_is_refused() {
     let mut app = app();
-    app.world_mut().resource_mut::<NetState>().seats = vec![seat("someone-else", "ada", None)];
+    app.world_mut().resource_mut::<NetState>().seats =
+        vec![Seat::human("someone-else", "ada", None)];
     commit(&mut app, FieldKind::Name, "ada");
 
     assert_refused(&app, FieldKind::Name);

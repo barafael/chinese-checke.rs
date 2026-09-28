@@ -86,6 +86,19 @@ pub struct Seat {
     pub engine: bool,
 }
 
+impl Seat {
+    /// A person's seat, not an engine's: `peer` going by `name`, holding
+    /// `player` once the host has granted it.
+    pub fn human(peer: &str, name: &str, player: Option<u32>) -> Self {
+        Self {
+            peer: peer.into(),
+            name: name.into(),
+            player,
+            engine: false,
+        }
+    }
+}
+
 /// Top-level wire envelope.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum NetMsg {
@@ -195,6 +208,11 @@ impl NetState {
     pub fn my_seat(&self) -> Option<&Seat> {
         let me = self.my_id?.to_string();
         self.seats.iter().find(|s| s.peer == me)
+    }
+
+    /// The seat holding `corner`: a peer's granted claim, or an engine.
+    pub fn seat_at(&self, corner: u32) -> Option<&Seat> {
+        self.seats.iter().find(|s| s.player == Some(corner))
     }
 
     /// Which [`Player`] this peer commands, if the host has assigned one.
@@ -477,12 +495,7 @@ mod tests {
             next_seq: 12,
             last_applied_seq: Some(11),
             name: "ada".into(),
-            seats: vec![Seat {
-                peer: "p".into(),
-                name: "p".into(),
-                player: Some(0),
-                engine: false,
-            }],
+            seats: vec![Seat::human("p", "p", Some(0))],
             ..NetState::default()
         };
 

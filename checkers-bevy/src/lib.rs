@@ -489,9 +489,7 @@ impl Session {
         if !self.shared {
             return None;
         }
-        net.seats
-            .iter()
-            .find(|s| s.player == Some(u32::from(p.index())))
+        net.seat_at(u32::from(p.index()))
             .map(|s| s.name.as_str())
             .filter(|n| !n.is_empty())
     }

@@ -336,7 +336,7 @@ fn sync_button_styles(
                 CornerState::Cpu => CornerCommand::Cpu,
             }
         } else {
-            match holder(&net, i as u32) {
+            match net.seat_at(i as u32) {
                 // A free corner reads as its empty state.
                 None => CornerCommand::Off,
                 // An occupied corner is an engine seat or a human claim.
@@ -648,13 +648,8 @@ fn corner_is_filled(net: &NetState, table: &Table, i: usize) -> bool {
     if net.peers.is_empty() {
         table.0[i] != CornerState::Empty
     } else {
-        holder(net, i as u32).is_some()
+        net.seat_at(i as u32).is_some()
     }
-}
-
-/// The seat holding `corner` in a shared room: a peer's claim, or an engine.
-fn holder(net: &NetState, corner: u32) -> Option<&Seat> {
-    net.seats.iter().find(|s| s.player == Some(corner))
 }
 
 /// Marker on the Human / Computer row: shown while the selected corner is
@@ -1302,7 +1297,7 @@ pub fn pump_socket(socket: Option<ResMut<MatchboxSocket>>, lobby: LobbyWorld) {
                     // Read the roster before mutating it: the grant must see
                     // the corners as the peers do, and the sender's own hold.
                     let grantable = corner.is_some_and(|c| {
-                        let free = holder(&net, c).is_none();
+                        let free = net.seat_at(c).is_none();
                         let mine = net
                             .seats
                             .iter()
@@ -1522,12 +1517,7 @@ fn seat_for(net: &mut NetState, peer: &str, name: &str) {
     if net.seats.iter().any(|s| s.peer == peer) {
         return;
     }
-    net.seats.push(Seat {
-        peer: peer.to_string(),
-        name: name.to_string(),
-        player: None,
-        engine: false,
-    });
+    net.seats.push(Seat::human(peer, name, None));
 }
 
 /// Mirror the host's current name into its own seat. The host's seat is only
@@ -1622,7 +1612,7 @@ pub enum SectorClick {
 }
 
 pub fn sector_click(net: &NetState, sector: usize) -> SectorClick {
-    if net.peers.is_empty() || holder(net, sector as u32).is_some() {
+    if net.peers.is_empty() || net.seat_at(sector as u32).is_some() {
         SectorClick::Select(sector)
     } else {
         SectorClick::Claim(sector as u32)
@@ -1668,7 +1658,9 @@ pub fn claim_answer(net: &NetState, claim: Option<u32>) -> Option<String> {
     let mine = net.my_seat().and_then(|s| s.player);
     match claim {
         Some(c) if mine == Some(c) => Some(format!("You hold corner {c}.")),
-        Some(c) => holder(net, c).map(|seat| format!("Corner {c} went to {}.", seat.name)),
+        Some(c) => net
+            .seat_at(c)
+            .map(|seat| format!("Corner {c} went to {}.", seat.name)),
         None => mine.is_none().then(|| "Corner released.".into()),
     }
 }
@@ -1753,7 +1745,7 @@ pub fn corner_effect(
 ) -> Result<CornerEffect, String> {
     if !net.peers.is_empty() {
         // Shared room: the roster owns the corners.
-        if let Some(owner) = holder(net, corner) {
+        if let Some(owner) = net.seat_at(corner) {
             if owner.engine {
                 if net.sequences() && cmd == CornerCommand::Off {
                     return Ok(CornerEffect::RemoveEngine(corner));
@@ -2341,7 +2333,7 @@ fn draw_corner_labels(
                 CornerState::Human => (format!("P{i}"), "human".into()),
                 CornerState::Cpu => ("Computer".into(), "CPU".into()),
             }
-        } else if let Some(seat) = holder(&net, i as u32) {
+        } else if let Some(seat) = net.seat_at(i as u32) {
             if seat.engine {
                 ("Engine".into(), "CPU".into())
             } else {
@@ -2457,12 +2449,7 @@ mod tests {
     use super::*;
 
     fn seat(name: &str, player: Option<u32>) -> Seat {
-        Seat {
-            peer: name.into(),
-            name: name.into(),
-            player,
-            engine: false,
-        }
+        Seat::human(name, name, player)
     }
 
     fn engine_seat(name: &str, player: Option<u32>) -> Seat {
