@@ -24,9 +24,8 @@ impl State {
     pub fn initial(board: Board) -> Self {
         let mut state = Self::empty(board);
         for player in 0..NUM_PLAYERS as Player {
-            let camp: Vec<Coord> = state.board.camp(player).iter().copied().collect();
-            for c in camp {
-                state.set(c, Some(player));
+            for &c in state.board.camp(player) {
+                state.occupancy.insert(c, Some(player));
             }
         }
         state
@@ -87,13 +86,11 @@ impl State {
 
     /// Position invariants of §28.
     pub fn validate(&self) {
-        let mut occupied = 0;
         for player in 0..NUM_PLAYERS as Player {
             let n = self.pieces_of(player).len();
             assert_eq!(n, CAMP_SIZE, "player {player} must own 10 pieces, has {n}");
-            occupied += n;
         }
-        assert_eq!(occupied, 60, "exactly 60 holes occupied");
+        assert_eq!(self.occupied().count(), 60, "exactly 60 holes occupied");
         let empty = self.board.holes().filter(|&c| self.is_empty(c)).count();
         assert_eq!(empty, 61, "exactly 61 holes empty");
         assert_eq!(self.occupancy.len(), HOLES);
@@ -160,9 +157,8 @@ mod tests {
     #[test]
     fn filling_the_target_camp_wins() {
         let board = Board::new();
-        let mut state = State::empty(board);
-        let target: Vec<Coord> = state.board().target_camp(0).iter().copied().collect();
-        for c in target {
+        let mut state = State::empty(board.clone());
+        for &c in board.target_camp(0) {
             state.set(c, Some(0));
         }
         assert!(state.has_won(0));
@@ -207,11 +203,10 @@ mod tests {
             let mv = moves[rng.below(moves.len() as u32) as usize].clone();
 
             if mv.kind == MoveKind::Jump {
-                let routes: Vec<Vec<Coord>> = jump_routes(&state, mv.origin, 6)
+                let routes = jump_routes(&state, mv.origin, 6)
                     .into_iter()
                     .filter(|r| r.last() == Some(&mv.destination))
-                    .take(5)
-                    .collect();
+                    .take(5);
                 for route in routes {
                     let via_route = state.apply_route(&mv.clone().with_route(route));
                     assert!(

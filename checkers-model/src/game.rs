@@ -21,12 +21,7 @@ pub struct Game {
 
 impl Game {
     pub fn new() -> Self {
-        Self {
-            state: State::initial(Board::new()),
-            turn: 0,
-            outcome: None,
-            consecutive_passes: 0,
-        }
+        Self::from_state(State::initial(Board::new()), 0)
     }
 
     pub fn from_state(state: State, turn: Player) -> Self {
@@ -121,8 +116,7 @@ impl Game {
                 continue;
             }
             let idx = choose(&self.state, self.turn, &moves);
-            let mv = moves[idx].clone();
-            self.play(&mv);
+            self.play(&moves[idx]);
             self.state.validate();
         }
         self.outcome
@@ -141,28 +135,25 @@ impl Default for Game {
 /// Demonstrates that the draft spec's `assert size(moves) > 0` was unsound.
 pub fn blocked_position() -> State {
     use crate::coord::Dir;
-    use std::collections::HashSet;
 
     let board = Board::new();
+    let camp = board.camp(0);
     let mut state = State::empty(board.clone());
-
-    let camp: Vec<_> = board.camp(0).iter().copied().collect();
-    for c in &camp {
-        state.set(*c, Some(0));
+    for &c in camp {
+        state.set(c, Some(0));
     }
 
     // Block the camp's frontier holes.
-    let frontier: HashSet<_> = camp
+    let frontier = camp
         .iter()
         .flat_map(|c| Dir::ALL.map(|d| c.add(d)))
-        .filter(|c| board.contains(*c) && !board.camp(0).contains(c))
-        .collect();
-    for c in &frontier {
-        state.set(*c, Some(1));
+        .filter(|c| board.contains(*c) && !camp.contains(c));
+    for c in frontier {
+        state.set(c, Some(1));
     }
 
     // Block every hole a camp piece could land on by jumping.
-    let landings: HashSet<_> = camp
+    let landings: Vec<_> = camp
         .iter()
         .flat_map(|c| Dir::ALL.map(|d| (c.add(d), c.jump_dest(d))))
         .filter(|(mid, dest)| {
@@ -188,8 +179,7 @@ mod tests {
         let mut game = Game::new();
         for expected in [0, 1, 2, 3, 4, 5, 0, 1] {
             assert_eq!(game.turn(), expected);
-            let mv = game.legal_moves()[0].clone();
-            game.play(&mv);
+            game.play(&game.legal_moves()[0]);
         }
     }
 
