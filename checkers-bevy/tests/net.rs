@@ -6,9 +6,12 @@
 //! twice, must not be applied unsequenced, and must be rejected by the rules
 //! rather than trusted.
 
+mod common;
+
 use checkers_core::position::{MoveKind, Player, Position};
 use checkers_core::rules::{Game, legal_moves};
-use checkers_net::{NetState, WireMove};
+use checkers_net::{NetMsg, NetState, WireMove, decode, encode};
+use common::seat;
 
 /// Simulates the host's sequencing arm without a socket: resolve against the
 /// rules, assign a seq, apply once.
@@ -155,13 +158,12 @@ fn the_wire_form_preserves_move_identity() {
         jump: false,
         ..wire
     };
-    match as_step.resolve(&legal) {
-        None => {}
-        Some(m) => assert_eq!(
+    if let Some(m) = as_step.resolve(&legal) {
+        assert_eq!(
             m.kind,
             MoveKind::Step,
             "a step-flagged wire move must never resolve to a jump"
-        ),
+        );
     }
 }
 
@@ -175,22 +177,10 @@ fn the_wire_form_preserves_move_identity() {
 /// same board.
 #[test]
 fn the_hosts_roster_reaches_the_guest_over_the_wire() {
-    use checkers_net::{NetMsg, Seat, decode, encode};
-
     let net = NetState {
         seats: vec![
-            Seat {
-                peer: "host".into(),
-                name: "host".into(),
-                player: Some(0),
-                engine: false,
-            },
-            Seat {
-                peer: "guest".into(),
-                name: "grace".into(),
-                player: Some(3),
-                engine: false,
-            },
+            seat("host", "host", Some(0)),
+            seat("guest", "grace", Some(3)),
         ],
         ..Default::default()
     };
@@ -211,10 +201,6 @@ fn the_hosts_roster_reaches_the_guest_over_the_wire() {
 /// now, so the claimed camps are the board, whatever subset they form.
 #[test]
 fn arbitrary_claimed_corners_reach_the_guests_board() {
-    use checkers_net::{NetMsg, decode, encode};
-
-    // Camps 0, 1 and 4: playable, and not one of the 2/3/6 presets.
-    let players = [0u32, 1, 4];
     let sent = NetMsg::Start {
         seats: Vec::new(),
         forbid_foreign_camps: false,
@@ -224,10 +210,8 @@ fn arbitrary_claimed_corners_reach_the_guests_board() {
         panic!("wrong variant");
     };
 
-    let camps: Vec<Player> = players
-        .iter()
-        .filter_map(|&i| Player::new(i as u8))
-        .collect();
+    // Camps 0, 1 and 4: playable, and not one of the 2/3/6 presets.
+    let camps = [Player::ALL[0], Player::ALL[1], Player::ALL[4]];
     let game = Game::for_players(&camps);
     for player in Player::ALL {
         let found = game.position().pieces_of(player).len();
