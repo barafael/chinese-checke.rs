@@ -220,7 +220,11 @@ fn an_invalid_room_is_refused_with_a_reason() {
         edit.error
     );
     assert_eq!(edit.buffer, "bad/room", "what was typed must survive");
-    assert_eq!(room(&app), before, "a refused room must not change the room");
+    assert_eq!(
+        room(&app),
+        before,
+        "a refused room must not change the room"
+    );
 }
 
 #[test]
@@ -362,14 +366,14 @@ fn chained_app() -> App {
     app.init_resource::<SelectedCorner>()
         .init_resource::<PendingClaim>()
         .add_systems(
-        Update,
-        // The *real* run condition, not a copy of it. An inline duplicate here
-        // made an earlier version of this test pass with the guard removed
-        // from the app -- it was checking its own logic.
-        select_corner
-            .run_if(not_editing)
-            .run_if(in_state(AppState::Lobby)),
-    );
+            Update,
+            // The *real* run condition, not a copy of it. An inline duplicate here
+            // made an earlier version of this test pass with the guard removed
+            // from the app -- it was checking its own logic.
+            select_corner
+                .run_if(not_editing)
+                .run_if(in_state(AppState::Lobby)),
+        );
     app
 }
 
@@ -523,7 +527,11 @@ fn applying_with_the_field_closed_focuses_it() {
     app.world_mut().resource_mut::<NetState>().name = "ada".into();
     click_apply(&mut app);
 
-    assert_eq!(focus(&app), Some(FieldKind::Name), "the click opens the field");
+    assert_eq!(
+        focus(&app),
+        Some(FieldKind::Name),
+        "the click opens the field"
+    );
     assert_eq!(buffer(&app), "ada", "the current name seeds the buffer");
     assert_eq!(app.world().resource::<NetState>().name, "ada");
 }
@@ -536,7 +544,11 @@ fn applying_with_the_field_open_commits() {
     click_apply(&mut app);
 
     let edit = app.world().resource::<FieldEdit>();
-    assert_eq!(edit.focus, Some(FieldKind::Name), "an empty name is refused");
+    assert_eq!(
+        edit.focus,
+        Some(FieldKind::Name),
+        "an empty name is refused"
+    );
     assert!(!edit.error.is_empty(), "the refusal must be explained");
 }
 

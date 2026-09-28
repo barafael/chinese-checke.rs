@@ -3342,13 +3342,16 @@ mod tests {
     fn the_later_of_two_same_named_peers_gives_way() {
         let host = PeerId(uuid::Uuid::from_u128(1));
         let guest = PeerId(uuid::Uuid::from_u128(2));
-        let roster = vec![seat(&host.to_string(), None), seat(&guest.to_string(), None)]
-            .into_iter()
-            .map(|s| Seat {
-                name: "gecko".into(),
-                ..s
-            })
-            .collect::<Vec<_>>();
+        let roster = vec![
+            seat(&host.to_string(), None),
+            seat(&guest.to_string(), None),
+        ]
+        .into_iter()
+        .map(|s| Seat {
+            name: "gecko".into(),
+            ..s
+        })
+        .collect::<Vec<_>>();
 
         let guest_net = NetState {
             my_id: Some(guest),

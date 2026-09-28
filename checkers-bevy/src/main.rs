@@ -15,6 +15,7 @@ use bevy::prelude::*;
 use bevy::ecs::system::SystemParam;
 use bevy::input::touch::{TouchInput, TouchPhase};
 use bevy::window::{Monitor, PrimaryMonitor};
+use bevy_matchbox::prelude::MatchboxSocket;
 use checkers_ai::{Ai, AiConfig};
 use checkers_bevy::ai::{Action, AiPace};
 use checkers_bevy::board_view::{
@@ -30,7 +31,6 @@ use checkers_core::geometry::{all_holes, camp_of, on_board};
 use checkers_core::law::{LAWS, verify_all};
 use checkers_core::position::{Player, Position};
 use checkers_core::rules::Outcome;
-use bevy_matchbox::prelude::MatchboxSocket;
 use checkers_net::NetState;
 use std::collections::HashMap;
 

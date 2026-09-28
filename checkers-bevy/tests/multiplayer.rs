@@ -769,9 +769,9 @@ fn a_finished_round_rematches_over_the_same_socket() {
 
     press(&mut apps[host_i], KeyCode::Enter);
     assert!(
-        wait_for(&mut apps, Duration::from_secs(30), |apps| apps
-            .iter()
-            .all(|a| in_game(a) && !a.world().resource::<Session>().game.is_over())),
+        wait_for(&mut apps, Duration::from_secs(30), |apps| apps.iter().all(
+            |a| in_game(a) && !a.world().resource::<Session>().game.is_over()
+        )),
         "the rematch never started everywhere: {}",
         describe(&apps)
     );
@@ -791,9 +791,9 @@ fn a_finished_round_rematches_over_the_same_socket() {
     );
     press(&mut apps[host_i], KeyCode::Enter);
     assert!(
-        wait_for(&mut apps, Duration::from_secs(30), |apps| apps
-            .iter()
-            .all(|a| in_game(a) && !a.world().resource::<Session>().game.is_over())),
+        wait_for(&mut apps, Duration::from_secs(30), |apps| apps.iter().all(
+            |a| in_game(a) && !a.world().resource::<Session>().game.is_over()
+        )),
         "the host's Start never pulled the lingering guest in: {}",
         describe(&apps)
     );
@@ -886,7 +886,10 @@ fn status(app: &App) -> String {
 fn a_shared_name_is_settled_and_a_claim_answered() {
     let port = start_signaling_server();
     let room = fresh_room("clash");
-    let mut apps = vec![instance("gecko", &room, port), instance("gecko", &room, port)];
+    let mut apps = vec![
+        instance("gecko", &room, port),
+        instance("gecko", &room, port),
+    ];
 
     let connected = wait_for(&mut apps, Duration::from_secs(45), |apps| {
         apps.iter().all(|a| net(a).peers.len() == 1) && apps.iter().any(|a| net(a).is_host)

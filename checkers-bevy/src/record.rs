@@ -312,7 +312,10 @@ mod tests {
     fn nothing_resolves_after_the_game_is_over() {
         let mut session = crate::Session::new(Seating::Two);
         let wire = WireMove::from_move(&session.game.legal_moves()[0]);
-        assert!(session.resolve(&wire).is_some(), "legal while the game runs");
+        assert!(
+            session.resolve(&wire).is_some(),
+            "legal while the game runs"
+        );
 
         session.game.abandon();
         assert!(

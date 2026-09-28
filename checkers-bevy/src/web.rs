@@ -263,7 +263,11 @@ mod tests {
     /// list is short), but the name must always be one the roster can show.
     #[test]
     fn a_clash_draws_a_free_name() {
-        let taken: Vec<&str> = PET_NAMES.iter().copied().filter(|n| *n != "otter").collect();
+        let taken: Vec<&str> = PET_NAMES
+            .iter()
+            .copied()
+            .filter(|n| *n != "otter")
+            .collect();
         for _ in 0..50 {
             assert_eq!(petname_avoiding(&taken), "otter", "the one free name");
         }
