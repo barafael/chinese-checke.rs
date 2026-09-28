@@ -295,12 +295,7 @@ mod tests {
     #[test]
     fn only_an_opponents_move_is_replayed() {
         let mut session = Session::new(Seating::Two);
-        let mv = session
-            .game
-            .legal_moves()
-            .into_iter()
-            .next()
-            .expect("moves exist");
+        let mv = session.game.legal_moves()[0].clone();
 
         // Hotseat: no seat, so every move animates.
         session.commit(&mv);

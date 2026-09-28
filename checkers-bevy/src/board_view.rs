@@ -32,7 +32,7 @@ pub fn player_colour(player: Player) -> Color {
 ///
 /// The star spans x ∈ [-204, 204] and y ∈ [-236, 236] at [`HOLE_SPACING`]; the
 /// board is centred on the origin, so one half-extent describes both sides.
-/// Measured from [`crate::board_view::coord_to_world`] over every hole rather
+/// Measured from [`coord_to_world`] over every hole rather
 /// than derived by hand — see `the_board_fits_within_its_half_extent`.
 pub const BOARD_HALF_EXTENT: Vec2 = Vec2::new(204.0 + PIECE_RADIUS, 236.0 + PIECE_RADIUS);
 
@@ -84,7 +84,7 @@ pub fn world_to_coord(p: Vec2) -> Coord {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use checkers_core::geometry::all_holes;
+    use checkers_core::geometry::{Dir, all_holes, on_board};
 
     /// [`BOARD_HALF_EXTENT`] must actually contain the board, or the camera-fit
     /// system will crop it. A hand-written constant is exactly the kind of thing
@@ -162,8 +162,6 @@ mod tests {
     /// regular hex grid rather than a sheared one.
     #[test]
     fn adjacent_holes_are_one_spacing_apart() {
-        use checkers_core::geometry::{Dir, on_board};
-
         for c in all_holes() {
             for d in Dir::ALL {
                 let n = c.neighbour(d);
