@@ -1,8 +1,8 @@
 //! Move representation and generation (Impl. Spec. §§11-12, 16, 19-20).
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 
-use crate::board::Player;
+use crate::board::{Board, Player};
 use crate::coord::{Coord, Dir};
 use crate::state::State;
 
@@ -76,6 +76,23 @@ pub fn is_legal_step(state: &State, player: Player, origin: Coord, to: Coord) ->
         && state.is_empty(to)
 }
 
+/// Landing holes of the single jumps out of `cur` (§10): over a hole of Ω,
+/// the occupied holes excluding the moving piece, into a board hole outside Ω.
+fn single_jumps(board: &Board, others: &HashSet<Coord>, cur: Coord) -> Vec<Coord> {
+    let mut out = Vec::new();
+    for d in Dir::ALL {
+        let (mid, dest) = (cur.add(d), cur.jump_dest(d));
+        if board.contains(mid)
+            && board.contains(dest)
+            && others.contains(&mid)
+            && !others.contains(&dest)
+        {
+            out.push(dest);
+        }
+    }
+    out
+}
+
 /// Destinations reachable by one or more jumps (§16).
 ///
 /// Exact and terminating: a turn moves one piece and never captures, so the
@@ -85,35 +102,20 @@ pub fn is_legal_step(state: &State, player: Player, origin: Coord, to: Coord) ->
 /// **positions** suffices — keying on `(state, position)` is unnecessary and
 /// does not terminate (§17, §18).
 pub fn jump_destinations(state: &State, origin: Coord) -> HashSet<Coord> {
-    let board = state.board();
-
     // Ω: occupied holes excluding the moving piece.
     let others: HashSet<Coord> = state.occupied().filter(|&c| c != origin).collect();
 
-    let mut visited = HashSet::from([origin]);
-    let mut frontier = vec![origin];
+    // Breadth-first, with `reachable` as the visited set. Jumping back into the
+    // origin is not a move, so the origin is never recorded.
     let mut reachable = HashSet::new();
-
-    while !frontier.is_empty() {
-        let mut next = Vec::new();
-        for cur in frontier {
-            for d in Dir::ALL {
-                let mid = cur.add(d);
-                let dest = cur.jump_dest(d);
-                if board.contains(mid)
-                    && board.contains(dest)
-                    && others.contains(&mid)
-                    && !others.contains(&dest)
-                    && visited.insert(dest)
-                {
-                    reachable.insert(dest);
-                    next.push(dest);
-                }
+    let mut queue = VecDeque::from([origin]);
+    while let Some(cur) = queue.pop_front() {
+        for dest in single_jumps(state.board(), &others, cur) {
+            if dest != origin && reachable.insert(dest) {
+                queue.push_back(dest);
             }
         }
-        frontier = next;
     }
-
     reachable
 }
 
@@ -122,12 +124,11 @@ pub fn jump_destinations(state: &State, origin: Coord) -> HashSet<Coord> {
 /// guard below is a presentational restriction and does not change the
 /// destination set computed by [`jump_destinations`].
 pub fn jump_routes(state: &State, origin: Coord, max_len: usize) -> Vec<Vec<Coord>> {
-    let board = state.board();
     let others: HashSet<Coord> = state.occupied().filter(|&c| c != origin).collect();
     let mut out = Vec::new();
 
     fn walk(
-        board: &crate::board::Board,
+        board: &Board,
         others: &HashSet<Coord>,
         cur: Coord,
         path: &mut Vec<Coord>,
@@ -138,15 +139,8 @@ pub fn jump_routes(state: &State, origin: Coord, max_len: usize) -> Vec<Vec<Coor
         if path.len() > max_len {
             return;
         }
-        for d in Dir::ALL {
-            let mid = cur.add(d);
-            let dest = cur.jump_dest(d);
-            if board.contains(mid)
-                && board.contains(dest)
-                && others.contains(&mid)
-                && !others.contains(&dest)
-                && !path.contains(&dest)
-            {
+        for dest in single_jumps(board, others, cur) {
+            if !path.contains(&dest) {
                 path.push(dest);
                 out.push(path.clone());
                 walk(board, others, dest, path, max_len, out);
@@ -156,7 +150,7 @@ pub fn jump_routes(state: &State, origin: Coord, max_len: usize) -> Vec<Vec<Coor
     }
 
     let mut path = vec![origin];
-    walk(board, &others, origin, &mut path, max_len, &mut out);
+    walk(state.board(), &others, origin, &mut path, max_len, &mut out);
     out
 }
 
@@ -182,8 +176,6 @@ pub fn legal_moves(state: &State, player: Player) -> Vec<Move> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::board::Board;
-    use std::collections::HashSet;
 
     #[test]
     fn initial_mobility_is_uniform() {
@@ -251,9 +243,7 @@ mod tests {
 
         let routes = jump_routes(&state, origin, 4);
         assert!(
-            routes
-                .iter()
-                .any(|r| r.len() >= 2 && r[1] == Coord::new(2, 0)),
+            routes.iter().any(|r| r.get(1) == Some(&Coord::new(2, 0))),
             "should be able to jump the blocker"
         );
         // The destination set never contains the origin itself.
@@ -266,11 +256,8 @@ mod tests {
     #[test]
     fn bfs_agrees_with_exhaustive_path_search() {
         let board = Board::new();
-        let all: Vec<Coord> = {
-            let mut v: Vec<Coord> = board.holes().collect();
-            v.sort();
-            v
-        };
+        let mut all: Vec<Coord> = board.holes().collect();
+        all.sort();
         let mut rng = crate::prng::Prng::new(0xC0FFEE);
 
         for _ in 0..200 {
