@@ -19,7 +19,7 @@ linkme = "0.3"
 bevy = { version = "0.19", default-features = false, features = ["2d", "ui", "audio"] }
 # Pinned to the same fork omdurman uses: the crates.io release does not yet
 # support Bevy 0.19.
-bevy_matchbox = { git = "https://github.com/barafael/matchbox.git" }
+bevy_matchbox = { git = "https://github.com/barafael/matchbox.git", branch = "bevy-0.19-socket-hardening" }
 postcard = { version = "1", features = ["alloc"] }
 serde = { version = "1", features = ["derive"] }
 
