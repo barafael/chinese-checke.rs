@@ -20,8 +20,8 @@ use crate::position::{
 use crate::register_law;
 use crate::rng::Xorshift;
 use crate::rules::{
-    Outcome, apply, apply_route, blocked_position, frozen_position, jump_destinations, jump_routes,
-    legal_moves,
+    Game, Outcome, apply, apply_route, blocked_position, frozen_position, jump_destinations,
+    jump_routes, legal_moves,
 };
 use crate::spec::Chapter;
 use crate::turn::{JumpTurn, single_hop_destinations};
@@ -31,8 +31,8 @@ use crate::turn::{JumpTurn, single_hop_destinations};
 ///
 /// Fixed seed rather than a random one, so a failure is reproducible.
 fn sample_positions(count: usize) -> Vec<Position> {
-    let mut out = vec![Position::initial()];
     let mut pos = Position::initial();
+    let mut out = vec![pos.clone()];
     let mut rng = Xorshift::new(0x5EED);
 
     for ply in 0..count {
@@ -41,8 +41,7 @@ fn sample_positions(count: usize) -> Vec<Position> {
         if moves.is_empty() {
             continue;
         }
-        let mv = &moves[rng.below(moves.len())];
-        pos = apply(&pos, mv);
+        pos = apply(&pos, &moves[rng.below(moves.len())]);
         out.push(pos.clone());
     }
     out
@@ -129,17 +128,14 @@ impl Law for OccupancyAccounting {
     type Subject = Position;
 
     fn holds(pos: &Position) -> Result<(), String> {
-        let occupied = pos.occupied_count();
-        let empty = pos.empty_count();
+        let (occupied, empty) = (pos.occupied_count(), pos.empty_count());
         let expected = PLAYERS * PIECES_PER_PLAYER;
+        let expected_empty = HOLES - expected;
         if occupied != expected {
             return Err(format!("{occupied} holes occupied, expected {expected}"));
         }
-        if empty != HOLES - expected {
-            return Err(format!(
-                "{empty} holes empty, expected {}",
-                HOLES - expected
-            ));
+        if empty != expected_empty {
+            return Err(format!("{empty} holes empty, expected {expected_empty}"));
         }
         Ok(())
     }
@@ -209,11 +205,10 @@ impl Law for TargetCampIsOpposite {
         let start: HashSet<Coord> = player.start_camp().iter().copied().collect();
         let target: HashSet<Coord> = player.target_camp().iter().copied().collect();
 
-        if start.len() != PIECES_PER_PLAYER || target.len() != PIECES_PER_PLAYER {
+        let (s, t) = (start.len(), target.len());
+        if s != PIECES_PER_PLAYER || t != PIECES_PER_PLAYER {
             return Err(format!(
-                "camp sizes are {} and {}, expected {PIECES_PER_PLAYER}",
-                start.len(),
-                target.len()
+                "camp sizes are {s} and {t}, expected {PIECES_PER_PLAYER}"
             ));
         }
         if !start.is_disjoint(&target) {
@@ -258,15 +253,12 @@ impl Law for StepLegality {
     fn holds(pos: &Position) -> Result<(), String> {
         for player in Player::ALL {
             // What the specification says the step set is.
-            let mut expected: HashSet<(Coord, Coord)> = HashSet::new();
-            for origin in pos.pieces_of(player) {
-                for d in Dir::ALL {
-                    let to = origin.neighbour(d);
-                    if on_board(to) && pos.is_empty_hole(to) {
-                        expected.insert((origin, to));
-                    }
-                }
-            }
+            let expected: HashSet<(Coord, Coord)> = pos
+                .pieces_of(player)
+                .into_iter()
+                .flat_map(|origin| Dir::ALL.map(|d| (origin, origin.neighbour(d))))
+                .filter(|&(_, to)| on_board(to) && pos.is_empty_hole(to))
+                .collect();
             // What the generator produced.
             let produced: HashSet<(Coord, Coord)> = legal_moves(pos, player)
                 .into_iter()
@@ -287,25 +279,26 @@ impl Law for StepLegality {
             // Checking only acceptance is one-sided: an over-permissive
             // predicate is never exercised, because move generation only ever
             // offers neighbours. Non-neighbours must be checked explicitly.
-            for (origin, to) in &expected {
-                if !is_legal_step(pos, player, *origin, *to) {
+            for &(origin, to) in &expected {
+                if !is_legal_step(pos, player, origin, to) {
                     return Err(format!("is_legal_step rejected legal {origin:?}->{to:?}"));
                 }
             }
             for origin in pos.pieces_of(player) {
-                for target in pos.holes() {
-                    let adjacent = Dir::ALL.iter().any(|d| origin.neighbour(*d) == *target);
-                    let legal = is_legal_step(pos, player, origin, *target);
-                    let should = adjacent && pos.is_empty_hole(*target);
+                for &target in pos.holes() {
+                    let adjacent = Dir::ALL.iter().any(|d| origin.neighbour(*d) == target);
+                    let empty = pos.is_empty_hole(target);
+                    let legal = is_legal_step(pos, player, origin, target);
+                    let should = adjacent && empty;
                     if legal != should {
                         return Err(format!(
-                            "is_legal_step({},{} -> {},{}) = {legal}, expected {should}                              (adjacent {adjacent}, empty {}, distance {})",
+                            "is_legal_step({},{} -> {},{}) = {legal}, expected {should} \
+                             (adjacent {adjacent}, empty {empty}, distance {})",
                             origin.q,
                             origin.r,
                             target.q,
                             target.r,
-                            pos.is_empty_hole(*target),
-                            origin.distance(*target),
+                            origin.distance(target),
                         ));
                     }
                 }
@@ -336,20 +329,15 @@ impl Law for StepDisplacement {
 
     fn holds(pos: &Position) -> Result<(), String> {
         for player in Player::ALL {
-            for mv in legal_moves(pos, player) {
-                if mv.kind != MoveKind::Step {
-                    continue;
+            let moves = legal_moves(pos, player);
+            for mv in moves.iter().filter(|m| m.kind == MoveKind::Step) {
+                let (from, to) = (mv.origin, mv.destination);
+                let span = from.distance(to);
+                if span != 1 {
+                    return Err(format!("step {from:?}->{to:?} spans distance {span}"));
                 }
-                if mv.origin.distance(mv.destination) != 1 {
-                    return Err(format!(
-                        "step {:?}->{:?} spans distance {}",
-                        mv.origin,
-                        mv.destination,
-                        mv.origin.distance(mv.destination)
-                    ));
-                }
-                if !pos.is_empty_hole(mv.destination) {
-                    return Err(format!("step lands on occupied {:?}", mv.destination));
+                if !pos.is_empty_hole(to) {
+                    return Err(format!("step lands on occupied {to:?}"));
                 }
             }
         }
@@ -389,21 +377,16 @@ impl Law for JumpLegality {
             return Ok(());
         };
         for d in Dir::ALL {
-            let mid = origin.neighbour(d);
-            let dest = origin.jump_dest(d);
-            let expected = on_board(mid)
-                && on_board(dest)
-                && !pos.is_empty_hole(mid)
-                && pos.is_empty_hole(dest);
+            let (mid, dest) = (origin.neighbour(d), origin.jump_dest(d));
+            let (mid_on_board, mid_occupied) = (on_board(mid), !pos.is_empty_hole(mid));
+            let (dest_on_board, dest_empty) = (on_board(dest), pos.is_empty_hole(dest));
+            let expected = mid_on_board && mid_occupied && dest_on_board && dest_empty;
             let actual = is_legal_jump(pos, player, *origin, d);
             if actual != expected {
                 return Err(format!(
                     "is_legal_jump({origin:?}, {d:?}) = {actual}, expected {expected} \
-                     (mid on board {}, mid occupied {}, dest on board {}, dest empty {})",
-                    on_board(mid),
-                    !pos.is_empty_hole(mid),
-                    on_board(dest),
-                    pos.is_empty_hole(dest)
+                     (mid on board {mid_on_board}, mid occupied {mid_occupied}, \
+                     dest on board {dest_on_board}, dest empty {dest_empty})"
                 ));
             }
         }
@@ -438,18 +421,14 @@ impl Law for JumpDoesNotCapture {
                 continue;
             }
             let mid = origin.neighbour(d);
-            let before = pos.occupant(mid);
             let after = apply(pos, &Move::jump(*origin, origin.jump_dest(d)));
 
-            if after.occupant(mid) != before {
+            if after.occupant(mid) != pos.occupant(mid) {
                 return Err(format!("crossed piece at {mid:?} changed"));
             }
-            if after.occupied_count() != pos.occupied_count() {
-                return Err(format!(
-                    "piece count changed from {} to {}",
-                    pos.occupied_count(),
-                    after.occupied_count()
-                ));
+            let (before_n, after_n) = (pos.occupied_count(), after.occupied_count());
+            if after_n != before_n {
+                return Err(format!("piece count changed from {before_n} to {after_n}"));
             }
             for p in Player::ALL {
                 if after.count_of(p) != pos.count_of(p) {
@@ -550,7 +529,8 @@ impl Law for JumpClosureIsExact {
             let missing: Vec<_> = by_route.difference(&bfs).take(4).collect();
             let extra: Vec<_> = bfs.difference(&by_route).take(4).collect();
             return Err(format!(
-                "closure mismatch from ({},{}): BFS is missing {} destination(s) {missing:?}                  and wrongly offers {} {extra:?}",
+                "closure mismatch from ({},{}): BFS is missing {} destination(s) {missing:?} \
+                 and wrongly offers {} {extra:?}",
                 origin.q,
                 origin.r,
                 by_route.difference(&bfs).count(),
@@ -643,20 +623,19 @@ impl Law for JumpRoutesCanRevisit {
         pos.set(Coord::new(1, 0), Some(Player::ALL[1]));
 
         let out = Coord::new(2, 0);
-        if !jump_destinations(&pos, origin).contains(&out) {
+        let destinations = jump_destinations(&pos, origin);
+        if !destinations.contains(&out) {
             return Err("the piece cannot hop over its neighbouring blocker".into());
         }
 
         // From the landing hole, the reverse hop is available again.
-        let mut moved = pos.clone();
-        moved.set(origin, None);
-        moved.set(out, Some(Player::ALL[0]));
+        let moved = apply(&pos, &Move::jump(origin, out));
         if !jump_destinations(&moved, out).contains(&origin) {
             return Err("the piece cannot hop back, so routes could not cycle".into());
         }
 
         // The origin is nonetheless excluded from its own destination set.
-        if jump_destinations(&pos, origin).contains(&origin) {
+        if destinations.contains(&origin) {
             return Err("the origin must not be offered as a destination".into());
         }
         Ok(())
@@ -747,13 +726,12 @@ impl Law for MoveGenerationIsDeduplicated {
 
             // The jump moves match the closure exactly, per origin.
             for origin in pos.pieces_of(player) {
-                let expected = jump_destinations(pos, origin);
                 let produced: HashSet<Coord> = moves
                     .iter()
                     .filter(|m| m.kind == MoveKind::Jump && m.origin == origin)
                     .map(|m| m.destination)
                     .collect();
-                if produced != expected {
+                if produced != jump_destinations(pos, origin) {
                     return Err(format!(
                         "jump moves from {origin:?} do not match the closure"
                     ));
@@ -790,20 +768,20 @@ impl Law for MovesStayOnBoard {
     fn holds(pos: &Position) -> Result<(), String> {
         for player in Player::ALL {
             for mv in legal_moves(pos, player) {
-                if !on_board(mv.origin) || !on_board(mv.destination) {
+                let (from, to) = (mv.origin, mv.destination);
+                if !on_board(from) || !on_board(to) {
                     return Err(format!("move {mv:?} leaves the board"));
                 }
-                if pos.occupant(mv.origin) != Some(player) {
+                if pos.occupant(from) != Some(player) {
                     return Err(format!(
-                        "player {} moves a piece it does not own at {:?}",
-                        player.index(),
-                        mv.origin
+                        "player {} moves a piece it does not own at {from:?}",
+                        player.index()
                     ));
                 }
-                if !pos.is_empty_hole(mv.destination) {
+                if !pos.is_empty_hole(to) {
                     return Err(format!("move {mv:?} lands on an occupied hole"));
                 }
-                if mv.origin == mv.destination {
+                if from == to {
                     return Err("a move must change the piece's hole".into());
                 }
             }
@@ -845,10 +823,9 @@ impl Law for RouteEqualsNetEffect {
 
         for route in jump_routes(pos, *origin, 4) {
             let dest = *route.last().unwrap();
-            let mv = Move::jump(*origin, dest).with_route(route.clone());
-
-            let via_route = apply_route(pos, &mv);
-            let via_net = apply(pos, &Move::jump(*origin, dest));
+            let net = Move::jump(*origin, dest);
+            let via_route = apply_route(pos, &net.clone().with_route(route.clone()));
+            let via_net = apply(pos, &net);
 
             if via_route != via_net {
                 return Err(format!("route {route:?} diverged from the net effect"));
@@ -861,8 +838,8 @@ impl Law for RouteEqualsNetEffect {
             if via_net.occupant(dest) != Some(player) {
                 return Err("the destination was not occupied by the mover".into());
             }
-            for c in pos.holes() {
-                if *c != *origin && *c != dest && via_net.occupant(*c) != pos.occupant(*c) {
+            for &c in pos.holes() {
+                if c != *origin && c != dest && via_net.occupant(c) != pos.occupant(c) {
                     return Err(format!("unrelated hole {c:?} changed"));
                 }
             }
@@ -942,18 +919,15 @@ impl Law for BlockedPlayerIsReachable {
         let pos = blocked_position();
         let player = Player::ALL[0];
 
-        let moves = legal_moves(&pos, player);
-        if !moves.is_empty() {
+        let moves = legal_moves(&pos, player).len();
+        if moves != 0 {
             return Err(format!(
-                "the constructed position leaves {} legal moves",
-                moves.len()
+                "the constructed position leaves {moves} legal moves"
             ));
         }
-        if pos.count_of(player) != PIECES_PER_PLAYER {
-            return Err(format!(
-                "the blocked player holds {} pieces",
-                pos.count_of(player)
-            ));
+        let pieces = pos.count_of(player);
+        if pieces != PIECES_PER_PLAYER {
+            return Err(format!("the blocked player holds {pieces} pieces"));
         }
         if pos.has_won(player) {
             return Err("the blocked position is a win, so it proves nothing".into());
@@ -984,8 +958,6 @@ impl Law for PassingAndDraw {
     type Subject = ();
 
     fn holds((): &()) -> Result<(), String> {
-        use crate::rules::Game;
-
         // Chapter 15 leaves the player count open, and the front-end deals
         // games for two, three, and six — the pass and draw rules are checked
         // over all three compositions.
@@ -996,51 +968,10 @@ impl Law for PassingAndDraw {
         ];
 
         for players in configurations {
-            let names: Vec<u8> = players.iter().map(|p| p.index()).collect();
-
-            // A blocked player passes and play continues with the next
-            // seated player, skipping any vacant camps.
-            let mut game = Game::compose(blocked_position(), players[0], players);
-            if !game.legal_moves().is_empty() {
-                return Err(format!(
-                    "players {names:?}: the blocked player unexpectedly has moves"
-                ));
-            }
-            game.pass();
-            if game.turn() != players[1] {
-                return Err(format!(
-                    "players {names:?}: passing did not advance to the next seated player"
-                ));
-            }
-            if game.is_over() {
-                return Err(format!("players {names:?}: a single pass ended the game"));
-            }
-
-            // On a frozen board every seated player must pass, and the draw
-            // fires exactly when the passes in a row reach the number of
-            // seated players — not one pass sooner.
-            let mut frozen = Game::compose(frozen_position(), players[0], players);
-            for i in 0..players.len() {
-                if frozen.is_over() {
-                    return Err(format!(
-                        "players {names:?}: the game ended after {i} passes, expected {}",
-                        players.len()
-                    ));
-                }
-                if !frozen.legal_moves().is_empty() {
-                    return Err(format!(
-                        "players {names:?}: the frozen position is not actually frozen"
-                    ));
-                }
-                frozen.pass();
-            }
-            if frozen.outcome() != Some(Outcome::Draw) {
-                return Err(format!(
-                    "players {names:?}: {} passes gave {:?}, expected a draw",
-                    players.len(),
-                    frozen.outcome()
-                ));
-            }
+            passing_and_draw_among(players).map_err(|e| {
+                let names: Vec<u8> = players.iter().map(|p| p.index()).collect();
+                format!("players {names:?}: {e}")
+            })?;
         }
         Ok(())
     }
@@ -1050,6 +981,44 @@ impl Law for PassingAndDraw {
     }
 }
 register_law!(PassingAndDraw, PASSING_AND_DRAW);
+
+/// [`PassingAndDraw`] for one composition of seated players.
+fn passing_and_draw_among(players: &[Player]) -> Result<(), String> {
+    // A blocked player passes and play continues with the next seated player,
+    // skipping any vacant camps.
+    let mut game = Game::compose(blocked_position(), players[0], players);
+    if !game.legal_moves().is_empty() {
+        return Err("the blocked player unexpectedly has moves".into());
+    }
+    game.pass();
+    if game.turn() != players[1] {
+        return Err("passing did not advance to the next seated player".into());
+    }
+    if game.is_over() {
+        return Err("a single pass ended the game".into());
+    }
+
+    // On a frozen board every seated player must pass, and the draw fires
+    // exactly when the passes in a row reach the number of seated players —
+    // not one pass sooner.
+    let seated = players.len();
+    let mut frozen = Game::compose(frozen_position(), players[0], players);
+    for i in 0..seated {
+        if frozen.is_over() {
+            return Err(format!(
+                "the game ended after {i} passes, expected {seated}"
+            ));
+        }
+        if !frozen.legal_moves().is_empty() {
+            return Err("the frozen position is not actually frozen".into());
+        }
+        frozen.pass();
+    }
+    match frozen.outcome() {
+        Some(Outcome::Draw) => Ok(()),
+        other => Err(format!("{seated} passes gave {other:?}, expected a draw")),
+    }
+}
 
 /// A played move resets the consecutive-pass counter.
 ///
@@ -1072,8 +1041,6 @@ impl Law for PassCounterResetsOnMove {
     type Subject = ();
 
     fn holds((): &()) -> Result<(), String> {
-        use crate::rules::Game;
-
         // Fixture premise: in the blocked position player 0 is sealed in,
         // players 2..5 hold no pieces, and player 1 — the blocker — can move.
         // Without a mover the passes below would legitimately draw and prove
@@ -1099,11 +1066,9 @@ impl Law for PassCounterResetsOnMove {
                      move never reach six in succession"
                 ));
             }
-            let moves = game.legal_moves();
-            if moves.is_empty() {
-                game.pass();
-            } else {
-                game.play(&moves[0].clone());
+            match game.legal_moves().first() {
+                Some(mv) => game.play(mv),
+                None => game.pass(),
             }
         }
         Ok(())
@@ -1136,8 +1101,9 @@ impl Law for WinCondition {
 
     fn holds(player: &Player) -> Result<(), String> {
         // Filling the target camp wins, for this player only.
+        let target = player.target_camp();
         let mut pos = Position::empty();
-        for &c in player.target_camp() {
+        for &c in target {
             pos.set(c, Some(*player));
         }
         if !pos.has_won(*player) {
@@ -1150,7 +1116,6 @@ impl Law for WinCondition {
         }
 
         // One hole short is not a win.
-        let target = player.target_camp();
         let mut short = pos.clone();
         short.set(target[0], None);
         if short.has_won(*player) {
@@ -1201,12 +1166,11 @@ impl Law for PlayPreservesInvariants {
                 let after = apply(pos, &mv);
 
                 for p in Player::ALL {
-                    if after.count_of(p) != pos.count_of(p) {
+                    let (was, now) = (pos.count_of(p), after.count_of(p));
+                    if was != now {
                         return Err(format!(
-                            "move {mv:?} changed player {}'s count from {} to {}",
-                            p.index(),
-                            pos.count_of(p),
-                            after.count_of(p)
+                            "move {mv:?} changed player {}'s count from {was} to {now}",
+                            p.index()
                         ));
                     }
                 }
@@ -1258,26 +1222,22 @@ impl Law for CampsAreUnrestricted {
     fn holds(player: &Player) -> Result<(), String> {
         // A lone piece placed in a foreign camp can still move out of it, and a
         // piece outside can still step in.
-        let foreign = player.next().start_camp();
-        let inside = foreign[0];
+        let foreign = player.next();
+        let inside = foreign.start_camp()[0];
 
         let mut pos = Position::empty();
         pos.set(inside, Some(*player));
         if legal_moves(&pos, *player).is_empty() {
-            return Err(format!(
-                "a piece in player {}'s camp has no moves",
-                player.next().index()
-            ));
+            let owner = foreign.index();
+            return Err(format!("a piece in player {owner}'s camp has no moves"));
         }
 
         // And some neighbouring hole permits stepping into the camp.
-        let entry = Dir::ALL
+        let outside = Dir::ALL
             .iter()
             .map(|d| inside.neighbour(*d))
-            .find(|c| on_board(*c));
-        let Some(outside) = entry else {
-            return Err("the camp hole has no on-board neighbour".into());
-        };
+            .find(|c| on_board(*c))
+            .ok_or("the camp hole has no on-board neighbour")?;
         let mut pos2 = Position::empty();
         pos2.set(outside, Some(*player));
         if !is_legal_step(&pos2, *player, outside, inside) {
@@ -1326,10 +1286,8 @@ impl Law for SingleHopsReachTheClosure {
             // Blockers never move during a turn, so the piece's own position is
             // the only thing that changes: place it at `cur` and enumerate.
             let mut scratch = pos.clone();
-            if cur != *origin {
-                scratch.set(*origin, None);
-                scratch.set(cur, Some(player));
-            }
+            scratch.set(*origin, None);
+            scratch.set(cur, Some(player));
             for d in single_hop_destinations(&scratch, cur) {
                 if seen.insert(d) {
                     reached.insert(d);
@@ -1385,21 +1343,13 @@ impl Law for SingleHopIsOneJump {
         for dest in single_hop_destinations(pos, *origin) {
             // Must be x + 2d for some direction d, with that d legal. The
             // distance is then 2 by construction, so it needs no separate check.
-            let matching = Dir::ALL
-                .iter()
-                .find(|d| origin.jump_dest(**d) == dest)
-                .copied();
-            let Some(d) = matching else {
-                return Err(format!(
-                    "({},{}) is not x+2d from ({},{})",
-                    dest.q, dest.r, origin.q, origin.r
-                ));
-            };
+            let (q, r) = (dest.q, dest.r);
+            let d = Dir::ALL
+                .into_iter()
+                .find(|d| origin.jump_dest(*d) == dest)
+                .ok_or_else(|| format!("({q},{r}) is not x+2d from ({},{})", origin.q, origin.r))?;
             if !is_legal_jump(pos, player, *origin, d) {
-                return Err(format!(
-                    "({},{}) was offered but the jump is not legal",
-                    dest.q, dest.r
-                ));
+                return Err(format!("({q},{r}) was offered but the jump is not legal"));
             }
         }
         Ok(())
@@ -1431,9 +1381,8 @@ impl Law for StagedTurnYieldsLegalMove {
         let Some(player) = pos.occupant(*origin) else {
             return Ok(());
         };
-        let Some(mut turn) = JumpTurn::begin(pos, player, *origin) else {
-            return Err("could not begin a turn on an owned piece".into());
-        };
+        let mut turn = JumpTurn::begin(pos, player, *origin)
+            .ok_or("could not begin a turn on an owned piece")?;
 
         // A turn with no hops must refuse to commit.
         if turn.to_move().is_ok() {
@@ -1510,9 +1459,8 @@ impl Law for StagedTurnCannotBeANullMove {
         pos.set(origin, Some(Player::ALL[0]));
         pos.set(Coord::new(1, 0), Some(Player::ALL[1]));
 
-        let Some(mut turn) = JumpTurn::begin(&pos, Player::ALL[0], origin) else {
-            return Err("could not begin a turn on an owned piece".into());
-        };
+        let mut turn = JumpTurn::begin(&pos, Player::ALL[0], origin)
+            .ok_or("could not begin a turn on an owned piece")?;
 
         if !turn.hop(Coord::new(2, 0)) {
             return Err("the piece could not hop over its blocker".into());
