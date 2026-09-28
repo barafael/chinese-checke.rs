@@ -25,12 +25,12 @@ use bevy::prelude::*;
 use checkers_core::audit::audit_position;
 use checkers_core::geometry::Coord;
 use checkers_core::position::{Move as GameMove, MoveKind as GameMoveKind, Player, Position};
-use checkers_core::rules::{Game, jump_routes};
+use checkers_core::rules::{self, Game, Variants, jump_routes};
 use checkers_core::turn::{JumpTurn, single_hop_destinations, step_destinations};
 use checkers_net::WireMove;
 use std::time::Duration;
 
-use crate::record::RecordFault;
+use crate::record::{GameRecord, RecordFault};
 use crate::setup::Seating;
 
 /// One setup screen, then the board. The lobby is the *only* screen before a
@@ -159,7 +159,7 @@ mod tests {
 
         assert_eq!(
             session.game.outcome(),
-            Some(checkers_core::rules::Outcome::Resigned(Player::ALL[3])),
+            Some(rules::Outcome::Resigned(Player::ALL[3])),
             "the pinned seat gives up, not whoever happens to be on turn"
         );
     }
@@ -224,34 +224,9 @@ mod tests {
     /// move from the board.
     #[test]
     fn confirm_refuses_a_move_resting_in_a_foreign_camp() {
-        let mut session = Session::with_variants(
-            Seating::Two,
-            checkers_core::rules::Variants {
-                forbid_foreign_camps: true,
-            },
-        );
-        // Player 0's piece at (0,4) in the hexagon; camp 1's hole at (1,4)
-        // holds player 3. The jump over it lands at (2,4), inside camp 1 — a
-        // triangle player 0 may pass through but never rest in.
-        let origin = checkers_core::geometry::Coord::new(0, 4);
-        let destination = checkers_core::geometry::Coord::new(2, 4);
-        let position = foreign_camp_position(origin);
-        session.game = Game::compose(position, Player::ALL[0], &[Player::ALL[0], Player::ALL[3]])
-            .with_variants(checkers_core::rules::Variants {
-                forbid_foreign_camps: true,
-            });
-
-        let jump = checkers_core::position::Move {
-            kind: checkers_core::position::MoveKind::Jump,
-            origin,
-            destination,
-            route: None,
-        };
-        session.selection = Selection::Pend {
-            mv: jump,
-            preview: session.game.position().clone(),
-        };
-
+        let mut session = staged_foreign_camp_jump(Variants {
+            forbid_foreign_camps: true,
+        });
         session.confirm();
         assert!(
             session.outbox.is_empty(),
@@ -264,22 +239,7 @@ mod tests {
         );
 
         // Without the rule the same staged move flows through `confirm`.
-        let mut open = Session::new(Seating::Two);
-        open.game = Game::compose(
-            foreign_camp_position(origin),
-            Player::ALL[0],
-            &[Player::ALL[0], Player::ALL[3]],
-        )
-        .with_variants(checkers_core::rules::Variants::default());
-        open.selection = Selection::Pend {
-            mv: checkers_core::position::Move {
-                kind: checkers_core::position::MoveKind::Jump,
-                origin,
-                destination,
-                route: None,
-            },
-            preview: open.game.position().clone(),
-        };
+        let mut open = staged_foreign_camp_jump(Variants::default());
         open.confirm();
         assert_eq!(open.outbox.len(), 1, "the open game still commits the jump");
     }
@@ -289,23 +249,11 @@ mod tests {
     #[test]
     fn confirm_says_the_board_moved_on_for_a_stale_staging() {
         let mut session = Session::new(Seating::Two);
-        let turn = session.game.turn();
-        let origin = session
-            .game
-            .position()
-            .pieces_of(turn)
-            .first()
-            .copied()
-            .expect("the initial board offers pieces");
+        let pieces = session.game.position().pieces_of(session.game.turn());
+        let origin = *pieces.first().expect("the initial board offers pieces");
         // A step that stays put is never legal: no fence involved.
-        let mv = checkers_core::position::Move {
-            kind: checkers_core::position::MoveKind::Step,
-            origin,
-            destination: origin,
-            route: None,
-        };
         session.selection = Selection::Pend {
-            mv,
+            mv: GameMove::step(origin, origin),
             preview: session.game.position().clone(),
         };
 
@@ -323,16 +271,23 @@ mod tests {
         );
     }
 
-    /// The hexagon/camp-1 fixture a few tests share: player 0 at `origin`, a
-    /// wall of player 3 at (1,4) so a jump over it can land on (2,4) in camp 1.
-    fn foreign_camp_position(origin: checkers_core::geometry::Coord) -> Position {
+    /// The hexagon/camp-1 fixture, under `variants`: player 0's piece at
+    /// (0,4) in the hexagon; camp 1's hole at (1,4) holds player 3. The jump
+    /// over it lands at (2,4), inside camp 1 — a triangle player 0 may pass
+    /// through but never rest in — and is staged, awaiting confirmation.
+    fn staged_foreign_camp_jump(variants: Variants) -> Session {
+        let origin = Coord::new(0, 4);
         let mut position = Position::empty();
         position.set(origin, Some(Player::ALL[0]));
-        position.set(
-            checkers_core::geometry::Coord::new(1, 4),
-            Some(Player::ALL[3]),
-        );
-        position
+        position.set(Coord::new(1, 4), Some(Player::ALL[3]));
+        let mut session = Session::new(Seating::Two);
+        session.game = Game::compose(position, Player::ALL[0], &[Player::ALL[0], Player::ALL[3]])
+            .with_variants(variants);
+        session.selection = Selection::Pend {
+            mv: GameMove::jump(origin, Coord::new(2, 4)),
+            preview: session.game.position().clone(),
+        };
+        session
     }
 
     /// Only someone else's move is replay-animated. A seated peer skips its
@@ -426,11 +381,11 @@ impl Default for Session {
 impl Session {
     /// A session for the given seating: every camp driven locally.
     pub fn new(seating: Seating) -> Self {
-        Self::with_variants(seating, checkers_core::rules::Variants::default())
+        Self::with_variants(seating, Variants::default())
     }
 
     /// A session for the given seating and house-rule switches.
-    pub fn with_variants(seating: Seating, variants: checkers_core::rules::Variants) -> Self {
+    pub fn with_variants(seating: Seating, variants: Variants) -> Self {
         Self::for_players(&seating.players(), variants)
     }
 
@@ -438,7 +393,7 @@ impl Session {
     /// configured, human or engine — in index order, so turn order follows the
     /// board regardless of who set up which corner. Every provided corner is
     /// filled and driven; `ai_players` still decides which are engines.
-    pub fn for_players(players: &[Player], variants: checkers_core::rules::Variants) -> Self {
+    pub fn for_players(players: &[Player], variants: Variants) -> Self {
         let game = Game::for_players(players).with_variants(variants);
         Self {
             players: game.players().to_vec(),
@@ -456,10 +411,10 @@ impl Session {
         }
     }
 
-    /// The round as a [`crate::record::GameRecord`]: players, engine seats,
-    /// the house-rule switches, and every move committed so far.
-    pub fn to_record(&self) -> crate::record::GameRecord {
-        crate::record::GameRecord {
+    /// The round as a [`GameRecord`]: players, engine seats, the house-rule
+    /// switches, and every move committed so far.
+    pub fn to_record(&self) -> GameRecord {
+        GameRecord {
             players: self.players.clone(),
             ai_players: self.ai_players.clone(),
             variants: self.game.variants(),
@@ -478,7 +433,7 @@ impl Session {
     /// law audit runs after every one, so a forged or corrupted record is
     /// refused rather than resumed. Auto-passes are re-derived as they were
     /// the first time round.
-    pub fn resumed(record: &crate::record::GameRecord) -> Result<Self, RecordFault> {
+    pub fn resumed(record: &GameRecord) -> Result<Self, RecordFault> {
         Self::resumed_prefix(record, record.moves.len())
     }
 
@@ -486,13 +441,8 @@ impl Session {
     /// cursor. A position part-way through a round is exactly the same
     /// derivation as a full resume, just stopped early; `up_to` past the end
     /// clamps to it.
-    pub fn resumed_prefix(
-        record: &crate::record::GameRecord,
-        up_to: usize,
-    ) -> Result<Self, RecordFault> {
-        let mut session =
-            Self::for_players(&record.players, checkers_core::rules::Variants::default());
-        session.game.set_variants(record.variants);
+    pub fn resumed_prefix(record: &GameRecord, up_to: usize) -> Result<Self, RecordFault> {
+        let mut session = Self::for_players(&record.players, record.variants);
         session.ai_players = record.ai_players.clone();
         for (ply, wire) in record.moves.iter().take(up_to).enumerate() {
             if session.game.is_over() {
@@ -502,17 +452,13 @@ impl Session {
                 });
             }
             let Some(mv) = session.resolve(wire) else {
+                let who = session.game.turn().index();
                 let kind = if wire.jump { "jump" } else { "step" };
+                let ((q0, r0), (q1, r1)) = (wire.origin, wire.destination);
                 return Err(RecordFault::Replay {
                     ply,
                     why: format!(
-                        "player {} cannot {} ({},{}) -> ({},{}) where it occurs",
-                        session.game.turn().index(),
-                        kind,
-                        wire.origin.0,
-                        wire.origin.1,
-                        wire.destination.0,
-                        wire.destination.1
+                        "player {who} cannot {kind} ({q0},{r0}) -> ({q1},{r1}) where it occurs"
                     ),
                 });
             };
@@ -562,26 +508,24 @@ impl Session {
     /// path through which the game advances.
     pub(crate) fn commit(&mut self, mv: &GameMove) {
         let mover = self.game.turn();
-        self.stats.moves[mover.index() as usize] += 1;
+        let i = usize::from(mover.index());
+        self.stats.moves[i] += 1;
         self.history.push(WireMove::from_move(mv));
 
+        // Resolved before the move is played: a rebuilt route enumerates from
+        // the *pre-move* position.
+        let path = self.fly_route(mv);
         if mv.kind == GameMoveKind::Jump {
-            self.stats.jumps[mover.index() as usize] += 1;
-            let (hops, over_others) = self.count_hops(mv, mover);
-            self.stats.hops[mover.index() as usize] += hops;
-            self.stats.hops_over_others[mover.index() as usize] += over_others;
+            self.stats.jumps[i] += 1;
+            let (hops, over_others) = self.count_hops(&path, mover);
+            self.stats.hops[i] += hops;
+            self.stats.hops_over_others[i] += over_others;
             if hops > self.stats.longest_jump {
                 self.stats.longest_jump = hops;
                 self.stats.longest_jump_by = mover.index();
             }
         }
-
-        // Resolved before the move is played: a rebuilt route enumerates from
-        // the *pre-move* position.
-        self.last_move = Some(LastMove {
-            mover,
-            path: self.fly_route(mv),
-        });
+        self.last_move = Some(LastMove { mover, path });
 
         self.game.play(mv);
     }
@@ -600,8 +544,9 @@ impl Session {
     /// The concrete hole-by-hole trajectory a move flies: origin, any hop
     /// landings, destination. A step touches exactly its two holes. The wire
     /// form carries no jump route — see [`Self::count_hops`] — so a jump's is
-    /// rebuilt the same deterministic way the stats are: `jump_routes`
-    /// enumerates from the pre-move position with the origin first.
+    /// rebuilt deterministically, and the stats count this same one:
+    /// `jump_routes` enumerates from the pre-move position with the origin
+    /// first.
     fn fly_route(&self, mv: &GameMove) -> Vec<Coord> {
         match mv.kind {
             GameMoveKind::Step => vec![mv.origin, mv.destination],
@@ -615,29 +560,21 @@ impl Session {
         }
     }
 
-    /// Hops in a jump move, and how many crossed another player's piece.
+    /// Hops along a jump's route, and how many crossed another player's piece.
     ///
     /// The route is presentational on the wire, so a receiving peer rebuilds
-    /// one deterministically — `jump_routes` enumerates in fixed direction
-    /// order — and every peer counts the same numbers. The flown route and
-    /// the rebuilt one can differ; by chapter 10 the route is not part of
-    /// the move.
-    fn count_hops(&self, mv: &GameMove, mover: Player) -> (u32, u32) {
+    /// one deterministically ([`Self::fly_route`]) — `jump_routes` enumerates
+    /// in fixed direction order — and every peer counts the same numbers. The
+    /// flown route and the rebuilt one can differ; by chapter 10 the route is
+    /// not part of the move.
+    fn count_hops(&self, route: &[Coord], mover: Player) -> (u32, u32) {
         let pos = self.game.position();
-        let route = self.fly_route(mv);
-        if route.len() < 2 {
-            return (0, 0);
-        }
-
-        let mut hops = 0;
-        let mut over_others = 0;
+        let (mut hops, mut over_others) = (0, 0);
         for pair in route.windows(2) {
             // A jump is symmetric: the crossed hole is the exact midpoint.
             let mid = Coord::new((pair[0].q + pair[1].q) / 2, (pair[0].r + pair[1].r) / 2);
             hops += 1;
-            if let Some(owner) = pos.occupant(mid)
-                && owner != mover
-            {
+            if pos.occupant(mid).is_some_and(|owner| owner != mover) {
                 over_others += 1;
             }
         }
@@ -718,11 +655,11 @@ impl Session {
 
     pub fn select(&mut self, hole: Coord) {
         if !self.may_act() {
-            if self.spectating {
-                self.message = "You are spectating.".into();
+            self.message = if self.spectating {
+                "You are spectating.".into()
             } else {
-                self.message = format!("Waiting for player {}", self.game.turn().index());
-            }
+                format!("Waiting for player {}", self.game.turn().index())
+            };
             return;
         }
         let player = self.game.turn();
@@ -734,10 +671,9 @@ impl Session {
         let total = self.highlights().len();
         let hops = single_hop_destinations(self.game.position(), hole).len();
         self.message = format!(
-            "Player {} selected ({},{}): {total} destination(s), {hops} by jumping",
+            "Player {} selected {}: {total} destination(s), {hops} by jumping",
             player.index(),
-            hole.q,
-            hole.r
+            coords(hole)
         );
     }
 
@@ -748,7 +684,7 @@ impl Session {
     /// Click on `hole` while something is selected.
     pub fn activate(&mut self, hole: Coord) {
         if !self.highlights().contains(&hole) {
-            self.message = format!("({},{}) is not a legal destination", hole.q, hole.r);
+            self.message = format!("{} is not a legal destination", coords(hole));
             return;
         }
         let player = self.game.turn();
@@ -765,29 +701,17 @@ impl Session {
 
                 // A step is staged, not played, so the player must confirm it —
                 // the same guardrail as a jump. A first hop begins a staged turn.
-                let step = checkers_core::rules::legal_moves(self.game.position(), player)
-                    .into_iter()
-                    .find(|m| {
-                        m.origin == origin && m.destination == hole && m.kind == GameMoveKind::Step
-                    });
-
-                if let Some(mv) = step {
-                    let dest = mv.destination;
-
+                let mv = GameMove::step(origin, hole);
+                if rules::legal_moves(self.game.position(), player).contains(&mv) {
                     // Show the piece at its destination before the player
                     // commits — same "it has moved" preview a staged jump shows.
-                    let mut preview = self.game.position().clone();
-                    preview.set(origin, None);
-                    preview.set(dest, Some(player));
-
+                    let preview = rules::apply(self.game.position(), &mv);
                     self.selection = Selection::Pend { mv, preview };
                     self.message = format!(
-                        "Player {} steps ({},{}) -> ({},{}) - press Enter to confirm",
+                        "Player {} steps {} -> {} - press Enter to confirm",
                         player.index(),
-                        origin.q,
-                        origin.r,
-                        dest.q,
-                        dest.r
+                        coords(origin),
+                        coords(hole)
                     );
                     return;
                 }
@@ -796,18 +720,14 @@ impl Session {
                     return;
                 };
                 if turn.hop(hole) {
-                    let remaining = turn.next_hops().len();
-                    self.message = format!("Hop 1 to ({},{}). {}", hole.q, hole.r, hint(remaining));
+                    self.message = hop_message(&turn, hole);
                     self.selection = Selection::Jumping { turn };
                 }
             }
 
             Selection::Jumping { turn } => {
                 if turn.hop(hole) {
-                    let hops = turn.hops();
-                    let remaining = turn.next_hops().len();
-                    self.message =
-                        format!("Hop {hops} to ({},{}). {}", hole.q, hole.r, hint(remaining));
+                    self.message = hop_message(turn, hole);
                 }
             }
         }
@@ -836,20 +756,26 @@ impl Session {
     /// rules re-check it.
     pub fn confirm(&mut self) {
         let player = self.game.turn();
-        let staged = match &self.selection {
-            Selection::Pend { mv, .. } => Some(mv.clone()),
+        // The staged move, and what the status line says once it is sent.
+        let (mv, sent) = match &self.selection {
+            Selection::Pend { mv, .. } => {
+                let (from, to) = (coords(mv.origin), coords(mv.destination));
+                let sent = format!("Player {} stepped {from} -> {to}", player.index());
+                (mv.clone(), sent)
+            }
             Selection::Jumping { turn } => match turn.to_move() {
-                Ok(mv) => Some(mv),
+                Ok(mv) => {
+                    let (hops, to) = (turn.hops(), coords(mv.destination));
+                    let sent = format!("Player {} jumped {hops} hop(s) to {to}", player.index());
+                    (mv, sent)
+                }
                 // Reachable: the piece hopped back to where it began.
                 Err(e) => {
                     self.message = format!("Cannot confirm - {e}");
                     return;
                 }
             },
-            _ => None,
-        };
-        let Some(mv) = staged else {
-            return;
+            _ => return,
         };
         if !self.game.legal_moves().contains(&mv) {
             // The foreign-camp fence is the only filter between the raw move
@@ -857,46 +783,16 @@ impl Session {
             // was refused by the fence. Anything else — the turn or the board
             // moved on while the staging sat — is not a fence, and the message
             // must say that instead of inventing one.
-            self.message =
-                if checkers_core::rules::legal_moves(self.game.position(), player).contains(&mv) {
-                    "That would rest in a foreign triangle.".into()
-                } else {
-                    "The staged move is no longer legal - the board moved on.".into()
-                };
+            self.message = if rules::legal_moves(self.game.position(), player).contains(&mv) {
+                "That would rest in a foreign triangle.".into()
+            } else {
+                "The staged move is no longer legal - the board moved on.".into()
+            };
             return;
         }
-
-        match &self.selection {
-            Selection::Pend { mv, .. } => {
-                let mv = mv.clone();
-                let (from, to) = (mv.origin, mv.destination);
-                self.outbox.push(mv);
-                self.clear_selection();
-                self.message = format!(
-                    "Player {} stepped ({},{}) -> ({},{})",
-                    player.index(),
-                    from.q,
-                    from.r,
-                    to.q,
-                    to.r
-                );
-            }
-            Selection::Jumping { turn } => {
-                let mv = turn.to_move().expect("already checked");
-                let hops = turn.hops();
-                let dest = mv.destination;
-
-                self.outbox.push(mv);
-                self.clear_selection();
-                self.message = format!(
-                    "Player {} jumped {hops} hop(s) to ({},{})",
-                    player.index(),
-                    dest.q,
-                    dest.r
-                );
-            }
-            _ => {}
-        }
+        self.outbox.push(mv);
+        self.clear_selection();
+        self.message = sent;
     }
 
     /// Abandon the staged turn without touching the game.
@@ -928,12 +824,18 @@ impl Session {
     }
 }
 
-fn hint(remaining: usize) -> String {
-    if remaining == 0 {
-        "No further hops - press Enter to confirm.".into()
-    } else {
-        format!("{remaining} further hop(s), or press Enter to confirm.")
-    }
+/// The status line after a hop to `hole`: which hop it was, and what is left.
+fn hop_message(turn: &JumpTurn, hole: Coord) -> String {
+    let hint = match turn.next_hops().len() {
+        0 => "No further hops - press Enter to confirm.".to_string(),
+        remaining => format!("{remaining} further hop(s), or press Enter to confirm."),
+    };
+    format!("Hop {} to {}. {hint}", turn.hops(), coords(hole))
+}
+
+/// A hole as the status line writes it: `(q,r)`.
+fn coords(c: Coord) -> String {
+    format!("({},{})", c.q, c.r)
 }
 
 /// Panic if the live position violates its invariants. Six players: the
