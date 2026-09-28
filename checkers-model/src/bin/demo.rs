@@ -4,7 +4,7 @@
 //! actually attainable — a greedy heuristic stalls on this board, so a proper
 //! search is needed to demonstrate it.
 
-use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::collections::{BinaryHeap, HashMap};
 
 use checkers_model::board::Player;
 use checkers_model::{Board, Coord, Game, Outcome, State, legal_moves};
@@ -17,12 +17,12 @@ fn main() {
     println!("{}", board.render());
 
     for p in 0..6u8 {
-        print!(
-            "  camp {p}: {} holes, {} hexagon contacts",
+        println!(
+            "  camp {p}: {} holes, {} hexagon contacts | target = camp {}",
             board.camp(p).len(),
-            board.camp_hex_contacts(p)
+            board.camp_hex_contacts(p),
+            (p + 3) % 6
         );
-        println!(" | target = camp {}", (p + 3) % 6);
     }
 
     let initial = State::initial(Board::new());
@@ -67,13 +67,10 @@ fn main() {
 /// 67. Both are valid; neither is proven optimal.)
 fn solo_fill_target(player: Player) -> Option<usize> {
     let board = Board::new();
-    let target: HashSet<Coord> = board.target_camp(player).iter().copied().collect();
+    let target = board.target_camp(player);
 
-    let start: Vec<Coord> = {
-        let mut v: Vec<Coord> = board.camp(player).iter().copied().collect();
-        v.sort();
-        v
-    };
+    let mut start: Vec<Coord> = board.camp(player).iter().copied().collect();
+    start.sort();
 
     let heuristic = |pieces: &[Coord]| -> i32 {
         pieces

@@ -38,19 +38,12 @@ mod tests {
 
     #[test]
     fn is_deterministic_and_in_range() {
-        let a: Vec<u32> = (0..50)
-            .map({
-                let mut r = Prng::new(1);
-                move |_| r.below(10)
-            })
-            .collect();
-        let b: Vec<u32> = (0..50)
-            .map({
-                let mut r = Prng::new(1);
-                move |_| r.below(10)
-            })
-            .collect();
-        assert_eq!(a, b);
+        let draws = || {
+            let mut r = Prng::new(1);
+            (0..50).map(|_| r.below(10)).collect::<Vec<u32>>()
+        };
+        let a = draws();
+        assert_eq!(a, draws());
         assert!(a.iter().all(|&v| v < 10));
         assert!(a.iter().any(|&v| v != a[0]), "should not be constant");
     }
