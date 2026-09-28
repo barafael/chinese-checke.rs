@@ -17,7 +17,6 @@
 
 use bevy::prelude::*;
 use bevy_matchbox::prelude::*;
-use checkers_core::geometry::Coord;
 use checkers_core::position::{Move, MoveKind, Player};
 use serde::{Deserialize, Serialize};
 
@@ -60,33 +59,13 @@ impl WireMove {
         }
     }
 
-    fn origin_coord(&self) -> Coord {
-        Coord::new(self.origin.0, self.origin.1)
-    }
-
-    fn destination_coord(&self) -> Coord {
-        Coord::new(self.destination.0, self.destination.1)
-    }
-
     /// Find this move among `legal`, or `None` if no legal move matches.
     ///
     /// The only way a wire move becomes a [`Move`]: an unmatched triple is
     /// dropped rather than constructed, so a malicious or out-of-sync peer
     /// cannot push the game off the rules.
     pub fn resolve(&self, legal: &[Move]) -> Option<Move> {
-        let kind = if self.jump {
-            MoveKind::Jump
-        } else {
-            MoveKind::Step
-        };
-        legal
-            .iter()
-            .find(|m| {
-                m.kind == kind
-                    && m.origin == self.origin_coord()
-                    && m.destination == self.destination_coord()
-            })
-            .cloned()
+        legal.iter().find(|m| Self::from_move(m) == *self).cloned()
     }
 }
 
@@ -291,10 +270,9 @@ impl RoomId {
         if name.is_empty() {
             return Err(RoomIdError::Empty);
         }
-        if name.chars().count() > Self::MAX_LEN {
-            return Err(RoomIdError::TooLong {
-                len: name.chars().count(),
-            });
+        let len = name.chars().count();
+        if len > Self::MAX_LEN {
+            return Err(RoomIdError::TooLong { len });
         }
         if let Some(c) = name
             .chars()
@@ -354,12 +332,7 @@ pub fn close_socket(commands: &mut Commands, net: &mut NetState) {
 
 /// Send to one peer on the reliable channel.
 pub fn send_to(socket: &mut MatchboxSocket, peer: PeerId, msg: &NetMsg) {
-    let Some(bytes) = encode(msg) else {
-        return;
-    };
-    if let Err(error) = socket.channel_mut(CH_RELIABLE).try_send(bytes, peer) {
-        warn!(%error, "send failed");
-    }
+    broadcast(socket, &[peer], msg);
 }
 
 /// Send to every connected peer.
@@ -380,25 +353,23 @@ pub fn broadcast(socket: &mut MatchboxSocket, peers: &[PeerId], msg: &NetMsg) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use checkers_core::position::Position;
     use checkers_core::rules::legal_moves;
 
     #[test]
     fn a_wire_move_round_trips_through_the_legal_move_list() {
-        let pos = checkers_core::position::Position::initial();
-        let legal = legal_moves(&pos, Player::ALL[0]);
+        let legal = legal_moves(&Position::initial(), Player::ALL[0]);
         let mv = legal.first().expect("the initial position has moves");
 
         let wire = WireMove::from_move(mv);
         let resolved = wire.resolve(&legal).expect("its own move must resolve");
-        assert_eq!(resolved.origin, mv.origin);
-        assert_eq!(resolved.destination, mv.destination);
-        assert_eq!(resolved.kind, mv.kind);
+        // `Move` equality is exactly its (kind, origin, destination) key.
+        assert_eq!(&resolved, mv);
     }
 
     #[test]
     fn an_illegal_wire_move_does_not_resolve() {
-        let pos = checkers_core::position::Position::initial();
-        let legal = legal_moves(&pos, Player::ALL[0]);
+        let legal = legal_moves(&Position::initial(), Player::ALL[0]);
 
         // Structurally well-formed, but not a legal move in this position.
         let bogus = WireMove {
