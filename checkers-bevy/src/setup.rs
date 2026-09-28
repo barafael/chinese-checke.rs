@@ -98,15 +98,12 @@ impl Seating {
     /// for two players, every 2nd for three — so no seat is positionally better
     /// than another.
     pub fn players(self) -> Vec<Player> {
-        let indices: &[u8] = match self {
+        let indices: &[usize] = match self {
             Seating::Two => &[0, 3],
             Seating::Three => &[0, 2, 4],
             Seating::Six => &[0, 1, 2, 3, 4, 5],
         };
-        indices
-            .iter()
-            .map(|&i| Player::new(i).expect("seating indices are below six"))
-            .collect()
+        indices.iter().map(|&i| Player::ALL[i]).collect()
     }
 
     /// The label shown in the lobby.
@@ -118,25 +115,15 @@ impl Seating {
         }
     }
 
-    /// Piece conservation for this seating.
-    ///
-    /// The invariant of chapter 14 restricted to the seated players, because the
-    /// core audit demands ten pieces for all six and a partial board has none
-    /// for the empty camps. Weakening the law itself was not an option: it *is*
-    /// the specification of the six-player game.
+    /// Piece conservation for this seating — see [`audit_players`] for why it
+    /// is restricted to the seated players.
     pub fn audit(self, pos: &Position) -> Result<(), SeatingFault> {
         audit_players(&self.players(), pos)
     }
 
     /// The starting position: only the seated players' camps are filled.
     pub fn position(self) -> Position {
-        let mut p = Position::empty();
-        for player in self.players() {
-            for &c in player.start_camp() {
-                p.set(c, Some(player));
-            }
-        }
-        p
+        self.game().position().clone()
     }
 
     /// A game starting from this seating, to move for the lowest seated player.
@@ -146,9 +133,7 @@ impl Seating {
     /// four players nobody controls, kept moving only by the front-end's
     /// auto-pass, and a draw would need six consecutive passes instead of two.
     pub fn game(self) -> Game {
-        let players = self.players();
-        let first = *players.first().expect("a seating has at least one player");
-        Game::compose(self.position(), first, &players)
+        Game::for_players(&self.players())
     }
 
     /// Whether a set of seated players makes a playable game.
@@ -161,15 +146,11 @@ impl Seating {
         if players.len() < 2 {
             return false;
         }
-        let mut pos = Position::empty();
-        for player in players {
-            for &c in player.start_camp() {
-                pos.set(c, Some(*player));
-            }
-        }
+        let game = Game::for_players(players);
+        let pos = game.position();
         players
             .iter()
-            .all(|p| !pos.has_won(*p) && !legal_moves(&pos, *p).is_empty())
+            .all(|p| !pos.has_won(*p) && !legal_moves(pos, *p).is_empty())
     }
 }
 
@@ -227,7 +208,7 @@ mod tests {
         game.play(&mv);
         assert_eq!(
             game.turn(),
-            Player::new(3).expect("3 is a valid index"),
+            Player::ALL[3],
             "the turn must skip straight to the other seated player"
         );
         assert!(
@@ -283,7 +264,7 @@ mod tests {
         // A single player is not a game, and the empty set is not either.
         assert!(!Seating::is_sound(&[]), "the empty seating is not a game");
         assert!(
-            !Seating::is_sound(&[Player::new(0).expect("below six")]),
+            !Seating::is_sound(&[Player::ALL[0]]),
             "one player is not a game"
         );
     }
@@ -356,7 +337,7 @@ mod tests {
     fn at_six_players_the_audit_is_the_specifications() {
         let pos = Seating::Six.position();
         assert_eq!(pos, Position::initial(), "six players is the standard game");
-        assert!(checkers_core::audit::audit_position(&pos, &Player::ALL).is_ok());
+        assert!(audit_position(&pos, &Player::ALL).is_ok());
         assert_eq!(Seating::Six.audit(&pos), Ok(()));
     }
 
@@ -367,7 +348,7 @@ mod tests {
     fn the_core_audit_rejects_a_partial_board() {
         for seating in [Seating::Two, Seating::Three] {
             assert!(
-                checkers_core::audit::audit_position(&seating.position(), &Player::ALL).is_err(),
+                audit_position(&seating.position(), &Player::ALL).is_err(),
                 "{seating:?} must not satisfy the six-player audit"
             );
         }
@@ -399,7 +380,7 @@ mod tests {
     fn a_piece_for_an_unseated_player_is_caught() {
         let seating = Seating::Two;
         let mut pos = seating.position();
-        let intruder = Player::new(1).expect("below six");
+        let intruder = Player::ALL[1];
         assert!(!seating.players().contains(&intruder));
         // An empty hole in an unseated camp.
         let hole = intruder.start_camp()[0];
