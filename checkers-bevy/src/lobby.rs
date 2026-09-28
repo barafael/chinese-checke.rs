@@ -812,6 +812,7 @@ fn header(parent: &mut ChildSpawnerCommands, label: &str) {
 /// Star geometry: the container the wedges and their labels live in.
 const STAR_W: f32 = 420.0;
 const STAR_H: f32 = 360.0;
+const STAR_CENTRE: Vec2 = Vec2::new(STAR_W / 2.0, STAR_H / 2.0);
 
 /// Wedge geometry: each corner is an **equilateral** triangle pointing
 /// outward, like the board's camp triangles. With the apex at
@@ -834,11 +835,10 @@ fn wedge_angle(i: usize) -> f32 {
 fn wedge_vertices(i: usize) -> [Vec2; 3] {
     let t = wedge_angle(i);
     let beta = 30f32.to_radians();
-    let centre = Vec2::new(STAR_W / 2.0, STAR_H / 2.0);
-    let apex = centre + WEDGE_OUTER * Vec2::new(t.cos(), t.sin());
+    let apex = STAR_CENTRE + WEDGE_OUTER * Vec2::new(t.cos(), t.sin());
     let base_r = WEDGE_OUTER / 3.0f32.sqrt();
-    let left = centre + base_r * Vec2::new((t - beta).cos(), (t - beta).sin());
-    let right = centre + base_r * Vec2::new((t + beta).cos(), (t + beta).sin());
+    let left = STAR_CENTRE + base_r * Vec2::new((t - beta).cos(), (t - beta).sin());
+    let right = STAR_CENTRE + base_r * Vec2::new((t + beta).cos(), (t + beta).sin());
     [apex, left, right]
 }
 
@@ -863,12 +863,12 @@ fn point_in_triangle(p: Vec2, v: [Vec2; 3]) -> bool {
 /// container coordinates so the wedges' own geometry can answer. `None` over
 /// the empty middle — the middle is the star, not a button.
 fn sector_at(normalized: Vec2) -> Option<usize> {
-    let local = normalized * vec2(STAR_W, STAR_H) + vec2(STAR_W / 2.0, STAR_H / 2.0);
+    let local = normalized * vec2(STAR_W, STAR_H) + STAR_CENTRE;
     (0..6).find(|&i| point_in_triangle(local, wedge_vertices(i)))
 }
 
-/// Where corner `i`'s two label lines sit: the wedge's centroid.
-fn label_pos(i: usize) -> Vec2 {
+/// The centroid of corner `i`'s wedge, where its two label lines sit.
+fn wedge_centroid(i: usize) -> Vec2 {
     let v = wedge_vertices(i);
     (v[0] + v[1] + v[2]) / 3.0
 }
@@ -1069,7 +1069,7 @@ fn star(parent: &mut ChildSpawnerCommands, art: &SectorArt) {
                 ));
             }
             for i in 0..6 {
-                let mid = label_pos(i);
+                let mid = wedge_centroid(i);
                 node.spawn(Node {
                     position_type: PositionType::Absolute,
                     left: Val::Px(mid.x - 55.0),
@@ -2463,8 +2463,6 @@ pub fn apply_seats(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use checkers_core::position::Player;
-    use checkers_net::Seat;
 
     fn seat(name: &str, player: Option<u32>) -> Seat {
         Seat {
@@ -2472,6 +2470,40 @@ mod tests {
             name: name.into(),
             player,
             engine: false,
+        }
+    }
+
+    fn engine_seat(name: &str, player: Option<u32>) -> Seat {
+        Seat {
+            engine: true,
+            ..seat(name, player)
+        }
+    }
+
+    /// A room this peer shares with one other, holding `seats`.
+    fn shared(is_host: bool, seats: Vec<Seat>) -> NetState {
+        NetState {
+            peers: vec![fake_peer()],
+            is_host,
+            seats,
+            ..NetState::default()
+        }
+    }
+
+    /// A container-local point as [`RelativeCursorPosition`] reports it: the
+    /// inverse of the mapping in `sector_at`.
+    fn normalized(p: Vec2) -> Vec2 {
+        (p - STAR_CENTRE) / vec2(STAR_W, STAR_H)
+    }
+
+    /// Reads a star texture's alpha at the pixel under a point.
+    fn alpha_of(image: &Image) -> impl Fn(Vec2) -> u8 + '_ {
+        let Some(data) = &image.data else {
+            panic!("star textures keep their pixel data");
+        };
+        move |p| {
+            let (x, y) = (p.x as u32, p.y as u32);
+            data[((y * STAR_W as u32 + x) * 4 + 3) as usize]
         }
     }
 
@@ -2543,9 +2575,7 @@ mod tests {
     /// having Enter do nothing.
     #[test]
     fn a_guest_is_told_only_the_host_can_start() {
-        let mut net = NetState::default();
-        net.peers.push(fake_peer());
-        net.is_host = false;
+        let net = shared(false, vec![]);
         match start_decision(&net, &Table::default()) {
             StartDecision::Refuse(why) => assert!(why.contains("host"), "{why}"),
             other => panic!("expected a refusal, got {other:?}"),
@@ -2555,10 +2585,7 @@ mod tests {
     /// Fewer than two claimed corners cannot start.
     #[test]
     fn a_shared_start_needs_two_claimed_corners() {
-        let mut net = NetState::default();
-        net.peers.push(fake_peer());
-        net.is_host = true;
-        net.seats = vec![seat("ada", Some(0))];
+        let net = shared(true, vec![seat("ada", Some(0))]);
         assert!(
             matches!(
                 start_decision(&net, &Table::default()),
@@ -2570,10 +2597,7 @@ mod tests {
 
     #[test]
     fn the_host_starts_two_claimed_corners() {
-        let mut net = NetState::default();
-        net.peers.push(fake_peer());
-        net.is_host = true;
-        net.seats = vec![seat("ada", Some(0)), seat("grace", Some(3))];
+        let net = shared(true, vec![seat("ada", Some(0)), seat("grace", Some(3))]);
         assert_eq!(
             start_decision(&net, &Table::default()),
             StartDecision::Multiplayer
@@ -2583,13 +2607,8 @@ mod tests {
     /// A claimed corner plus an engine seat reaches the two-corner minimum.
     #[test]
     fn engines_count_toward_the_two_corners() {
-        let mut net = NetState::default();
-        net.peers.push(fake_peer());
-        net.is_host = true;
-        net.seats = vec![seat("ada", Some(0))];
-        let mut engine = seat("engine-0", Some(3));
-        engine.engine = true;
-        net.seats.push(engine);
+        let seats = vec![seat("ada", Some(0)), engine_seat("engine-0", Some(3))];
+        let net = shared(true, seats);
         assert_eq!(
             start_decision(&net, &Table::default()),
             StartDecision::Multiplayer
@@ -2614,13 +2633,9 @@ mod tests {
     /// reads as ready so it never blocks a start.
     #[test]
     fn an_engine_seat_claims_its_corner() {
-        let mut net = NetState {
-            is_host: true,
-            // A friend is here: engine seating is a shared-room action, never
-            // a solo rewrite of the local table.
-            peers: vec![fake_peer()],
-            ..Default::default()
-        };
+        // A friend is here: engine seating is a shared-room action, never
+        // a solo rewrite of the local table.
+        let mut net = shared(true, vec![]);
         let effect = corner_effect(&net, "", 2, CornerCommand::Cpu);
         assert_eq!(effect, Ok(CornerEffect::AddEngine(2)));
         seat_engine_at(&mut net, 2);
@@ -2657,8 +2672,7 @@ mod tests {
     /// a claim message, and the host's own application moves the seat.
     #[test]
     fn a_claim_moves_the_seat() {
-        let mut net = NetState::default();
-        net.peers.push(fake_peer());
+        let mut net = shared(false, vec![]);
         seat_for(&mut net, "host", "ada");
         assert_eq!(net.seats[0].player, None, "no corner until claimed");
 
@@ -2673,9 +2687,7 @@ mod tests {
     /// names the holder.
     #[test]
     fn an_occupied_corner_is_not_claimable() {
-        let mut net = NetState::default();
-        net.peers.push(fake_peer());
-        net.seats = vec![seat("ada", Some(2))];
+        let net = shared(false, vec![seat("ada", Some(2))]);
         let err = corner_effect(&net, "grace", 2, CornerCommand::Human).expect_err("taken");
         assert!(err.contains("ada"), "must name the holder: {err}");
     }
@@ -2684,9 +2696,7 @@ mod tests {
     /// with the reason attached.
     #[test]
     fn releasing_my_own_corner() {
-        let mut net = NetState::default();
-        net.peers.push(fake_peer());
-        net.seats = vec![seat("ada", Some(2))];
+        let net = shared(false, vec![seat("ada", Some(2))]);
         assert_eq!(
             corner_effect(&net, "ada", 2, CornerCommand::Off),
             Ok(CornerEffect::Claim(None))
@@ -2697,16 +2707,9 @@ mod tests {
     /// A guest cannot place an engine; that is the host's call.
     #[test]
     fn only_the_host_seats_engines() {
-        let net = NetState {
-            peers: vec![fake_peer()],
-            ..Default::default()
-        };
+        let net = shared(false, vec![]);
         assert!(corner_effect(&net, "grace", 1, CornerCommand::Cpu).is_err());
-        let host = NetState {
-            is_host: true,
-            peers: vec![fake_peer()],
-            ..Default::default()
-        };
+        let host = shared(true, vec![]);
         assert_eq!(
             corner_effect(&host, "host", 1, CornerCommand::Cpu),
             Ok(CornerEffect::AddEngine(1))
@@ -2717,18 +2720,16 @@ mod tests {
     #[test]
     fn solo_commands_rewrite_the_table() {
         let net = NetState::default();
-        assert_eq!(
-            corner_effect(&net, "", 0, CornerCommand::Cpu),
-            Ok(CornerEffect::Local(CornerState::Cpu))
-        );
-        assert_eq!(
-            corner_effect(&net, "", 0, CornerCommand::Human),
-            Ok(CornerEffect::Local(CornerState::Human))
-        );
-        assert_eq!(
-            corner_effect(&net, "", 0, CornerCommand::Off),
-            Ok(CornerEffect::Local(CornerState::Empty))
-        );
+        for (cmd, state) in [
+            (CornerCommand::Cpu, CornerState::Cpu),
+            (CornerCommand::Human, CornerState::Human),
+            (CornerCommand::Off, CornerState::Empty),
+        ] {
+            assert_eq!(
+                corner_effect(&net, "", 0, cmd),
+                Ok(CornerEffect::Local(state))
+            );
+        }
     }
 
     /// The preset fills exactly the seating's corners, presenting the
@@ -2849,12 +2850,9 @@ mod tests {
         use bevy::ecs::system::RunSystemOnce;
 
         let mut world = World::new();
-        let mut net = NetState::default();
-        net.peers.push(fake_peer());
-        net.is_host = true;
         let me = PeerId(uuid::Uuid::from_u128(1));
+        let mut net = shared(true, vec![seat(&me.to_string(), None)]);
         net.my_id = Some(me);
-        net.seats = vec![seat(&me.to_string(), None)];
         world.insert_resource(net);
         world.insert_resource(SelectedCorner(None));
         world.init_resource::<LobbyStatus>();
@@ -2862,19 +2860,13 @@ mod tests {
         world.init_resource::<ButtonInput<KeyCode>>();
 
         // A press on corner 1's centroid — free, so a claim.
-        let centre = Vec2::new(STAR_W / 2.0, STAR_H / 2.0);
-        let size = vec2(STAR_W, STAR_H);
-        let mid = {
-            let v = wedge_vertices(1);
-            (v[0] + v[1] + v[2]) / 3.0
-        };
         world.spawn((
             Button,
             Interaction::Pressed,
             StarHit,
             RelativeCursorPosition {
                 cursor_over: true,
-                normalized: Some((mid - centre) / size),
+                normalized: Some(normalized(wedge_centroid(1))),
             },
         ));
 
@@ -2891,20 +2883,15 @@ mod tests {
     /// them — and each points at its own camp's direction.
     #[test]
     fn the_centre_is_not_a_corner_and_each_wedge_is_its_own() {
-        let centre = Vec2::new(STAR_W / 2.0, STAR_H / 2.0);
-        let size = vec2(STAR_W, STAR_H);
-        let normalized_of = |p: Vec2| (p - centre) / size;
         assert_eq!(
             sector_at(Vec2::ZERO),
             None,
             "the middle of the star selects nothing"
         );
         for i in 0..6 {
-            let v = wedge_vertices(i);
-            let mid = (v[0] + v[1] + v[2]) / 3.0;
             // The centroid, as a normalized container position, hits corner i.
             assert_eq!(
-                sector_at(normalized_of(mid)),
+                sector_at(normalized(wedge_centroid(i))),
                 Some(i),
                 "wedge {i}'s own centroid must resolve to corner {i}"
             );
@@ -2912,15 +2899,14 @@ mod tests {
         // A point between two wedges — straight out from the centre between
         // corners 0 and 1 — belongs to neither.
         let angle = (-60.0f32).to_radians();
-        let between = centre + 120.0 * Vec2::new(angle.cos(), angle.sin());
-        assert_eq!(sector_at(normalized_of(between)), None);
+        let between = STAR_CENTRE + 120.0 * Vec2::new(angle.cos(), angle.sin());
+        assert_eq!(sector_at(normalized(between)), None);
     }
 
     /// The wedges are equilateral, like the board's camp triangles: all three
     /// sides equal, and the tip the outermost point of its wedge.
     #[test]
     fn the_wedges_are_equilateral() {
-        let centre = vec2(STAR_W / 2.0, STAR_H / 2.0);
         for i in 0..6 {
             let [apex, left, right] = wedge_vertices(i);
             let side = left.distance(right);
@@ -2930,7 +2916,7 @@ mod tests {
                 "wedge {i} is not equilateral"
             );
             assert!(
-                apex.distance(centre) > left.distance(centre),
+                apex.distance(STAR_CENTRE) > left.distance(STAR_CENTRE),
                 "wedge {i}'s tip must face outward"
             );
         }
@@ -2941,21 +2927,9 @@ mod tests {
     #[test]
     fn the_wedge_texture_paints_the_triangle_only() {
         let image = sector_image(0);
-        let centre = Vec2::new(STAR_W / 2.0, STAR_H / 2.0);
-        let v = wedge_vertices(0);
-        let mid = (v[0] + v[1] + v[2]) / 3.0;
-        let Some(data) = &image.data else {
-            panic!("the wedge texture keeps its pixel data");
-        };
-        let alpha_at = |p: Vec2| -> u8 {
-            let (x, y) = (
-                (p.x as u32).min(STAR_W as u32 - 1),
-                (p.y as u32).min(STAR_H as u32 - 1),
-            );
-            data[((y * STAR_W as u32 + x) * 4 + 3) as usize]
-        };
-        assert_eq!(alpha_at(mid), 255);
-        assert_eq!(alpha_at(centre), 0);
+        let alpha_at = alpha_of(&image);
+        assert_eq!(alpha_at(wedge_centroid(0)), 255);
+        assert_eq!(alpha_at(STAR_CENTRE), 0);
     }
 
     /// The selection outline is a band just inside the wedge's edges: there
@@ -2963,15 +2937,9 @@ mod tests {
     #[test]
     fn the_outline_rings_the_inside_of_the_wedge() {
         let image = outline_image(0);
-        let Some(data) = &image.data else {
-            panic!("the outline texture keeps its pixel data");
-        };
-        let alpha_at = |p: Vec2| -> u8 {
-            let (x, y) = (p.x as u32, p.y as u32);
-            data[((y * STAR_W as u32 + x) * 4 + 3) as usize]
-        };
+        let alpha_at = alpha_of(&image);
         let v = wedge_vertices(0);
-        let mid = (v[0] + v[1] + v[2]) / 3.0;
+        let mid = wedge_centroid(0);
         assert_eq!(alpha_at(mid), 0, "the middle of the wedge stays clear");
         for k in 0..3 {
             let edge_mid = (v[k] + v[(k + 1) % 3]) / 2.0;
@@ -3032,10 +3000,7 @@ mod tests {
         net.seats = vec![
             seat(&me.to_string(), Some(0)),
             seat(&gone.to_string(), Some(3)),
-            Seat {
-                engine: true,
-                ..seat("engine-0", Some(4))
-            },
+            engine_seat("engine-0", Some(4)),
             seat(&here.to_string(), None),
         ];
 
@@ -3100,16 +3065,11 @@ mod tests {
     fn the_later_of_two_same_named_peers_gives_way() {
         let host = PeerId(uuid::Uuid::from_u128(1));
         let guest = PeerId(uuid::Uuid::from_u128(2));
-        let roster = vec![
-            seat(&host.to_string(), None),
-            seat(&guest.to_string(), None),
-        ]
-        .into_iter()
-        .map(|s| Seat {
+        let gecko = |id: PeerId| Seat {
             name: "gecko".into(),
-            ..s
-        })
-        .collect::<Vec<_>>();
+            ..seat(&id.to_string(), None)
+        };
+        let roster = vec![gecko(host), gecko(guest)];
 
         let guest_net = NetState {
             my_id: Some(guest),
@@ -3131,10 +3091,7 @@ mod tests {
         let engine_net = NetState {
             my_id: Some(guest),
             name: "Engine".into(),
-            seats: vec![Seat {
-                engine: true,
-                ..seat("engine-0", Some(4))
-            }],
+            seats: vec![engine_seat("engine-0", Some(4))],
             ..NetState::default()
         };
         assert_eq!(clash_rename(&engine_net), None, "engines are not peers");
@@ -3153,10 +3110,7 @@ mod tests {
         net.seats = vec![
             seat(&me.to_string(), Some(0)),
             seat(&here.to_string(), Some(3)),
-            Seat {
-                engine: true,
-                ..seat("engine-0", Some(4))
-            },
+            engine_seat("engine-0", Some(4)),
         ];
         assert!(!has_departed(&net), "everyone here is still here");
 
@@ -3197,10 +3151,7 @@ mod tests {
         net.seats = vec![
             seat(&me.to_string(), Some(2)),
             seat("grace", Some(1)),
-            Seat {
-                engine: true,
-                ..seat("bot", Some(4))
-            },
+            engine_seat("bot", Some(4)),
         ];
         assert_eq!(sector_click(&net, 2), SectorClick::Select(2));
         assert_eq!(sector_click(&net, 1), SectorClick::Select(1));
@@ -3212,11 +3163,8 @@ mod tests {
     /// corner held by someone else.
     #[test]
     fn the_host_unseats_a_player() {
-        let mut net = NetState::default();
-        net.peers.push(fake_peer());
-        net.is_host = true;
         let host = "host";
-        net.seats = vec![seat(host, Some(0)), seat("grace", Some(3))];
+        let mut net = shared(true, vec![seat(host, Some(0)), seat("grace", Some(3))]);
 
         assert_eq!(
             corner_effect(&net, host, 3, CornerCommand::Off),
