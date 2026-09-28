@@ -117,19 +117,17 @@ fn parallel_games_never_disagree() {
             );
             assert_positions_agree(core.position(), model.state(), &holes, &ctx);
 
-            // Every player's legal move set must be identical, not just the
-            // active player's.
             for i in 0..6u8 {
+                // Every player's legal move set must be identical, not just the
+                // active player's.
                 let core_set = move_keys_core(core.position(), CorePlayer::wrapping(i));
                 let model_set = move_keys_model(model.state(), i);
                 assert_eq!(
                     core_set, model_set,
                     "{ctx}: move sets diverge for player {i}"
                 );
-            }
 
-            // Win flags agree for everyone.
-            for i in 0..6u8 {
+                // Win flags agree for everyone.
                 assert_eq!(
                     core.position().has_won(CorePlayer::wrapping(i)),
                     model.state().has_won(i),
@@ -154,24 +152,15 @@ fn parallel_games_never_disagree() {
                 continue;
             }
             let (jump, (oq, or), (dq, dr)) = moves[rng.below(moves.len() as u32) as usize];
-
-            let origin = CoreCoord::new(oq, or);
-            let destination = CoreCoord::new(dq, dr);
-            let core_mv = if jump {
-                CoreMove::jump(origin, destination)
+            let origin = ModelCoord::new(oq, or);
+            let destination = ModelCoord::new(dq, dr);
+            if jump {
+                core.play(&CoreMove::jump(to_core(origin), to_core(destination)));
+                model.play(&ModelMove::jump(origin, destination));
             } else {
-                CoreMove::step(origin, destination)
-            };
-            let m_origin = ModelCoord::new(oq, or);
-            let m_destination = ModelCoord::new(dq, dr);
-            let model_mv = if jump {
-                ModelMove::jump(m_origin, m_destination)
-            } else {
-                ModelMove::step(m_origin, m_destination)
-            };
-
-            core.play(&core_mv);
-            model.play(&model_mv);
+                core.play(&CoreMove::step(to_core(origin), to_core(destination)));
+                model.play(&ModelMove::step(origin, destination));
+            }
         }
 
         assert_outcomes_agree(&core, &model, &format!("game {game} end"));
@@ -209,13 +198,10 @@ fn jump_closures_agree_everywhere() {
             if model_state.owner(c).is_none() {
                 continue;
             }
-            let core_set: HashSet<(i32, i32)> = core_jumps(&core_pos, to_core(c))
+            let core_set = core_jumps(&core_pos, to_core(c));
+            let model_set: HashSet<CoreCoord> = model_jumps(&model_state, c)
                 .into_iter()
-                .map(|x| (x.q, x.r))
-                .collect();
-            let model_set: HashSet<(i32, i32)> = model_jumps(&model_state, c)
-                .into_iter()
-                .map(|x| (x.q, x.r))
+                .map(to_core)
                 .collect();
             assert_eq!(
                 core_set, model_set,
@@ -230,9 +216,8 @@ fn jump_closures_agree_everywhere() {
 fn board_geometry_agrees() {
     let board = Board::new();
 
-    let core_holes: HashSet<(i32, i32)> =
-        core_all_holes().into_iter().map(|c| (c.q, c.r)).collect();
-    let model_holes: HashSet<(i32, i32)> = board.holes().map(|c| (c.q, c.r)).collect();
+    let core_holes: HashSet<CoreCoord> = core_all_holes().into_iter().collect();
+    let model_holes: HashSet<CoreCoord> = board.holes().map(to_core).collect();
     assert_eq!(
         core_holes, model_holes,
         "the two crates build different stars"
