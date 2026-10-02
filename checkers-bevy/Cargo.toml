@@ -38,5 +38,5 @@ rfd = "0.17"
 # Reading and sharing the room name through the URL fragment (web only), and
 # the localStorage slot a saved round lives in.
 [target.'cfg(target_family = "wasm")'.dependencies]
-web-sys = { version = "0.3", features = ["Location", "Window", "Storage"] }
+web-sys = { version = "0.3", features = ["History", "Location", "Window", "Storage"] }
 js-sys = "0.3"

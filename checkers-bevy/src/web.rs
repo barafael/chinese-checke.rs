@@ -52,12 +52,32 @@ fn room_from_fragment(fragment: &str) -> Option<RoomId> {
 
 /// Publish the room in the URL so the address can be copied and shared. The
 /// lobby calls this when a typed room is accepted; it replaces the old `room=`
-/// value, so the link always matches where the peer actually is.
+/// value, so the link always matches where the peer actually is, and leaves
+/// any other fragment params alone.
 pub fn share_room(room: &RoomId) {
     #[cfg(target_family = "wasm")]
-    write_fragment(&format!("room={}", room.0));
+    write_fragment(&with_fragment_param(
+        &read_fragment().unwrap_or_default(),
+        "room",
+        &room.0,
+    ));
     #[cfg(not(target_family = "wasm"))]
     let _ = room;
+}
+
+/// `fragment` (with or without its `#`) with `key` set to `value`, every
+/// other pair kept in place, so the room never clobbers state another part
+/// of the app keeps in the fragment. Returned without the leading `#`.
+#[cfg(any(target_family = "wasm", test))]
+fn with_fragment_param(fragment: &str, key: &str, value: &str) -> String {
+    let fragment = fragment.strip_prefix('#').unwrap_or(fragment);
+    let mut pairs: Vec<String> = fragment
+        .split(['&', ';'])
+        .filter(|pair| !pair.is_empty() && pair.split('=').next() != Some(key))
+        .map(str::to_string)
+        .collect();
+    pairs.push(format!("{key}={value}"));
+    pairs.join("&")
 }
 
 /// The alphabet of generated rooms: unambiguous and lowercase, so a room read
@@ -143,11 +163,21 @@ fn read_fragment() -> Option<String> {
     web_sys::window()?.location().hash().ok()
 }
 
+/// Replace the page's fragment in place: no navigation and no history
+/// entry, so Back never lands on a bare page that redirects forward again.
 #[cfg(target_family = "wasm")]
 fn write_fragment(fragment: &str) {
-    if let Some(window) = web_sys::window()
-        && let Err(e) = window.location().set_hash(fragment)
-    {
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let url = format!("#{fragment}");
+    let written = match window.history() {
+        Ok(history) => history
+            .replace_state_with_url(&web_sys::wasm_bindgen::JsValue::NULL, "", Some(&url))
+            .is_ok(),
+        Err(_) => false,
+    };
+    if !written && let Err(e) = window.location().set_hash(fragment) {
         bevy::log::warn!("could not set the room in the URL: {e:?}");
     }
 }
@@ -231,6 +261,16 @@ mod tests {
     fn finds_room_among_extra_params() {
         let room = room_from_fragment("#other=x&room=friend&r=2").unwrap();
         assert_eq!(room.0, "friend");
+    }
+
+    #[test]
+    fn sharing_a_room_keeps_other_fragment_params() {
+        assert_eq!(with_fragment_param("#x=1", "room", "r1"), "x=1&room=r1");
+        assert_eq!(
+            with_fragment_param("#room=old&x=1", "room", "new"),
+            "x=1&room=new"
+        );
+        assert_eq!(with_fragment_param("", "room", "r"), "room=r");
     }
 
     #[test]
