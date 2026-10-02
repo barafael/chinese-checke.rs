@@ -62,6 +62,12 @@ jobs:
           MATCHBOX_SERVER: ${{ vars.MATCHBOX_SERVER || 'wss://omdurman-matchbox.fly.dev' }}
         run: trunk build --release --public-url "/${{ github.event.repository.name }}/"
 
+      # Generated after the trunk build (trunk clears dist/), so the report
+      # always describes the code being deployed. It is served beside the game
+      # at <pages-url>/laws/.
+      - name: Generate the laws report
+        run: cargo run -p checkers-spec-gen -- --html dist/laws/index.html
+
       - uses: actions/upload-pages-artifact@v3
         with:
           path: dist

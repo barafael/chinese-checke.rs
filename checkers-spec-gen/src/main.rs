@@ -11,9 +11,16 @@
 //! cargo run -p checkers-spec-gen -- --check specs/specification.md
 //! cargo run -p checkers-spec-gen -- --emit-registry
 //! cargo run -p checkers-spec-gen -- --check-registry
+//! cargo run -p checkers-spec-gen -- --html dist/laws/index.html
 //! ```
+//!
+//! The `--html` mode renders the same registry as a single-page report —
+//! formula, precise statement, plain-language note, evidence, and board
+//! figures — for publication under `/laws/` on GitHub Pages.
 
 mod registry;
+mod report;
+mod svg;
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -209,6 +216,22 @@ fn write_spec(path: &str) -> Result<String, String> {
     ))
 }
 
+/// Write the HTML report to `path`, creating its directory if need be.
+fn write_report(path: &str) -> Result<String, String> {
+    if let Some(parent) = Path::new(path).parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("failed to create {}: {e}", parent.display()))?;
+    }
+    std::fs::write(path, report::render()).map_err(|e| format!("failed to write {path}: {e}"))?;
+
+    let laws = all_in_reading_order();
+    let chapters = Chapter::ALL.len();
+    Ok(format!(
+        "wrote {path}: {chapters} chapters, {} laws",
+        laws.len(),
+    ))
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
@@ -223,10 +246,12 @@ fn main() -> ExitCode {
             .map(|n| format!("{} is up to date: {n} laws", registry::GENERATED_PATH))
             .map_err(|e| e.to_string()),
         [flag, path] if flag == "--check" => check_spec(path),
+        [flag, path] if flag == "--html" => write_report(path),
         [path] => write_spec(path),
         _ => {
             eprintln!(
                 "usage: checkers-spec-gen [--check] <output.md>\n       \
+                 checkers-spec-gen --html <output.html>\n       \
                  checkers-spec-gen --emit-registry | --check-registry"
             );
             return ExitCode::from(2);

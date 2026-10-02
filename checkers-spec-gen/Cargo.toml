@@ -6,6 +6,7 @@ description = "Generates the specification's law inventory from the checkers-cor
 
 [dependencies]
 checkers-core.workspace = true
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 
 [lints]
 workspace = true

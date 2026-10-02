@@ -61,7 +61,7 @@ one place, and that the strongest claims are additionally Kani-proven.
 |---|---|
 | `checkers-core` | Engine-free rules. Laws, geometry, Kani proofs. |
 | `checkers-model` | Naive reference implementation, played in lockstep against `checkers-core` by its `tests/differential.rs`. |
-| `checkers-spec-gen` | Generates `specs/` from the law registry. |
+| `checkers-spec-gen` | Generates `specs/`, the wasm law registry, and the laws report from the law registry. |
 | `checkers-bevy` | Playable front-end. Renders and takes input; holds no rules. |
 | `specs/` | **Generated.** Do not edit; regenerate instead. |
 | `docs/superseded/` | The original hand-written prose. Not authoritative. |
@@ -94,7 +94,17 @@ cargo run -p checkers-bevy                          # play
 cargo doc --no-deps --open                           # rustdoc with rendered math
 cargo run -p checkers-spec-gen -- specs/specification.md          # regenerate
 cargo run -p checkers-spec-gen -- --check specs/specification.md  # CI staleness gate
+cargo run -p checkers-spec-gen -- --html /tmp/laws/index.html     # the laws report
 ```
+
+### The laws report
+
+The deploy workflow generates a single-page report of every law — formula,
+precise statement, plain-language meaning, evidence level, and board figures —
+and publishes it beside the game at
+<https://barafael.github.io/chinese-checke.rs/laws/>. Like `specs/`, it is
+generated output, never edited: the figures are drawn from the same geometry
+predicates the laws are checked against.
 
 ### Rendered math in rustdoc
 
