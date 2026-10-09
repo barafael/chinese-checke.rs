@@ -2,3 +2,4 @@
 **/target
 **/moves.log
 /dist
+window*.log
