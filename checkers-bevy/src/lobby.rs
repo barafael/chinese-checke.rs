@@ -28,9 +28,12 @@ use bevy::image::Image;
 use bevy::input::ButtonState;
 use bevy::input::InputSystems;
 use bevy::input::keyboard::KeyboardInput;
+use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+use bevy::ui::Pressed;
 use bevy::ui::RelativeCursorPosition;
+use bevy::ui_widgets::Button;
 use bevy_matchbox::prelude::*;
 use checkers_net::{CH_RELIABLE, NetMsg, NetState, RoomId, Seat, broadcast, decode};
 
@@ -325,7 +328,7 @@ fn sync_button_styles(
     net: Res<NetState>,
     table: Res<Table>,
     selected: Res<SelectedCorner>,
-    mut buttons: Query<(&Interaction, &LobbyButton, &mut BackgroundColor)>,
+    mut buttons: Query<(&Hovered, Has<Pressed>, &LobbyButton, &mut BackgroundColor)>,
 ) {
     let solo = net.peers.is_empty();
     let active = selected.0.map(|i| {
@@ -346,19 +349,20 @@ fn sync_button_styles(
         }
     });
 
-    for (interaction, button, mut bg) in buttons.iter_mut() {
+    for (hovered, pressed, button, mut bg) in buttons.iter_mut() {
         let selected = match button {
             LobbyButton::ForeignCamps => variants.0.forbid_foreign_camps,
             LobbyButton::CornerAction(cmd) => active == Some(*cmd),
             LobbyButton::Start | LobbyButton::Preset(_) => false,
         };
-        let colour = match interaction {
-            Interaction::Pressed if selected => CHOSEN_DOWN,
-            Interaction::Pressed => DOWN,
-            Interaction::Hovered if selected => CHOSEN_HOVER,
-            Interaction::Hovered => HOVER,
-            Interaction::None if selected => CHOSEN,
-            Interaction::None => IDLE,
+        let colour = if pressed {
+            if selected { CHOSEN_DOWN } else { DOWN }
+        } else if hovered.get() {
+            if selected { CHOSEN_HOVER } else { HOVER }
+        } else if selected {
+            CHOSEN
+        } else {
+            IDLE
         };
         bg.set_if_neq(BackgroundColor(colour));
     }
@@ -369,17 +373,12 @@ fn sync_button_styles(
 /// its border on hover, so the box reads as clickable.
 fn sync_input_styles(
     edit: Res<FieldEdit>,
-    mut inputs: Query<(
-        &Interaction,
-        &TextInput,
-        &mut BackgroundColor,
-        &mut BorderColor,
-    )>,
+    mut inputs: Query<(&Hovered, &TextInput, &mut BackgroundColor, &mut BorderColor)>,
 ) {
-    for (interaction, input, mut bg, mut border) in inputs.iter_mut() {
+    for (hovered, input, mut bg, mut border) in inputs.iter_mut() {
         let (well, edge) = if edit.focus == Some(input.0) {
             (Color::srgb(0.15, 0.15, 0.19), CHOSEN)
-        } else if *interaction == Interaction::Hovered {
+        } else if hovered.get() {
             (IDLE, HOVER)
         } else {
             (IDLE, BORDER)
@@ -1673,7 +1672,7 @@ pub fn claim_answer(net: &NetState, claim: Option<u32>) -> Option<String> {
 /// the wedge under the cursor is resolved by angle in `sector_at`.
 #[allow(clippy::type_complexity)]
 pub fn select_corner(
-    mut hit: Query<(&Interaction, &RelativeCursorPosition), (With<StarHit>, Changed<Interaction>)>,
+    mut hit: Query<(&Pressed, &RelativeCursorPosition), (With<StarHit>, Added<Pressed>)>,
     keys: Res<ButtonInput<KeyCode>>,
     mut socket: Option<ResMut<MatchboxSocket>>,
     mut net: ResMut<NetState>,
@@ -1681,10 +1680,7 @@ pub fn select_corner(
     mut status: ResMut<LobbyStatus>,
     mut pending: ResMut<PendingClaim>,
 ) {
-    for (interaction, rel) in hit.iter_mut() {
-        if *interaction != Interaction::Pressed {
-            continue;
-        }
+    for (_pressed, rel) in hit.iter_mut() {
         let Some(sector) = rel.normalized.and_then(sector_at) else {
             continue;
         };
@@ -1808,7 +1804,7 @@ pub fn apply_preset(table: &mut Table, seating: Seating) {
 /// packs the table. The rules-only half lives in [`corner_effect`]; a network
 /// conversation lives in [`pump_socket`].
 pub fn handle_buttons(
-    buttons: Query<(&Interaction, &LobbyButton), Changed<Interaction>>,
+    buttons: Query<(&Pressed, &LobbyButton), Added<Pressed>>,
     keys: Res<ButtonInput<KeyCode>>,
     mut socket: Option<ResMut<MatchboxSocket>>,
     lobby: LobbyWorld,
@@ -1829,10 +1825,7 @@ pub fn handle_buttons(
     let mut preset: Option<Seating> = None;
     let mut command: Option<CornerCommand> = None;
 
-    for (interaction, button) in buttons.iter() {
-        if *interaction != Interaction::Pressed {
-            continue;
-        }
+    for (_pressed, button) in buttons.iter() {
         match button {
             LobbyButton::Start => start = true,
             LobbyButton::ForeignCamps => foreign = true,
@@ -1994,17 +1987,14 @@ pub fn edit_action(key: KeyCode, text: Option<&str>) -> EditAction {
 /// Runs only while no field holds the keyboard — the modal rule. Leaving a
 /// field (Enter, Esc, or the name's Apply) is what frees the keys again.
 fn focus_input_fields(
-    buttons: Query<(&Interaction, &TextInput), Changed<Interaction>>,
+    buttons: Query<(&Pressed, &TextInput), Added<Pressed>>,
     keys: Res<ButtonInput<KeyCode>>,
     room: Res<RoomId>,
     net: Res<NetState>,
     mut edit: ResMut<FieldEdit>,
     mut status: ResMut<LobbyStatus>,
 ) {
-    let clicked = buttons
-        .iter()
-        .find(|(interaction, _)| **interaction == Interaction::Pressed)
-        .map(|(_, input)| input.0);
+    let clicked = buttons.iter().next().map(|(_, input)| input.0);
 
     let kind = if clicked == Some(FieldKind::Room) || keys.just_pressed(KeyCode::KeyR) {
         FieldKind::Room
@@ -2152,14 +2142,11 @@ fn commit_name(buffer: &str, targets: &mut FieldTargets) -> Result<(), String> {
 /// Enter, applies. One modal at a time: while the room field holds the
 /// keyboard, Apply stands down.
 pub fn apply_name(
-    buttons: Query<(&Interaction, &ApplyName), Changed<Interaction>>,
+    buttons: Query<(&Pressed, &ApplyName), Added<Pressed>>,
     mut edit: ResMut<FieldEdit>,
     mut targets: FieldTargets,
 ) {
-    if !buttons
-        .iter()
-        .any(|(interaction, _)| *interaction == Interaction::Pressed)
-    {
+    if buttons.is_empty() {
         return;
     }
     match edit.focus {
@@ -2842,7 +2829,7 @@ mod tests {
         // A press on corner 1's centroid — free, so a claim.
         world.spawn((
             Button,
-            Interaction::Pressed,
+            Pressed,
             StarHit,
             RelativeCursorPosition {
                 cursor_over: true,

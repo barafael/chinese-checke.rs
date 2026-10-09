@@ -12,8 +12,10 @@
 use bevy::camera::ScalingMode;
 use bevy::ecs::system::SystemParam;
 use bevy::input::touch::{TouchInput, TouchPhase};
+use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
-// Not in the prelude, unlike the rest of the window API.
+use bevy::ui::Pressed;
+use bevy::ui_widgets::Button;
 use bevy::window::{Monitor, PrimaryMonitor};
 use bevy_matchbox::prelude::MatchboxSocket;
 use checkers_ai::Ai;
@@ -468,16 +470,16 @@ fn spawn_board(
 }
 
 fn handle_buttons(
-    interactions: Query<(&Interaction, &ControlButton), Changed<Interaction>>,
+    interactions: Query<(&Pressed, &ControlButton), Added<Pressed>>,
     mut session: ResMut<Session>,
     sounds: Res<sound::Sounds>,
     on: Res<sound::SoundOn>,
     mut commands: Commands,
 ) {
-    for (interaction, which) in interactions.iter() {
+    for (_pressed, which) in interactions.iter() {
         // On another player's move the controls are inert — the click would
         // otherwise confirm or cancel a selection this peer cannot touch.
-        if *interaction != Interaction::Pressed || !session.may_act() {
+        if !session.may_act() {
             continue;
         }
         match which {
@@ -537,13 +539,13 @@ fn handle_buttons(
 /// [`exit_round_teardown`] on the exit transition clears the screen.
 fn exit_to_lobby(
     keys: Res<ButtonInput<KeyCode>>,
-    buttons: Query<(&Interaction, &ControlButton), Changed<Interaction>>,
+    buttons: Query<(&Pressed, &ControlButton), Added<Pressed>>,
     session: Res<Session>,
     mut next_state: ResMut<NextState<AppState>>,
 ) {
-    let pressed = buttons.iter().any(|(interaction, which)| {
-        *interaction == Interaction::Pressed && *which == ControlButton::Menu
-    });
+    let pressed = buttons
+        .iter()
+        .any(|(_, which)| *which == ControlButton::Menu);
     if pressed || (keys.just_pressed(KeyCode::KeyM) && session.game.is_over()) {
         next_state.set(AppState::Lobby);
     }
@@ -600,7 +602,7 @@ fn handle_clicks(
     buttons: Res<ButtonInput<MouseButton>>,
     windows: Query<&Window>,
     cameras: Query<(&Camera, &GlobalTransform)>,
-    controls: Query<&Interaction, With<ControlButton>>,
+    controls: Query<(&Hovered, Has<Pressed>), With<ControlButton>>,
     mut session: ResMut<Session>,
     mut taps: TouchTaps,
 ) {
@@ -625,7 +627,10 @@ fn handle_clicks(
         return;
     }
     // Do not treat a click on a control button as a board click.
-    if controls.iter().any(|i| *i != Interaction::None) {
+    if controls
+        .iter()
+        .any(|(hovered, pressed)| hovered.get() || pressed)
+    {
         return;
     }
 
@@ -844,13 +849,14 @@ fn sync_buttons(
     session: Res<Session>,
     viewer: Option<Res<replay::ReplayView>>,
     mut buttons: Query<(
-        &Interaction,
+        &Hovered,
+        Has<Pressed>,
         &ControlButton,
         &mut BackgroundColor,
         &mut Visibility,
     )>,
 ) {
-    for (interaction, which, mut bg, mut vis) in buttons.iter_mut() {
+    for (hovered, pressed, which, mut bg, mut vis) in buttons.iter_mut() {
         // Record controls are local-mode, like resign: a shared round is
         // shared state, and one peer's save would say nothing about the
         // rest of the table.
@@ -887,10 +893,12 @@ fn sync_buttons(
             ControlButton::Save | ControlButton::Open => Color::srgb(0.22, 0.28, 0.38),
             _ => IDLE,
         };
-        let colour = match interaction {
-            Interaction::Pressed => base.darker(0.15),
-            Interaction::Hovered if base != IDLE => base.lighter(0.15),
-            _ => base,
+        let colour = if pressed {
+            base.darker(0.15)
+        } else if hovered.get() && base != IDLE {
+            base.lighter(0.15)
+        } else {
+            base
         };
         bg.set_if_neq(BackgroundColor(colour));
     }
