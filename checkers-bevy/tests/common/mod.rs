@@ -9,6 +9,8 @@ use bevy::input::InputPlugin;
 use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::prelude::*;
 use bevy::state::app::StatesPlugin;
+use bevy::ui::Pressed;
+use bevy::ui_widgets::Button;
 use checkers_bevy::lobby::{
     ChosenVariants, CornerCommand, LobbyButton, LobbyStatus, PendingClaim, SelectedCorner, Table,
 };
@@ -82,16 +84,13 @@ pub fn digit_key(corner: usize) -> KeyCode {
     }
 }
 
-/// Click a lobby button. `handle_buttons` reads `(&Interaction, &LobbyButton)`
-/// with a `Changed` filter, so a click is a button that is `Interaction::Pressed`
+/// Click a lobby button. `handle_buttons` reads `(&Pressed, &LobbyButton)`
+/// with an `Added` filter, so a click is a button that is `Pressed`
 /// for one frame and then stood down again.
 pub fn click(app: &mut App, tag: LobbyButton) {
-    let button = app
-        .world_mut()
-        .spawn((Button, Interaction::Pressed, tag))
-        .id();
+    let button = app.world_mut().spawn((Button, Pressed, tag)).id();
     app.update();
-    app.world_mut().entity_mut(button).insert(Interaction::None);
+    app.world_mut().entity_mut(button).remove::<Pressed>();
 }
 
 /// Issue a corner command: select the corner with its digit key, then press

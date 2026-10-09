@@ -473,7 +473,7 @@ fn apply_app() -> App {
 }
 
 fn click_apply(app: &mut App) {
-    app.world_mut().spawn((ApplyName, Interaction::Pressed));
+    app.world_mut().spawn((ApplyName, bevy::ui::Pressed));
     app.update();
 }
 
