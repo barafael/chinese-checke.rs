@@ -16,9 +16,15 @@ linkme = "0.3"
 # Bevy's defaults minus the `3d` group: the game draws flat meshes and UI, so
 # PBR, glTF, lights and the 3D post-processing chain would be dead weight in
 # every build, the web bundle above all.
-bevy = { version = "0.20", default-features = false, features = ["2d", "ui", "audio"] }
-# Pinned to the same fork omdurman uses: the crates.io release does not yet
-# support Bevy 0.19.
+#
+# `system_clipboard` lets the lobby's text fields copy and paste through the
+# operating system's clipboard rather than an in-app buffer: a room name
+# arrives by message, and pasting it is how it gets into the room field. It
+# matters on native builds only (arboard); the web build always reads and
+# writes the browser's clipboard.
+bevy = { version = "0.20", default-features = false, features = ["2d", "ui", "audio", "system_clipboard"] }
+# The same fork omdurman uses (Cargo.lock pins the commit): the crates.io
+# release does not yet support Bevy 0.20.
 bevy_matchbox = { git = "https://github.com/barafael/matchbox.git", branch = "main" }
 postcard = { version = "1", features = ["alloc"] }
 serde = { version = "1", features = ["derive"] }

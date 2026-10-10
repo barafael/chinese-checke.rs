@@ -24,9 +24,9 @@ use checkers_bevy::board_view::{
     BOARD_FRAME, HOLE_RADIUS, HOLE_SPACING, PIECE_RADIUS, coord_to_world, on_hole, player_colour,
     world_to_coord,
 };
-use checkers_bevy::replay::{self, TraceMarker};
+use checkers_bevy::replay;
 use checkers_bevy::setup::Seating;
-use checkers_bevy::ui::ui_text;
+use checkers_bevy::ui::{button_messages, ui_text};
 use checkers_bevy::{
     AppState, Selection, Session, audit, format_round_duration, lobby, move_log, net, record,
     sound, web,
@@ -83,7 +83,11 @@ fn main() {
         .init_resource::<AiEngine>()
         .init_resource::<AiPace>()
         .init_resource::<replay::Replay>()
-        .add_plugins((lobby::plugin, sound::plugin))
+        .add_plugins((
+            lobby::plugin,
+            sound::plugin,
+            button_messages::<ControlButton>,
+        ))
         .add_systems(Startup, setup)
         // Not state-scoped: the lobby is the first thing shown, and it is the
         // screen whose buttons the old size hid.
@@ -92,7 +96,7 @@ fn main() {
             OnExit(AppState::InGame),
             // The menu is a full teardown: the next deal rebuilds the board
             // and the UI from nothing.
-            exit_round_teardown,
+            close_record_viewer,
         )
         .add_systems(
             OnEnter(AppState::InGame),
@@ -174,13 +178,21 @@ fn main() {
 }
 
 // --- marker components -----------------------------------------------------
+//
+// Everything drawn for a round is scoped to it: the board's markers require
+// `DespawnOnExit(AppState::InGame)`, and the HUD's scenes carry it, so leaving
+// for the lobby clears the board, the HUD and the game-over card whichever
+// system spawned them. The camera is the one thing that stays: the lobby
+// renders and picks through it, and the next deal draws through it again.
 
 #[derive(Component)]
+#[require(DespawnOnExit<AppState> = DespawnOnExit(AppState::InGame))]
 struct HoleMarker;
 
 /// A rendered piece. Carries no data: pieces are rebuilt from the position
 /// wholesale, so nothing needs to look up which hole an entity came from.
 #[derive(Component)]
+#[require(DespawnOnExit<AppState> = DespawnOnExit(AppState::InGame))]
 struct PieceMarker;
 
 /// Anything drawn on top of the board that is rebuilt whenever the selection
@@ -188,31 +200,28 @@ struct PieceMarker;
 ///
 /// One component rather than three, so the despawn query stays simple.
 #[derive(Component)]
+#[require(DespawnOnExit<AppState> = DespawnOnExit(AppState::InGame))]
 struct Overlay;
 
-#[derive(Component)]
+#[derive(Component, Default, Clone)]
 struct StatusText;
 
 /// The colour swatch naming the active home base.
-#[derive(Component)]
+#[derive(Component, Default, Clone)]
 struct TurnSwatch;
 
 /// The label beside the swatch: whose base is active, and whether it is ours.
-#[derive(Component)]
+#[derive(Component, Default, Clone)]
 struct TurnText;
 
 /// Entities of the game-over overlay, so it can be despawned on restart.
-#[derive(Component)]
+#[derive(Component, Default, Clone)]
+#[require(DespawnOnExit<AppState> = DespawnOnExit(AppState::InGame))]
 struct GameOverUi;
-
-/// A root of the in-game UI (status column, turn controls). Marks what
-/// leaving to the lobby must tear down; the game-over card has its own
-/// marker and goes with it.
-#[derive(Component)]
-struct HudUi;
 
 /// Board rings marking the active player's home camp.
 #[derive(Component)]
+#[require(DespawnOnExit<AppState> = DespawnOnExit(AppState::InGame))]
 struct CampMarker;
 
 /// Whether the status panel is shown, toggled with `T`. A view preference,
@@ -227,7 +236,8 @@ impl Default for StatusVisible {
 }
 
 /// The in-game buttons: the turn controls and the game-over card's `Menu`.
-#[derive(Component, Clone, Copy, PartialEq, Eq)]
+/// A press arrives as this same value, as a message.
+#[derive(Component, Message, Clone, Copy, PartialEq, Eq)]
 enum ControlButton {
     Confirm,
     Cancel,
@@ -325,70 +335,75 @@ fn fit_projection() -> Projection {
 
 /// Spawn the in-game UI: status panel and turn controls.
 fn spawn_ui(mut commands: Commands) {
-    // Bottom-left column: the active-base indicator (colour swatch + label)
-    // above the status text.
-    commands
-        .spawn((
+    commands.spawn_scene(status_panel());
+    commands.spawn_scene(turn_controls());
+}
+
+/// Bottom-left column: the active-base indicator (colour swatch + label)
+/// above the status text.
+fn status_panel() -> impl Scene {
+    let scope = DespawnOnExit(AppState::InGame);
+    bsn! {
+        scope
+        Node {
+            position_type: PositionType::Absolute,
+            bottom: px(10),
+            left: px(12),
+            flex_direction: FlexDirection::Column,
+            row_gap: px(3),
+        }
+        Children [
             Node {
-                position_type: PositionType::Absolute,
-                bottom: Val::Px(10.0),
-                left: Val::Px(12.0),
-                flex_direction: FlexDirection::Column,
-                row_gap: Val::Px(3.0),
-                ..default()
-            },
-            HudUi,
-        ))
-        .with_children(|col| {
-            col.spawn(Node {
                 flex_direction: FlexDirection::Row,
                 align_items: AlignItems::Center,
-                column_gap: Val::Px(6.0),
-                ..default()
-            })
-            .with_children(|row| {
-                row.spawn((
-                    Node {
-                        width: Val::Px(11.0),
-                        height: Val::Px(11.0),
-                        border_radius: BorderRadius::all(Val::Px(2.0)),
-                        ..default()
-                    },
-                    BackgroundColor(Color::NONE),
-                    TurnSwatch,
-                ));
-                row.spawn((ui_text("", 15.0, TEXT), TurnText));
-            });
-            col.spawn((ui_text("", 15.0, TEXT), StatusText));
-        });
-
-    // Turn controls, centred at the top: Confirm, Cancel, Resign, and the
-    // record controls.
-    commands
-        .spawn((
-            Node {
-                position_type: PositionType::Absolute,
-                top: Val::Px(10.0),
-                left: Val::Px(0.0),
-                right: Val::Px(0.0),
-                column_gap: Val::Px(8.0),
-                justify_content: JustifyContent::Center,
-                ..default()
-            },
-            HudUi,
-        ))
-        .with_children(|row| {
-            for (which, label) in [
-                (ControlButton::Confirm, "Confirm (Enter)"),
-                (ControlButton::Cancel, "Cancel (Backspace)"),
-                (ControlButton::Resign, "Resign"),
-                (ControlButton::Save, "Save"),
-                (ControlButton::Open, "Open"),
-                (ControlButton::Replay, "Replay"),
-            ] {
-                control_button(row, which, label);
+                column_gap: px(6),
             }
-        });
+            Children [
+                TurnSwatch
+                Node {
+                    width: px(11),
+                    height: px(11),
+                    border_radius: BorderRadius::all(px(2)),
+                }
+                BackgroundColor(Color::NONE)
+                --
+                @ui_text("", 15.0, TEXT)
+                TurnText
+            ]
+            --
+            @ui_text("", 15.0, TEXT)
+            StatusText
+        ]
+    }
+}
+
+/// Turn controls, centred at the top: Confirm, Cancel, Resign, and the
+/// record controls.
+fn turn_controls() -> impl Scene {
+    let buttons: Vec<_> = [
+        (ControlButton::Confirm, "Confirm (Enter)"),
+        (ControlButton::Cancel, "Cancel (Backspace)"),
+        (ControlButton::Resign, "Resign"),
+        (ControlButton::Save, "Save"),
+        (ControlButton::Open, "Open"),
+        (ControlButton::Replay, "Replay"),
+    ]
+    .into_iter()
+    .map(|(which, label)| control_button(which, label))
+    .collect();
+    let scope = DespawnOnExit(AppState::InGame);
+    bsn! {
+        scope
+        Node {
+            position_type: PositionType::Absolute,
+            top: px(10),
+            left: px(0),
+            right: px(0),
+            column_gap: px(8),
+            justify_content: JustifyContent::Center,
+        }
+        Children [ {buttons} ]
+    }
 }
 
 // Text greys, brightest first: the status panel and per-player statistics,
@@ -402,51 +417,27 @@ const IDLE: Color = Color::srgb(0.18, 0.18, 0.21);
 
 /// One control button. Factored out because the turn controls and the
 /// game-over card's `Menu` must not drift apart in padding, radius, or text.
-fn control_button(parent: &mut ChildSpawnerCommands, which: ControlButton, label: &str) {
-    parent
-        .spawn((
-            Button,
-            Node {
-                padding: UiRect::axes(Val::Px(12.0), Val::Px(7.0)),
-                // In Bevy 0.19 BorderRadius is a Node field, not a
-                // standalone component.
-                border_radius: BorderRadius::all(Val::Px(4.0)),
-                ..default()
-            },
-            BackgroundColor(IDLE),
-            which,
-        ))
-        .with_child(ui_text(label, 13.0, Color::srgb(0.9, 0.9, 0.92)));
+fn control_button(which: ControlButton, label: &str) -> impl Scene {
+    bsn! {
+        Button
+        Hovered
+        which
+        Node {
+            padding: UiRect::axes(px(12), px(7)),
+            border_radius: BorderRadius::all(px(4)),
+        }
+        BackgroundColor(IDLE)
+        Children [ @ui_text(label, 13.0, Color::srgb(0.9, 0.9, 0.92)) ]
+    }
 }
 
-/// Leaving the round tears down everything the round owns: the board meshes,
-/// pieces, highlights and trace, the in-game UI, the game-over card, and the
-/// record viewer — which otherwise would re-open its overlay in the middle of
-/// the next round.
-///
-/// The camera is the one thing that stays: the lobby renders and picks
-/// through it, and the next deal draws through it again.
-///
-/// The entities are one query, not one per marker, so an entity carrying
-/// several of these markers is despawned exactly once.
-fn exit_round_teardown(mut commands: Commands, owned: Query<Entity, RoundOwned>) {
-    for e in owned.iter() {
-        commands.entity(e).despawn();
-    }
-    // Removing a resource that is not there does nothing, so this needs no
-    // check that a viewer is open.
+/// Leaving the round closes the record viewer, which otherwise would re-open
+/// its overlay in the middle of the next round. The round's entities go by
+/// themselves (see the marker components). Removing a resource that is not
+/// there does nothing, so this needs no check that a viewer is open.
+fn close_record_viewer(mut commands: Commands) {
     commands.remove_resource::<replay::ReplayView>();
 }
-
-/// Every entity a round owns, whatever markers it carries.
-type RoundOwned = Or<(
-    With<HoleMarker>,
-    With<PieceMarker>,
-    With<Overlay>,
-    With<TraceMarker>,
-    With<HudUi>,
-    With<GameOverUi>,
-)>;
 
 /// The board: one entity per hole. Spawned on entering the round; the pieces
 /// and highlights on top of it are rebuilt by the sync systems.
@@ -470,13 +461,13 @@ fn spawn_board(
 }
 
 fn handle_buttons(
-    interactions: Query<(&Pressed, &ControlButton), Added<Pressed>>,
+    mut pressed: MessageReader<ControlButton>,
     mut session: ResMut<Session>,
     sounds: Res<sound::Sounds>,
     on: Res<sound::SoundOn>,
     mut commands: Commands,
 ) {
-    for (_pressed, which) in interactions.iter() {
+    for which in pressed.read() {
         // On another player's move the controls are inert — the click would
         // otherwise confirm or cancel a selection this peer cannot touch.
         if !session.may_act() {
@@ -536,17 +527,15 @@ fn handle_buttons(
 
 /// The way out of a finished round: the game-over card's `Menu` button, or
 /// the `M` key once the game is over. Both hand the state back to the lobby;
-/// [`exit_round_teardown`] on the exit transition clears the screen.
+/// `DespawnOnExit` on the round's entities clears the screen.
 fn exit_to_lobby(
     keys: Res<ButtonInput<KeyCode>>,
-    buttons: Query<(&Pressed, &ControlButton), Added<Pressed>>,
+    mut pressed: MessageReader<ControlButton>,
     session: Res<Session>,
     mut next_state: ResMut<NextState<AppState>>,
 ) {
-    let pressed = buttons
-        .iter()
-        .any(|(_, which)| *which == ControlButton::Menu);
-    if pressed || (keys.just_pressed(KeyCode::KeyM) && session.game.is_over()) {
+    let menu = pressed.read().any(|which| *which == ControlButton::Menu);
+    if menu || (keys.just_pressed(KeyCode::KeyM) && session.game.is_over()) {
         next_state.set(AppState::Lobby);
     }
 }
@@ -1065,77 +1054,87 @@ fn sync_game_over(
     sounds.play(&mut commands, *on, ending);
 
     let stats = &session.stats;
-    commands
-        .spawn((
+    let mut lines: Vec<_> = session
+        .players
+        .iter()
+        .map(|&p| {
+            let i = p.index() as usize;
+            let mut line = format!(
+                "{}:  {} moves  ({} by jump)",
+                player_label(&net, &session, p),
+                stats.moves[i],
+                stats.jumps[i]
+            );
+            let hops = stats.hops[i];
+            if let Some(pct) = (100 * stats.hops_over_others[i]).checked_div(hops) {
+                line.push_str(&format!(",  {hops} hops ({pct}% over others)"));
+            }
+            ui_text(line, 15.0, TEXT)
+        })
+        .collect();
+    let moves = stats.total_moves();
+    lines.push(ui_text(
+        format!("{moves} moves total, {} passed turns", stats.passes),
+        14.0,
+        TEXT_DIM,
+    ));
+    if let Some(d) = stats.round_duration(time.elapsed()) {
+        let lasted = format!("Round lasted {}", format_round_duration(d));
+        lines.push(ui_text(lasted, 14.0, TEXT_DIM));
+    }
+    if stats.longest_jump > 0 {
+        let by = Player::new(stats.longest_jump_by).expect("longest-jump player is below six");
+        let who = player_label(&net, &session, by);
+        let longest = format!("Longest jump: {} hops ({who})", stats.longest_jump);
+        lines.push(ui_text(longest, 14.0, TEXT_DIM));
+    }
+    // `R` re-deals a solo table only; a shared round is restarted by the
+    // host, from the lobby.
+    let redeal: Vec<_> = (!session.shared)
+        .then(|| ui_text("R deals a new game", 13.0, TEXT_FAINT))
+        .into_iter()
+        .collect();
+
+    commands.spawn_scene(bsn! {
+        GameOverUi
+        // The full-window centring box must not swallow clicks meant for the
+        // turn controls it covers: a finished round is still worth saving.
+        Pickable::IGNORE
+        Node {
+            width: percent(100),
+            height: percent(100),
+            align_items: AlignItems::Center,
+            justify_content: JustifyContent::Center,
+        }
+        Children [
             Node {
-                width: Val::Percent(100.0),
-                height: Val::Percent(100.0),
+                flex_direction: FlexDirection::Column,
                 align_items: AlignItems::Center,
-                justify_content: JustifyContent::Center,
-                ..default()
-            },
-            GameOverUi,
-        ))
-        .with_children(|root| {
-            root.spawn((
+                row_gap: px(8),
+                padding: UiRect::axes(px(34), px(24)),
+                border_radius: BorderRadius::all(px(8)),
+            }
+            BackgroundColor(Color::srgba(0.10, 0.10, 0.13, 0.97))
+            Children [
+                @ui_text(title, 30.0, title_colour)
+                --
+                @ui_text("Statistics", 15.0, TEXT_FAINT)
+                --
+                {lines}
+                --
                 Node {
-                    flex_direction: FlexDirection::Column,
+                    column_gap: px(10),
                     align_items: AlignItems::Center,
-                    row_gap: Val::Px(8.0),
-                    padding: UiRect::axes(Val::Px(34.0), Val::Px(24.0)),
-                    border_radius: BorderRadius::all(Val::Px(8.0)),
-                    ..default()
-                },
-                BackgroundColor(Color::srgba(0.10, 0.10, 0.13, 0.97)),
-            ))
-            .with_children(|panel| {
-                panel.spawn(ui_text(title, 30.0, title_colour));
-                panel.spawn(ui_text("Statistics", 15.0, TEXT_FAINT));
-                for p in session.players.iter().copied() {
-                    let i = p.index() as usize;
-                    let mut line = format!(
-                        "{}:  {} moves  ({} by jump)",
-                        player_label(&net, &session, p),
-                        stats.moves[i],
-                        stats.jumps[i]
-                    );
-                    let hops = stats.hops[i];
-                    if let Some(pct) = (100 * stats.hops_over_others[i]).checked_div(hops) {
-                        line.push_str(&format!(",  {hops} hops ({pct}% over others)"));
-                    }
-                    panel.spawn(ui_text(line, 15.0, TEXT));
+                    margin: UiRect::top(px(6)),
                 }
-                let moves = stats.total_moves();
-                let totals = format!("{moves} moves total, {} passed turns", stats.passes);
-                panel.spawn(ui_text(totals, 14.0, TEXT_DIM));
-                if let Some(d) = stats.round_duration(time.elapsed()) {
-                    let lasted = format!("Round lasted {}", format_round_duration(d));
-                    panel.spawn(ui_text(lasted, 14.0, TEXT_DIM));
-                }
-                if stats.longest_jump > 0 {
-                    let by = Player::new(stats.longest_jump_by)
-                        .expect("longest-jump player is below six");
-                    let who = player_label(&net, &session, by);
-                    let longest = format!("Longest jump: {} hops ({who})", stats.longest_jump);
-                    panel.spawn(ui_text(longest, 14.0, TEXT_DIM));
-                }
-                panel
-                    .spawn(Node {
-                        column_gap: Val::Px(10.0),
-                        align_items: AlignItems::Center,
-                        margin: UiRect::top(Val::Px(6.0)),
-                        ..default()
-                    })
-                    .with_children(|row| {
-                        control_button(row, ControlButton::Menu, "Menu (M)");
-                        // `R` re-deals a solo table only; a shared round is
-                        // restarted by the host, from the lobby.
-                        if !session.shared {
-                            row.spawn(ui_text("R deals a new game", 13.0, TEXT_FAINT));
-                        }
-                    });
-            });
-        });
+                Children [
+                    @control_button(ControlButton::Menu, "Menu (M)")
+                    --
+                    {redeal}
+                ]
+            ]
+        ]
+    });
 }
 
 fn sync_status(session: Res<Session>, mut text: Query<&mut Text, With<StatusText>>) {
@@ -1276,26 +1275,41 @@ fn ai_one_shot(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bevy::ecs::system::RunSystemOnce;
+    use checkers_bevy::replay::TraceMarker;
 
     /// Leaving for the lobby must leave a camera alive: the lobby renders and
     /// picks through it. A teardown that took the camera with it left the
-    /// screen on the round's last frame — indistinguishable from a hang.
+    /// screen on the round's last frame — indistinguishable from a hang. And
+    /// everything the round drew must go with it.
     #[test]
     fn leaving_the_round_leaves_a_camera() {
-        let mut world = World::new();
+        let mut app = App::new();
+        app.add_plugins((
+            TaskPoolPlugin::default(),
+            AssetPlugin::default(),
+            bevy::scene::ScenePlugin,
+            bevy::state::app::StatesPlugin,
+        ))
+        .insert_state(AppState::InGame)
+        .add_systems(OnExit(AppState::InGame), close_record_viewer);
+        app.update();
 
+        let world = app.world_mut();
         let camera = world.spawn(Camera2d).id();
         let hole = world.spawn(HoleMarker).id();
         let piece = world.spawn(PieceMarker).id();
         let dot = world.spawn(Overlay).id();
+        let ring = world.spawn(CampMarker).id();
         let trace = world.spawn(TraceMarker).id();
-        let hud = world.spawn(HudUi).id();
         let card = world.spawn(GameOverUi).id();
+        let hud = world.spawn_scene(status_panel()).unwrap().id();
 
-        world.run_system_once(exit_round_teardown).unwrap();
-        world.flush();
+        world
+            .resource_mut::<NextState<AppState>>()
+            .set(AppState::Lobby);
+        app.update();
 
+        let world = app.world();
         assert!(
             world.get_entity(camera).is_ok(),
             "the lobby's camera must survive the teardown"
@@ -1304,6 +1318,7 @@ mod tests {
             (hole, "board meshes"),
             (piece, "pieces"),
             (dot, "highlights"),
+            (ring, "the camp rings"),
             (trace, "the trace"),
             (hud, "the HUD"),
             (card, "the game-over card"),
