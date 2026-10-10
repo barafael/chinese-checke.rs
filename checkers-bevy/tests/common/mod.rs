@@ -7,12 +7,17 @@
 use bevy::input::ButtonState;
 use bevy::input::InputPlugin;
 use bevy::input::keyboard::{Key, KeyboardInput};
+use bevy::input_focus::{InputDispatchPlugin, InputFocusPlugin};
+use bevy::picking::events::{PointerRelease, PointerState};
 use bevy::prelude::*;
+use bevy::scene::ScenePlugin;
 use bevy::state::app::StatesPlugin;
-use bevy::ui::Pressed;
-use bevy::ui_widgets::Button;
+use bevy::text::TextPlugin;
+use bevy::ui_widgets::{Activate, TextInputPlugin};
+use bevy::window::{ExitCondition, PrimaryWindow};
 use checkers_bevy::lobby::{
-    ChosenVariants, CornerCommand, LobbyButton, LobbyStatus, PendingClaim, SelectedCorner, Table,
+    self, ChosenVariants, CornerCommand, LobbyButton, LobbyStatus, PendingClaim, SelectedCorner,
+    Table,
 };
 use checkers_bevy::{AppState, Session};
 use checkers_core::geometry::Coord;
@@ -30,10 +35,37 @@ pub fn headless_app() -> App {
     app
 }
 
-/// [`headless_app`] with the resources the lobby's own systems work on.
+/// Bevy's text input, run headless: input focus and the dispatch of keys to
+/// the focused field, the text pipeline that applies the edits, and the few
+/// resources its systems read that a real window and pointer would bring.
+/// Plus the primary window, which keys go to while no field is focused, and
+/// scenes, which the fields are spawned from.
+pub fn text_input(app: &mut App) {
+    app.add_plugins((
+        AssetPlugin::default(),
+        ScenePlugin,
+        WindowPlugin {
+            primary_window: None,
+            exit_condition: ExitCondition::DontExit,
+            ..default()
+        },
+        InputFocusPlugin,
+        InputDispatchPlugin,
+        TextPlugin,
+        TextInputPlugin,
+    ))
+    .add_message::<PointerRelease>()
+    .init_resource::<PointerState>()
+    .init_resource::<UiScale>();
+    app.world_mut().spawn((Window::default(), PrimaryWindow));
+}
+
+/// [`headless_app`] with the resources the lobby's own systems work on, and
+/// its clicks reported the way the app reports them.
 pub fn lobby_app() -> App {
     let mut app = headless_app();
-    app.init_resource::<Session>()
+    app.add_plugins(lobby::clicks_plugin)
+        .init_resource::<Session>()
         .init_resource::<Table>()
         .init_resource::<SelectedCorner>()
         .init_resource::<ChosenVariants>()
@@ -43,11 +75,17 @@ pub fn lobby_app() -> App {
     app
 }
 
-/// A key message as the window sends it, with layout-aware `text`.
+/// A key message as the window sends it, with layout-aware `text`, and the
+/// logical key a text field reads its editing keys from.
 pub fn key_message(key: KeyCode, state: ButtonState, text: Option<&str>) -> KeyboardInput {
+    let logical_key = match key {
+        KeyCode::Enter | KeyCode::NumpadEnter => Key::Enter,
+        KeyCode::Escape => Key::Escape,
+        _ => Key::Character(text.unwrap_or("x").into()),
+    };
     KeyboardInput {
         key_code: key,
-        logical_key: Key::Character("x".into()),
+        logical_key,
         state,
         text: text.map(Into::into),
         repeat: false,
@@ -56,8 +94,7 @@ pub fn key_message(key: KeyCode, state: ButtonState, text: Option<&str>) -> Keyb
 }
 
 /// Press a key the way the window does: by sending a [`KeyboardInput`] message
-/// (down, a frame, up). (Bevy 0.19 renamed buffered events to messages, hence
-/// `write_message`.)
+/// (down, a frame, up).
 ///
 /// Not by calling `ButtonInput::press` directly. `InputPlugin` runs
 /// `keyboard_input_system` in `PreUpdate`, and that begins by clearing
@@ -84,13 +121,20 @@ pub fn digit_key(corner: usize) -> KeyCode {
     }
 }
 
-/// Click a lobby button. `handle_buttons` reads `(&Pressed, &LobbyButton)`
-/// with an `Added` filter, so a click is a button that is `Pressed`
-/// for one frame and then stood down again.
+/// Click a lobby button: the [`Activate`] a completed click fires on the
+/// button, which the app reports to `handle_buttons` as the button's
+/// [`LobbyButton`] message.
 pub fn click(app: &mut App, tag: LobbyButton) {
-    let button = app.world_mut().spawn((Button, Pressed, tag)).id();
+    activate(app, tag);
+}
+
+/// Fire [`Activate`] on a button carrying `tag`, as a completed click does,
+/// and run the frame that reads it.
+pub fn activate(app: &mut App, tag: impl Component) {
+    let button = app.world_mut().spawn(tag).id();
+    app.world_mut().trigger(Activate { entity: button });
     app.update();
-    app.world_mut().entity_mut(button).remove::<Pressed>();
+    app.world_mut().despawn(button);
 }
 
 /// Issue a corner command: select the corner with its digit key, then press

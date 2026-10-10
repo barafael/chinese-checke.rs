@@ -25,21 +25,25 @@
 use bevy::asset::RenderAssetUsages;
 use bevy::ecs::system::SystemParam;
 use bevy::image::Image;
-use bevy::input::ButtonState;
 use bevy::input::InputSystems;
 use bevy::input::keyboard::KeyboardInput;
+use bevy::input_focus::tab_navigation::TabIndex;
+use bevy::input_focus::{
+    AcquireFocus, FocusCause, FocusGained, FocusedInput, InputFocus, InputFocusSystems,
+};
 use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+use bevy::text::{EditableText, TextCursorStyle, TextEdit};
 use bevy::ui::Pressed;
 use bevy::ui::RelativeCursorPosition;
-use bevy::ui_widgets::Button;
+use bevy::ui_widgets::{Button, TextInput};
 use bevy_matchbox::prelude::*;
 use checkers_net::{CH_RELIABLE, NetMsg, NetState, RoomId, Seat, broadcast, decode};
 
 use crate::board_view::player_colour;
 use crate::setup::Seating;
-use crate::ui::ui_text;
+use crate::ui::{button_messages, ui_text};
 use crate::{AppState, Session};
 use checkers_core::position::Player;
 use checkers_core::rules::Variants;
@@ -50,12 +54,9 @@ fn publish_roster(socket: &mut MatchboxSocket, net: &NetState) {
     broadcast(socket, &net.peers, &NetMsg::Roster(net.seats.clone()));
 }
 
-/// Marker for everything spawned by the lobby, so leaving despawns it wholesale.
-#[derive(Component)]
-pub struct LobbyUi;
-
-/// Every clickable control on the screen bar the star's own hit area.
-#[derive(Component, Clone, Copy, PartialEq, Eq)]
+/// Every clickable control on the screen bar the star's own hit area. A
+/// press arrives as this same value, as a message (see [`button_messages`]).
+#[derive(Component, Message, Clone, Copy, PartialEq, Eq)]
 pub enum LobbyButton {
     Start,
     /// Fill the table with a symmetric setup. Solo-only: a shared table is
@@ -70,12 +71,12 @@ pub enum LobbyButton {
 /// Rows only the sequencing authority (the host, or any solo table) may use:
 /// starting the game, the house rules, seating engines. Hidden from guests,
 /// who could only press them to be refused.
-#[derive(Component)]
+#[derive(Component, Default, Clone)]
 pub struct HostOnly;
 
 /// Rows that only make sense before the room is shared: the seating presets.
 /// In a shared room every corner is claimed on the star instead.
-#[derive(Component)]
+#[derive(Component, Default, Clone)]
 pub struct SoloOnly;
 
 /// What a [`LobbyButton::CornerAction`] press asks for, against the selected
@@ -88,40 +89,49 @@ pub enum CornerCommand {
 }
 
 /// One star petal: which camp it stands for. Clicking selects the corner.
-#[derive(Component)]
+#[derive(Component, Default, Clone)]
 pub struct CornerPetal(pub usize);
 
 /// One star petal's text, carrying its corner so the label can follow the
 /// state without being rebuilt.
-#[derive(Component)]
+#[derive(Component, Default, Clone)]
 pub struct CornerText(pub usize);
 
-#[derive(Component)]
+#[derive(Component, Default, Clone)]
 struct RosterText;
 
-/// Which editor an on-screen text input drives.
-#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+/// Which value a text field edits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FieldKind {
     Room,
     Name,
 }
 
-/// An always-visible text input box: click to focus (or its key), Enter
-/// commits, Esc leaves. The value shown is driven by the `draw_*` systems.
-#[derive(Component)]
-pub struct TextInput(pub FieldKind);
+/// A lobby text field: Bevy's [`TextInput`] over an [`EditableText`], editing
+/// the room or the player's name. A click or the field's key focuses it, Enter
+/// commits, Esc leaves.
+///
+/// While a field holds the keyboard every key is its own and the rest of the
+/// app hears none of them (see [`hold_keys_for_field`]), because the
+/// alternative is that typing a room named "solo" starts a game on the `s`.
+/// Only a commit changes anything: a field that lets go of the keyboard shows
+/// the committed value again, so an abandoned edit cannot leave the socket
+/// pointing somewhere unintended.
+#[derive(Component, Clone, Copy)]
+pub struct InputField(pub FieldKind);
 
 /// The name row's accept button: commits the name field.
-#[derive(Component)]
+#[derive(Component, Message, Default, Clone, Copy)]
 pub struct ApplyName;
 
-/// The value text inside an input box.
-#[derive(Component)]
-struct InputText(FieldKind);
-
-/// The error line under an input box.
-#[derive(Component)]
+/// The error line under a field.
+#[derive(Component, Clone)]
 struct InputError(FieldKind);
+
+/// Why the last commit was refused. Shown beneath its field for as long as
+/// that field holds the keyboard, with what was typed intact, to be corrected.
+#[derive(Resource, Debug, Default)]
+pub struct FieldRefusal(pub Option<(FieldKind, String)>);
 
 /// One corner's state, as configured locally. Only the solo setup writes this
 /// resource; a networked table is read from the roster's seats instead.
@@ -165,41 +175,6 @@ pub struct LobbyStatus(pub String);
 #[derive(Resource, Debug, Clone, Copy, Default)]
 pub struct PendingClaim(pub Option<Option<u32>>);
 
-/// Which field holds the keyboard, and what has been typed into it.
-///
-/// Editing is *modal*: while a field is focused every key belongs to it and
-/// the rest of the app hears none of them, because the alternative is that
-/// typing a room named "solo" starts a game on the `s`. A mode is the smaller
-/// evil here, and `Esc` always leaves it. Only one field can hold the
-/// keyboard, so one editor serves both.
-#[derive(Resource, Default)]
-pub struct FieldEdit {
-    /// The field being edited; `None` while the keyboard belongs to the lobby.
-    pub focus: Option<FieldKind>,
-    /// What has been typed so far. Only committed on Enter, so an abandoned
-    /// edit cannot leave the socket pointing somewhere unintended.
-    pub buffer: String,
-    /// Why the last commit was refused, shown beneath the field.
-    pub error: String,
-}
-
-impl FieldEdit {
-    /// Focus `kind`, seeded with its current value, so a small change does not
-    /// mean retyping the whole thing.
-    pub fn open(&mut self, kind: FieldKind, value: &str) {
-        self.focus = Some(kind);
-        self.buffer = value.to_string();
-        self.error.clear();
-    }
-
-    /// Leave the field, dropping whatever was typed.
-    pub fn close(&mut self) {
-        self.focus = None;
-        self.buffer.clear();
-        self.error.clear();
-    }
-}
-
 /// Long enough for a name, short enough for a roster line and a corner label.
 pub const NAME_MAX_LEN: usize = 24;
 
@@ -238,7 +213,7 @@ pub fn plugin(app: &mut App) {
         .init_resource::<LobbyStatus>()
         .init_resource::<PendingClaim>()
         .init_resource::<checkers_net::Signaling>()
-        .add_plugins(fields_plugin)
+        .add_plugins((clicks_plugin, fields_plugin))
         .add_systems(
             OnEnter(AppState::Lobby),
             // The socket opens once per room, not once per lobby entry:
@@ -246,7 +221,6 @@ pub fn plugin(app: &mut App) {
             // exist before the star can reference it.
             (checkers_net::open_socket, ensure_sector_art, spawn).chain(),
         )
-        .add_systems(OnExit(AppState::Lobby), despawn)
         .add_systems(
             Update,
             (
@@ -259,11 +233,8 @@ pub fn plugin(app: &mut App) {
                     // After the roster is fresh: a name that clashes with an
                     // earlier peer's is replaced before anyone sees two.
                     settle_name_clash,
-                    // The lobby's own clicks stand down while a field holds
-                    // the keyboard; its keys are already the field's.
-                    focus_input_fields.run_if(not_editing),
-                    (select_corner, handle_buttons).run_if(not_editing),
-                    apply_name,
+                    select_corner,
+                    handle_buttons,
                     broadcast_cursor,
                 )
                     .chain()
@@ -283,7 +254,6 @@ pub fn plugin(app: &mut App) {
                         sync_corner_styles,
                         draw_corner_labels,
                         draw_roster,
-                        draw_fields,
                         sync_remote_cursors,
                     )
                         .chain(),
@@ -294,29 +264,37 @@ pub fn plugin(app: &mut App) {
         );
 }
 
-/// The text fields' editor, registered as the app runs it. Its own plugin so
-/// the field tests run this exact registration rather than a copy of it.
-pub fn fields_plugin(app: &mut App) {
-    app.init_resource::<FieldEdit>()
-        // A field left open when the game starts must not come back focused,
-        // swallowing the lobby's keys until someone thinks to press Esc.
-        .add_systems(OnExit(AppState::Lobby), close_field)
-        // The focused field reads its keys before anything else can: right
-        // after Bevy turns the window's key messages into `ButtonInput`, so
-        // the presses it takes are gone before `Update` runs.
-        .add_systems(
-            PreUpdate,
-            edit_field
-                .after(InputSystems)
-                .run_if(in_state(AppState::Lobby)),
-        );
+/// The lobby's buttons and the star, reported as messages: a press on a
+/// [`LobbyButton`] arrives as that `LobbyButton`, a press on the star as
+/// [`StarHit`]. Its own plugin so the flow tests click through the same path.
+pub fn clicks_plugin(app: &mut App) {
+    app.add_plugins((button_messages::<LobbyButton>, button_messages::<StarHit>));
 }
 
-/// Whether the lobby has the keyboard (and the mouse) to itself: no field is
-/// focused. Keys typed into a field never reach `Update` at all (see
-/// [`edit_field`]); this keeps the lobby's clicks from acting mid-edit too.
-pub fn not_editing(edit: Res<FieldEdit>) -> bool {
-    edit.focus.is_none()
+/// The text fields: their keyboard, their commits, and the Apply button.
+/// Registered as the app runs it, in its own plugin so the field tests run this
+/// exact registration rather than a copy of it.
+pub fn fields_plugin(app: &mut App) {
+    app.add_plugins(button_messages::<ApplyName>)
+        .init_resource::<FieldRefusal>()
+        // The field is despawned with the lobby; the keyboard must not stay
+        // with it.
+        .add_systems(OnExit(AppState::Lobby), release_field)
+        // After Bevy turns the window's key messages into `ButtonInput`, and
+        // before the same keys are handed to the focused field: the presses a
+        // field takes are gone before anything in `Update` looks.
+        .add_systems(
+            PreUpdate,
+            hold_keys_for_field
+                .after(InputSystems)
+                .before(InputFocusSystems::Dispatch),
+        )
+        .add_systems(
+            Update,
+            (focus_input_fields, apply_name, draw_fields)
+                .chain()
+                .run_if(in_state(AppState::Lobby)),
+        );
 }
 
 /// Paint every non-petal button: selected mode, hover, press.
@@ -372,11 +350,11 @@ fn sync_button_styles(
 /// well so it is obvious the keyboard is captured; an unfocused one brightens
 /// its border on hover, so the box reads as clickable.
 fn sync_input_styles(
-    edit: Res<FieldEdit>,
-    mut inputs: Query<(&Hovered, &TextInput, &mut BackgroundColor, &mut BorderColor)>,
+    focus: Res<InputFocus>,
+    mut inputs: Query<(Entity, &Hovered, &mut BackgroundColor, &mut BorderColor), With<InputField>>,
 ) {
-    for (hovered, input, mut bg, mut border) in inputs.iter_mut() {
-        let (well, edge) = if edit.focus == Some(input.0) {
+    for (field, hovered, mut bg, mut border) in inputs.iter_mut() {
+        let (well, edge) = if focus.get() == Some(field) {
             (Color::srgb(0.15, 0.15, 0.19), CHOSEN)
         } else if hovered.get() {
             (IDLE, HOVER)
@@ -413,55 +391,56 @@ fn visible_if(shown: bool) -> Visibility {
 }
 
 /// One button. Factored out because the lobby spawns rows of them and the
-/// padding, radius, and text styling must not drift between the rows.
-fn button(parent: &mut ChildSpawnerCommands, label: &str, tag: impl Bundle) {
-    sized_button(parent, label, (14.0, 8.0), 15.0, tag);
+/// padding, radius, and text styling must not drift between the rows. What
+/// the button *is* — its [`LobbyButton`] or [`ApplyName`] tag — is patched on
+/// by the caller.
+fn button(label: impl Into<String>) -> impl Scene {
+    sized_button(label, (14.0, 8.0), 15.0)
 }
 
 /// A [`button`] one size smaller, to sit level with a text field: the name
 /// row's Apply.
-fn small_button(parent: &mut ChildSpawnerCommands, label: &str, tag: impl Bundle) {
-    sized_button(parent, label, (10.0, 6.0), 14.0, tag);
+fn small_button(label: impl Into<String>) -> impl Scene {
+    sized_button(label, (10.0, 6.0), 14.0)
 }
 
 /// The shape every button shares, at a given padding and font size.
 fn sized_button(
-    parent: &mut ChildSpawnerCommands,
-    label: &str,
+    label: impl Into<String>,
     (pad_x, pad_y): (f32, f32),
     font_size: f32,
-    tag: impl Bundle,
-) {
-    parent
-        .spawn((
-            Button,
-            Node {
-                padding: UiRect::axes(Val::Px(pad_x), Val::Px(pad_y)),
-                border_radius: BorderRadius::all(Val::Px(5.0)),
-                ..default()
-            },
-            BackgroundColor(IDLE),
-            tag,
-        ))
-        .with_child(ui_text(label, font_size, TEXT));
+) -> impl Scene {
+    let label = label.into();
+    bsn! {
+        Button
+        Hovered
+        Node {
+            padding: UiRect::axes(px(pad_x), px(pad_y)),
+            border_radius: BorderRadius::all(px(5)),
+        }
+        BackgroundColor(IDLE)
+        Children [ @ui_text(label, font_size, TEXT) ]
+    }
 }
 
 /// A row of controls, centred on one line.
-fn control_row() -> Node {
-    Node {
-        column_gap: Val::Px(10.0),
-        align_items: AlignItems::Center,
-        ..default()
+fn control_row() -> impl Scene {
+    bsn! {
+        Node {
+            column_gap: px(10),
+            align_items: AlignItems::Center,
+        }
     }
 }
 
 /// A centred column of rows, `gap` pixels apart.
-fn column(gap: f32) -> Node {
-    Node {
-        flex_direction: FlexDirection::Column,
-        align_items: AlignItems::Center,
-        row_gap: Val::Px(gap),
-        ..default()
+fn column(gap: f32) -> impl Scene {
+    bsn! {
+        Node {
+            flex_direction: FlexDirection::Column,
+            align_items: AlignItems::Center,
+            row_gap: px(gap),
+        }
     }
 }
 
@@ -469,44 +448,66 @@ fn column(gap: f32) -> Node {
 /// the focusing key for the room, the Apply button and focusing key for the
 /// name — and beneath it the line for a refused commit. Enter commits, Esc
 /// leaves; visuals follow in [`sync_input_styles`].
-fn field_row(
-    parent: &mut ChildSpawnerCommands,
-    label: &str,
-    kind: FieldKind,
-    key: &str,
-    apply: bool,
-) {
-    parent.spawn(control_row()).with_children(|row| {
-        row.spawn(ui_text(label, 14.0, MUTED));
-        input_box(row, kind);
-        if apply {
-            small_button(row, "Apply", ApplyName);
-        }
-        row.spawn(ui_text(key, 14.0, MUTED));
-    });
-    parent.spawn((
-        ui_text("", 14.0, Color::srgb(0.85, 0.35, 0.35)),
-        InputError(kind),
-    ));
+fn field_row(label: &str, kind: FieldKind, key: &str, apply: bool) -> impl SceneList {
+    let apply: Vec<_> = apply
+        .then(|| bsn! { @small_button("Apply") ApplyName on(keep_focus) })
+        .into_iter()
+        .collect();
+    let error = InputError(kind);
+    bsn_list! {
+        @control_row()
+        Children [
+            @ui_text(label, 14.0, MUTED)
+            --
+            @input_field(kind)
+            --
+            {apply}
+            --
+            @ui_text(key, 14.0, MUTED)
+        ]
+        --
+        @ui_text("", 14.0, Color::srgb(0.85, 0.35, 0.35))
+        error
+    }
 }
 
-/// A text input box, shared by every field row.
-fn input_box(parent: &mut ChildSpawnerCommands, kind: FieldKind) {
-    parent
-        .spawn((
-            Button,
-            Node {
-                width: Val::Px(240.0),
-                padding: UiRect::axes(Val::Px(10.0), Val::Px(6.0)),
-                border: UiRect::all(Val::Px(1.0)),
-                border_radius: BorderRadius::all(Val::Px(5.0)),
-                ..default()
-            },
-            BackgroundColor(IDLE),
-            BorderColor::all(BORDER),
-            TextInput(kind),
-        ))
-        .with_child((ui_text("", 14.0, TEXT), InputText(kind)));
+/// A text field, shared by every field row: Bevy's text input, capped at what
+/// the field can commit, so typing stops at the limit rather than being told
+/// afterwards that it was all too long.
+pub fn input_field(kind: FieldKind) -> impl Scene {
+    let field = InputField(kind);
+    let text = EditableText {
+        max_characters: Some(kind.max_len()),
+        ..default()
+    };
+    bsn! {
+        field
+        TextInput
+        text
+        // Pointer focus lands only on what has a tab index.
+        TabIndex(0)
+        Hovered
+        TextLayout::no_wrap()
+        TextFont { font_size: FontSize::Px(14.0) }
+        TextColor(TEXT)
+        TextCursorStyle
+        Node {
+            width: px(240),
+            padding: UiRect::axes(px(10), px(6)),
+            border: UiRect::all(px(1)),
+            border_radius: BorderRadius::all(px(5)),
+        }
+        BackgroundColor(IDLE)
+        BorderColor::all(BORDER)
+        on(commit_on_enter)
+        on(announce_editing)
+    }
+}
+
+/// Apply acts on the name field's text, so pressing it must not first take
+/// the keyboard from the field, as a press anywhere else does.
+fn keep_focus(mut acquire: On<AcquireFocus>) {
+    acquire.propagate(false);
 }
 
 /// The shared palette. `CHOSEN` marks the button whose mode is active, with
@@ -529,117 +530,126 @@ const BORDER: Color = Color::srgb(0.35, 0.35, 0.40);
 /// enough to fit a 600px-tall window by construction, which a single stacked
 /// column never could.
 fn spawn(mut commands: Commands, art: Res<SectorArt>) {
-    commands
-        .spawn((
-            Node {
-                width: Val::Percent(100.0),
-                height: Val::Percent(100.0),
-                flex_direction: FlexDirection::Row,
-                align_items: AlignItems::Center,
-                justify_content: JustifyContent::Center,
-                column_gap: Val::Px(32.0),
-                padding: UiRect::all(Val::Px(24.0)),
-                ..default()
-            },
-            LobbyUi,
-        ))
-        .with_children(|root| {
+    commands.spawn_scene(lobby(&art));
+}
+
+fn lobby(art: &SectorArt) -> impl Scene {
+    // Presets are shortcuts for the symmetric setups; they fill the whole
+    // table, so what is configured and what the shortcut leaves can never
+    // silently disagree.
+    let presets: Vec<_> = Seating::ALL
+        .into_iter()
+        .map(|seating| {
+            let preset = LobbyButton::Preset(seating);
+            bsn! { @button(format!("Preset {}", seating.label())) preset }
+        })
+        .collect();
+    let human = LobbyButton::CornerAction(CornerCommand::Human);
+    let cpu = LobbyButton::CornerAction(CornerCommand::Cpu);
+    let cancel = LobbyButton::CornerAction(CornerCommand::Off);
+    let (foreign, start) = (LobbyButton::ForeignCamps, LobbyButton::Start);
+    let scope = DespawnOnExit(AppState::Lobby);
+
+    bsn! {
+        scope
+        Node {
+            width: percent(100),
+            height: percent(100),
+            flex_direction: FlexDirection::Row,
+            align_items: AlignItems::Center,
+            justify_content: JustifyContent::Center,
+            column_gap: px(32),
+            padding: UiRect::all(px(24)),
+        }
+        Children [
             // Left: the setup itself.
-            root.spawn(column(12.0)).with_children(|col| {
-                header(col, "Lobby");
-                col.spawn(ui_text(
+            @column(12.0)
+            Children [
+                @header("Lobby")
+                --
+                @ui_text(
                     "The star is the setup: click a corner, then set who sits there.",
                     14.0,
-                    MUTED,
-                ));
-
+                    MUTED
+                )
+                --
                 // The hex star. Wedges are out-facing triangle sectors over a
                 // single hit area; digits 1..6 select the same corners.
-                star(col, &art);
-            });
-
+                @star(art)
+            ]
+            --
             // Right: what to do with it.
-            root.spawn(column(10.0)).with_children(|col| {
+            @column(10.0)
+            Children [
                 // Who I am and where I am: the room to join or share, and the
                 // name the roster shows. Both are typed — on desktop they are
                 // the only way in — so each row is a real text field.
-                header(col, "General");
-
+                @header("General")
+                --
                 // The room field. Enter joins: the loopback to the socket is
                 // a lobby re-enter, which also rewrites the page URL (web).
-                field_row(col, "Room", FieldKind::Room, "R", false);
-
+                {field_row("Room", FieldKind::Room, "R", false)}
+                --
                 // The player-name field, same pattern; Apply commits it.
-                field_row(col, "Name", FieldKind::Name, "N", true);
-
-                header(col, "Table");
-                // Presets are shortcuts for the symmetric setups; they fill the
-                // whole table, so what is configured and what the shortcut
-                // leaves can never silently disagree. Solo-only: a shared
-                // table is claimed corner by corner on the star.
-                col.spawn((control_row(), SoloOnly)).with_children(|row| {
-                    for seating in Seating::ALL {
-                        let label = format!("Preset {}", seating.label());
-                        button(row, &label, LobbyButton::Preset(seating));
-                    }
-                });
-
+                {field_row("Name", FieldKind::Name, "N", true)}
+                --
+                @header("Table")
+                --
+                // Solo-only: a shared table is claimed corner by corner on
+                // the star.
+                @control_row()
+                SoloOnly
+                Children [ {presets} ]
+                --
                 // What to do with the selected corner. [`sync_corner_actions`]
                 // shows exactly one of these rows: a free corner offers
                 // seating, a claimed corner offers cancelling it.
-                col.spawn(column(10.0)).with_children(|corner| {
+                @column(10.0)
+                Children [
                     // Seat a free corner. Seating an engine is the host's
                     // call alone — the engine runs in the host's process —
                     // so guests never see the button.
-                    corner
-                        .spawn((control_row(), SeatButtons))
-                        .with_children(|row| {
-                            let human = LobbyButton::CornerAction(CornerCommand::Human);
-                            let cpu = LobbyButton::CornerAction(CornerCommand::Cpu);
-                            button(row, "Human", human);
-                            button(row, "Computer", (cpu, HostOnly));
-                        });
-
+                    @control_row()
+                    SeatButtons
+                    Children [
+                        @button("Human") human
+                        --
+                        @button("Computer") cpu HostOnly
+                    ]
+                    --
                     // Cancel a claimed corner — yours (release), another
                     // player's (host un-seats), or an engine's (host removes
                     // it). [`corner_effect`] picks the right move.
-                    let cancel = LobbyButton::CornerAction(CornerCommand::Off);
-                    corner
-                        .spawn((control_row(), CancelSeat))
-                        .with_children(|row| button(row, "Cancel Seat", cancel));
-                });
-
+                    @control_row()
+                    CancelSeat
+                    Children [ @button("Cancel Seat") cancel ]
+                ]
+                --
                 // House rules, one toggle per switch. Only the host decides
                 // them, so only the host even sees them.
-                col.spawn((
-                    Node {
-                        margin: UiRect::top(Val::Px(6.0)),
-                        ..default()
-                    },
-                    HostOnly,
-                ))
-                .with_child(ui_text("Rules", 16.0, Color::srgb(0.7, 0.7, 0.76)));
-                let toggle_row = Node {
-                    column_gap: Val::Px(10.0),
-                    ..default()
-                };
-                col.spawn((toggle_row, HostOnly))
-                    .with_children(|row| button(row, "No foreign rest", LobbyButton::ForeignCamps));
-
+                Node { margin: UiRect::top(px(6)) }
+                HostOnly
+                Children [ @ui_text("Rules", 16.0, Color::srgb(0.7, 0.7, 0.76)) ]
+                --
+                Node { column_gap: px(10) }
+                HostOnly
+                Children [ @button("No foreign rest") foreign ]
+                --
                 // The roster: who is here and where they sit.
-                col.spawn((ui_text("", 14.0, Color::srgb(0.88, 0.88, 0.9)), RosterText));
-
+                @ui_text("", 14.0, Color::srgb(0.88, 0.88, 0.9))
+                RosterText
+                --
                 // The host starts the game — the one button guests must not
                 // even see, since a shared start belongs to the host alone.
-                let start_row = Node {
-                    column_gap: Val::Px(10.0),
-                    margin: UiRect::top(Val::Px(4.0)),
-                    ..default()
-                };
-                col.spawn((start_row, HostOnly))
-                    .with_children(|row| button(row, "Start (Enter)", LobbyButton::Start));
-            });
-        });
+                Node {
+                    column_gap: px(10),
+                    margin: UiRect::top(px(4)),
+                }
+                HostOnly
+                Children [ @button("Start (Enter)") start ]
+            ]
+        ]
+    }
 }
 
 /// Is corner `i` claimed? Solo tables read the local [`Table`]; shared rooms
@@ -654,11 +664,11 @@ fn corner_is_filled(net: &NetState, table: &Table, i: usize) -> bool {
 
 /// Marker on the Human / Computer row: shown while the selected corner is
 /// free, so it offers seating.
-#[derive(Component)]
+#[derive(Component, Default, Clone)]
 struct SeatButtons;
 
 /// Marker on the Cancel Seat row: shown while the selected corner is claimed.
-#[derive(Component)]
+#[derive(Component, Default, Clone)]
 struct CancelSeat;
 
 /// Show exactly one of the two corner rows, according to the selected corner:
@@ -693,12 +703,44 @@ const CURSOR_LINGER_SECS: f64 = 3.0;
 /// (already scaled into this window's logical pixels), where it is drawn
 /// (eased toward the report so it glides rather than jumps), and when it was
 /// last heard from.
-#[derive(Component)]
+#[derive(Component, Clone)]
 pub struct RemoteCursor {
     peer: String,
     target: Vec2,
     display: Vec2,
     last_seen: f64,
+}
+
+/// A remote pointer: a dot in its peer's colour with the peer's name beside
+/// it. Drawn over the lobby but never in its way — a click lands on whatever
+/// is under the dot, not on the dot.
+fn remote_cursor(cursor: RemoteCursor, net: &NetState) -> impl Scene {
+    let (colour, label) = cursor_identity(net, &cursor.peer);
+    let (left, top) = (px(cursor.display.x), px(cursor.display.y));
+    let scope = DespawnOnExit(AppState::Lobby);
+    bsn! {
+        scope
+        cursor
+        Pickable::IGNORE
+        Node {
+            position_type: PositionType::Absolute,
+            left: left,
+            top: top,
+            width: px(10),
+            height: px(10),
+            border_radius: BorderRadius::all(px(5)),
+        }
+        BackgroundColor(colour)
+        Children [
+            @ui_text(label, 12.0, colour)
+            Pickable::IGNORE
+            Node {
+                position_type: PositionType::Absolute,
+                left: px(12),
+                top: px(-4),
+            }
+        ]
+    }
 }
 
 /// Broadcast this pointer at a lazy 10 Hz while the lobby is up, as
@@ -770,8 +812,8 @@ fn sync_remote_cursors(
     let now = time.elapsed_secs_f64();
     for (mut cursor, mut node, mut bg, mut vis, kids) in cursors.iter_mut() {
         cursor.display = cursor.display.lerp(cursor.target, alpha);
-        node.left = Val::Px(cursor.display.x);
-        node.top = Val::Px(cursor.display.y);
+        node.left = px(cursor.display.x);
+        node.top = px(cursor.display.y);
         let want = if now - cursor.last_seen > CURSOR_LINGER_SECS {
             Visibility::Hidden
         } else {
@@ -792,8 +834,8 @@ fn sync_remote_cursors(
 }
 
 /// A section heading in the lobby.
-fn header(parent: &mut ChildSpawnerCommands, label: &str) {
-    parent.spawn(ui_text(label, 20.0, Color::srgb(0.92, 0.92, 0.95)));
+fn header(label: &str) -> impl Scene {
+    ui_text(label, 20.0, Color::srgb(0.92, 0.92, 0.95))
 }
 
 /// Star geometry: the container the wedges and their labels live in.
@@ -970,22 +1012,20 @@ const OUTLINE_OFFSETS: [Vec2; 8] = [
 /// [`draw_corner_labels`] writes it into every one via the [`CornerText`]
 /// marker on the stack. Each copy stretches the stack's width and centres its
 /// glyphs, so the copies cannot drift apart.
-fn outlined_line(parent: &mut ChildSpawnerCommands, tag: usize, font_size: f32, fill: Color) {
-    parent
-        .spawn((
-            Node {
-                width: Val::Percent(100.0),
-                height: Val::Px(font_size * 1.3),
-                ..default()
-            },
-            CornerText(tag),
-        ))
-        .with_children(|stack| {
-            for offset in OUTLINE_OFFSETS {
-                outlined_copy(stack, offset, font_size, Color::BLACK);
-            }
-            outlined_copy(stack, Vec2::ZERO, font_size, fill);
-        });
+fn outlined_line(tag: usize, font_size: f32, fill: Color) -> impl Scene {
+    let copies: Vec<_> = OUTLINE_OFFSETS
+        .into_iter()
+        .map(|offset| outlined_copy(offset, font_size, Color::BLACK))
+        .chain([outlined_copy(Vec2::ZERO, font_size, fill)])
+        .collect();
+    bsn! {
+        Node {
+            width: percent(100),
+            height: px(font_size * 1.3),
+        }
+        CornerText(tag)
+        Children [ {copies} ]
+    }
 }
 
 /// One copy of an outlined label: a full-size flex box, shifted by `offset`,
@@ -994,109 +1034,125 @@ fn outlined_line(parent: &mut ChildSpawnerCommands, tag: usize, font_size: f32, 
 /// whole line slides by the outline offset, so the glyphs stay centred — the
 /// flex centring below is exact and needs no knowledge of the font's line
 /// metrics.
-fn outlined_copy(stack: &mut ChildSpawnerCommands, offset: Vec2, font_size: f32, colour: Color) {
-    stack
-        .spawn(Node {
+fn outlined_copy(offset: Vec2, font_size: f32, colour: Color) -> impl Scene {
+    bsn! {
+        Node {
             position_type: PositionType::Absolute,
-            left: Val::Px(offset.x),
-            right: Val::Px(-offset.x),
-            top: Val::Px(offset.y),
-            bottom: Val::Px(-offset.y),
+            left: px(offset.x),
+            right: px(-offset.x),
+            top: px(offset.y),
+            bottom: px(-offset.y),
             display: Display::Flex,
             justify_content: JustifyContent::Center,
             align_items: AlignItems::Center,
-            ..default()
-        })
-        .with_child((
-            ui_text("", font_size, colour),
-            TextLayout::new(Justify::Center, LineBreak::NoWrap),
-        ));
+        }
+        Children [
+            @ui_text("", font_size, colour)
+            TextLayout::new(Justify::Center, LineBreak::NoWrap)
+        ]
+    }
 }
 
-/// The star: a fixed container holding one out-facing wedge per corner and its
-/// two label lines. The container itself is the only button — hit-testing is
-/// angular, against [`sector_at`] — and the middle stays empty, which is what
-/// makes the star read as a star.
-fn star(parent: &mut ChildSpawnerCommands, art: &SectorArt) {
+/// The star: one button the size of the star, holding one out-facing wedge
+/// per corner and its two label lines. The container itself is the only
+/// button — hit-testing is angular, against [`sector_at`], and a press on a
+/// wedge or a label bubbles up to it — and the middle stays empty, which is
+/// what makes the star read as a star.
+fn star(art: &SectorArt) -> impl Scene {
     let art = art
         .0
         .as_ref()
         .expect("sector art is built before the lobby spawns");
-    let full_star = || Node {
-        position_type: PositionType::Absolute,
-        left: Val::Px(0.0),
-        top: Val::Px(0.0),
-        width: Val::Px(STAR_W),
-        height: Val::Px(STAR_H),
-        ..default()
-    };
-    parent
-        .spawn(Node {
-            width: Val::Px(STAR_W),
-            height: Val::Px(STAR_H),
-            ..default()
+    let fills: Vec<_> = art
+        .fills
+        .iter()
+        .cloned()
+        .enumerate()
+        .map(|(i, image)| bsn! { @full_star() ImageNode { image: image } CornerPetal(i) })
+        .collect();
+    // Over the fills, under the labels; only the selected one shows.
+    let outlines: Vec<_> = art
+        .outlines
+        .iter()
+        .cloned()
+        .enumerate()
+        .map(|(i, image)| {
+            bsn! {
+                @full_star()
+                ImageNode { image: image }
+                Visibility::Hidden
+                CornerOutline(i)
+            }
         })
-        .with_children(|node| {
-            node.spawn((
-                Button,
-                full_star(),
-                StarHit,
-                RelativeCursorPosition::default(),
-            ));
-            for (i, handle) in art.fills.iter().enumerate() {
-                node.spawn((full_star(), ImageNode::new(handle.clone()), CornerPetal(i)));
-            }
-            // Over the fills, under the labels; only the selected one shows.
-            for (i, handle) in art.outlines.iter().enumerate() {
-                node.spawn((
-                    full_star(),
-                    ImageNode::new(handle.clone()),
-                    Visibility::Hidden,
-                    CornerOutline(i),
-                ));
-            }
-            for i in 0..6 {
-                let mid = wedge_centroid(i);
-                node.spawn(Node {
-                    position_type: PositionType::Absolute,
-                    left: Val::Px(mid.x - 55.0),
-                    top: Val::Px(mid.y - 18.0),
-                    width: Val::Px(110.0),
-                    height: Val::Px(36.0),
-                    flex_direction: FlexDirection::Column,
-                    align_items: AlignItems::Center,
-                    justify_content: JustifyContent::Center,
-                    row_gap: Val::Px(1.0),
-                    ..default()
-                })
-                .with_children(|label| {
-                    // White fill over a black border, so the labels stay
-                    // legible over whichever colour the wedge wears.
-                    outlined_line(label, i * 2, 14.0, Color::srgb(0.96, 0.96, 0.97));
-                    outlined_line(label, i * 2 + 1, 11.0, Color::srgb(0.85, 0.85, 0.88));
-                });
-            }
-        });
+        .collect();
+    let labels: Vec<_> = (0..6).map(corner_label).collect();
+    bsn! {
+        Button
+        StarHit
+        RelativeCursorPosition
+        Node {
+            width: px(STAR_W),
+            height: px(STAR_H),
+        }
+        Children [
+            {fills}
+            --
+            {outlines}
+            --
+            {labels}
+        ]
+    }
+}
+
+/// A layer covering the whole star, for the wedge fills and outlines.
+fn full_star() -> impl Scene {
+    bsn! {
+        Node {
+            position_type: PositionType::Absolute,
+            left: px(0),
+            top: px(0),
+            width: px(STAR_W),
+            height: px(STAR_H),
+        }
+    }
+}
+
+/// Corner `i`'s two label lines, centred on its wedge: white fill over a
+/// black border, so they stay legible over whichever colour the wedge wears.
+fn corner_label(i: usize) -> impl Scene {
+    let mid = wedge_centroid(i);
+    bsn! {
+        Node {
+            position_type: PositionType::Absolute,
+            left: px(mid.x - 55.0),
+            top: px(mid.y - 18.0),
+            width: px(110),
+            height: px(36),
+            flex_direction: FlexDirection::Column,
+            align_items: AlignItems::Center,
+            justify_content: JustifyContent::Center,
+            row_gap: px(1),
+        }
+        Children [
+            @outlined_line(i * 2, 14.0, Color::srgb(0.96, 0.96, 0.97))
+            --
+            @outlined_line(i * 2 + 1, 11.0, Color::srgb(0.85, 0.85, 0.88))
+        ]
+    }
 }
 
 /// One wedge's selection outline, visible while its corner is selected.
-#[derive(Component)]
+#[derive(Component, Default, Clone)]
 struct CornerOutline(usize);
 
 /// Marker on the star's single hit area: the whole container is one button,
 /// and clicks are resolved to a corner by angle, not by rectangles.
-#[derive(Component)]
+#[derive(Component, Message, Default, Clone, Copy)]
 pub struct StarHit;
 
 /// Which corner the cursor currently rests on, for wedge shading.
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Eq, Default)]
 struct HoveredCorner(Option<usize>);
-
-fn despawn(mut commands: Commands, ui: Query<Entity, With<LobbyUi>>) {
-    for e in ui.iter() {
-        commands.entity(e).despawn();
-    }
-}
 
 /// What pressing Enter should do.
 ///
@@ -1362,36 +1418,13 @@ pub fn pump_socket(socket: Option<ResMut<MatchboxSocket>>, lobby: LobbyWorld) {
                     cursor.target = pos;
                     cursor.last_seen = now;
                 } else {
-                    let (colour, label) = cursor_identity(&net, &key);
-                    commands
-                        .spawn((
-                            Node {
-                                position_type: PositionType::Absolute,
-                                left: Val::Px(pos.x),
-                                top: Val::Px(pos.y),
-                                width: Val::Px(10.0),
-                                height: Val::Px(10.0),
-                                border_radius: BorderRadius::all(Val::Px(5.0)),
-                                ..default()
-                            },
-                            BackgroundColor(colour),
-                            LobbyUi,
-                            RemoteCursor {
-                                peer: key,
-                                target: pos,
-                                display: pos,
-                                last_seen: now,
-                            },
-                        ))
-                        .with_child((
-                            Node {
-                                position_type: PositionType::Absolute,
-                                left: Val::Px(12.0),
-                                top: Val::Px(-4.0),
-                                ..default()
-                            },
-                            ui_text(label, 12.0, colour),
-                        ));
+                    let cursor = RemoteCursor {
+                        peer: key,
+                        target: pos,
+                        display: pos,
+                        last_seen: now,
+                    };
+                    commands.spawn_scene(remote_cursor(cursor, &net));
                 }
             }
             NetMsg::Start {
@@ -1665,14 +1698,32 @@ pub fn claim_answer(net: &NetState, claim: Option<u32>) -> Option<String> {
     }
 }
 
+/// Clicks on the star, as the wedges they landed on.
+#[derive(SystemParam)]
+pub struct StarClicks<'w, 's> {
+    clicks: MessageReader<'w, 's, StarHit>,
+    star: Query<'w, 's, &'static RelativeCursorPosition, With<StarHit>>,
+}
+
+impl StarClicks<'_, '_> {
+    /// The wedge under the cursor for each click since the last frame. A click
+    /// in the star's empty middle names none.
+    fn sectors(&mut self) -> Vec<usize> {
+        let at = self.star.single().ok().and_then(|rel| rel.normalized);
+        self.clicks
+            .read()
+            .filter_map(|_| at.and_then(sector_at))
+            .collect()
+    }
+}
+
 /// Select the corner a wedge click or digit key names.
 ///
 /// A system of its own rather than a branch of [`handle_buttons`] so a headless
 /// test can drive corner selection without a socket. The star has one button;
 /// the wedge under the cursor is resolved by angle in `sector_at`.
-#[allow(clippy::type_complexity)]
 pub fn select_corner(
-    mut hit: Query<(&Pressed, &RelativeCursorPosition), (With<StarHit>, Added<Pressed>)>,
+    mut clicks: StarClicks,
     keys: Res<ButtonInput<KeyCode>>,
     mut socket: Option<ResMut<MatchboxSocket>>,
     mut net: ResMut<NetState>,
@@ -1680,10 +1731,7 @@ pub fn select_corner(
     mut status: ResMut<LobbyStatus>,
     mut pending: ResMut<PendingClaim>,
 ) {
-    for (_pressed, rel) in hit.iter_mut() {
-        let Some(sector) = rel.normalized.and_then(sector_at) else {
-            continue;
-        };
+    for sector in clicks.sectors() {
         let me = net.my_seat().map(|s| s.peer.clone()).unwrap_or_default();
         match sector_click(&net, sector) {
             SectorClick::Select(i) => selected.0 = Some(i),
@@ -1804,7 +1852,7 @@ pub fn apply_preset(table: &mut Table, seating: Seating) {
 /// packs the table. The rules-only half lives in [`corner_effect`]; a network
 /// conversation lives in [`pump_socket`].
 pub fn handle_buttons(
-    buttons: Query<(&Pressed, &LobbyButton), Added<Pressed>>,
+    mut pressed: MessageReader<LobbyButton>,
     keys: Res<ButtonInput<KeyCode>>,
     mut socket: Option<ResMut<MatchboxSocket>>,
     lobby: LobbyWorld,
@@ -1825,7 +1873,7 @@ pub fn handle_buttons(
     let mut preset: Option<Seating> = None;
     let mut command: Option<CornerCommand> = None;
 
-    for (_pressed, button) in buttons.iter() {
+    for button in pressed.read() {
         match button {
             LobbyButton::Start => start = true,
             LobbyButton::ForeignCamps => foreign = true,
@@ -1941,78 +1989,56 @@ pub fn handle_buttons(
     }
 }
 
-/// What a keypress does to an editor.
-///
-/// Returned rather than applied so the decision is testable without a window;
-/// the `edit_*` systems are the thin performers.
-#[derive(Debug, PartialEq, Eq)]
-pub enum EditAction {
-    /// Add to the buffer.
-    Insert(char),
-    Backspace,
-    /// Commit the buffer.
-    Commit,
-    /// Abandon the edit.
-    Cancel,
-    /// Not for the editor.
-    Ignore,
-}
-
-/// Classify one keypress during editing.
-///
-/// `text` is [`bevy::input::keyboard::KeyboardInput::text`], which respects
-/// the keyboard layout — reading `key_code` alone would give a US-layout guess.
-pub fn edit_action(key: KeyCode, text: Option<&str>) -> EditAction {
-    match key {
-        KeyCode::Enter | KeyCode::NumpadEnter => return EditAction::Commit,
-        KeyCode::Escape => return EditAction::Cancel,
-        KeyCode::Backspace => return EditAction::Backspace,
-        _ => {}
-    }
-    // A single character only: `text` can hold two when a dead key did not
-    // combine.
-    match text.and_then(|t| {
-        let mut chars = t.chars();
-        chars.next().filter(|_| chars.next().is_none())
-    }) {
-        // Control characters arrive here as text on some platforms.
-        Some(c) if !c.is_control() => EditAction::Insert(c),
-        _ => EditAction::Ignore,
-    }
-}
-
-/// Focus an input box: by clicking it, or with its key (`R` room, `N` name),
-/// seeded with its current value.
-///
-/// Runs only while no field holds the keyboard — the modal rule. Leaving a
-/// field (Enter, Esc, or the name's Apply) is what frees the keys again.
+/// Focus a field with its key: `R` the room, `N` the name. A click focuses
+/// one natively; this is the keyboard's way in. The field already holds the
+/// current value, and the caret goes to its end, so a small change does not
+/// mean retyping the whole thing.
 fn focus_input_fields(
-    buttons: Query<(&Pressed, &TextInput), Added<Pressed>>,
     keys: Res<ButtonInput<KeyCode>>,
-    room: Res<RoomId>,
-    net: Res<NetState>,
-    mut edit: ResMut<FieldEdit>,
-    mut status: ResMut<LobbyStatus>,
+    mut fields: Query<(Entity, &InputField, &mut EditableText)>,
+    mut focus: ResMut<InputFocus>,
 ) {
-    let clicked = buttons.iter().next().map(|(_, input)| input.0);
-
-    let kind = if clicked == Some(FieldKind::Room) || keys.just_pressed(KeyCode::KeyR) {
+    let kind = if keys.just_pressed(KeyCode::KeyR) {
         FieldKind::Room
-    } else if clicked == Some(FieldKind::Name) || keys.just_pressed(KeyCode::KeyN) {
+    } else if keys.just_pressed(KeyCode::KeyN) {
         FieldKind::Name
     } else {
         return;
     };
-    let value = match kind {
-        FieldKind::Room => room.0.as_str(),
-        FieldKind::Name => net.name.as_str(),
+    let Some((field, _, mut text)) = fields.iter_mut().find(|(_, f, _)| f.0 == kind) else {
+        return;
     };
-    edit.open(kind, value);
+    focus.set(field, FocusCause::Navigated);
+    text.queue_edit(TextEdit::TextEnd(false));
+}
+
+/// Say how editing ends, however the field came to hold the keyboard.
+fn announce_editing(_gained: On<FocusGained>, mut status: ResMut<LobbyStatus>) {
     status.0 = "Editing. Enter accepts, Esc cancels.".into();
 }
 
+/// While a field holds the keyboard, its keys are its own.
+///
+/// Runs between Bevy turning the window's key messages into [`ButtonInput`]
+/// and handing the same keys to the focused field, and empties the former:
+/// no system that reads the keyboard sees a key typed into the field — not
+/// the lobby's Enter and digits, and not the app-wide sound toggle. That
+/// includes the key that ends the edit: the field still held the keyboard
+/// when it was pressed, so the Enter that commits a room does not also start
+/// the game, and the Esc that leaves does not also clear the selected corner.
+pub fn hold_keys_for_field(
+    focus: Res<InputFocus>,
+    fields: Query<(), With<InputField>>,
+    mut keys: ResMut<ButtonInput<KeyCode>>,
+) {
+    if focus.get().is_some_and(|focused| fields.contains(focused)) {
+        keys.clear();
+    }
+}
+
 /// What committing a field writes: the room (and the socket bound to it), the
-/// player's name, the status line, and the state that re-enters the lobby.
+/// player's name, the status line, the state that re-enters the lobby, and
+/// the field's own focus and refusal.
 #[derive(SystemParam)]
 pub struct FieldTargets<'w, 's> {
     commands: Commands<'w, 's>,
@@ -2020,72 +2046,52 @@ pub struct FieldTargets<'w, 's> {
     net: ResMut<'w, NetState>,
     status: ResMut<'w, LobbyStatus>,
     next_state: ResMut<'w, NextState<AppState>>,
+    focus: ResMut<'w, InputFocus>,
+    refusal: ResMut<'w, FieldRefusal>,
 }
 
-/// Apply the focused field's keypresses.
-///
-/// Runs in `PreUpdate`, just after Bevy turns the window's key messages into
-/// [`ButtonInput`], and while a field is focused it clears that resource's
-/// presses — so no system that runs later sees a key typed into the field:
-/// not the lobby's Enter and digits, and not the app-wide sound toggle. That
-/// includes the frame the field closes on, so the Enter that commits a room
-/// does not also start the game.
-///
-/// A field that closes stops reading: keys typed after the Enter or Esc in the
-/// same frame were typed into a field that no longer exists.
-pub fn edit_field(
-    mut messages: MessageReader<KeyboardInput>,
-    mut keys: ResMut<ButtonInput<KeyCode>>,
-    mut edit: ResMut<FieldEdit>,
+/// Enter commits the field it was typed into.
+fn commit_on_enter(
+    input: On<FocusedInput<KeyboardInput>>,
+    fields: Query<(&InputField, &EditableText)>,
     mut targets: FieldTargets,
 ) {
-    let Some(kind) = edit.focus else {
-        // Drain regardless: a keypress from before the field opened must not
-        // appear in it later.
-        messages.clear();
+    let key = &input.input;
+    let enter = matches!(key.key_code, KeyCode::Enter | KeyCode::NumpadEnter);
+    if !enter || !key.state.is_pressed() || key.repeat {
+        return;
+    }
+    // A frame's keys all go to the field that held the keyboard when the
+    // frame began. Once this frame's Enter or Esc has let go of it, a later
+    // Enter in the same frame is no longer the field's to commit.
+    let field = input.focused_entity;
+    if targets.focus.get() != Some(field) {
+        return;
+    }
+    let Ok((InputField(kind), text)) = fields.get(field) else {
         return;
     };
-    keys.clear();
-
-    for event in messages.read() {
-        if event.state != ButtonState::Pressed {
-            continue;
-        }
-        match edit_action(event.key_code, event.text.as_deref()) {
-            EditAction::Insert(c) => {
-                if edit.buffer.chars().count() < kind.max_len() {
-                    edit.buffer.push(c);
-                    edit.error.clear();
-                }
-            }
-            EditAction::Backspace => {
-                edit.buffer.pop();
-                edit.error.clear();
-            }
-            EditAction::Cancel => edit.close(),
-            EditAction::Commit => commit(&mut edit, &mut targets),
-            EditAction::Ignore => {}
-        }
-        if edit.focus.is_none() {
-            break;
-        }
+    // An Enter that confirms an IME composition belongs to the IME.
+    if text.is_composing() {
+        return;
     }
-    if edit.focus.is_none() {
-        messages.clear();
-    }
+    commit(*kind, &text.value().to_string(), &mut targets);
 }
 
-/// Commit the focused field. It closes on success; on a refusal it stays open
-/// with the reason beneath it and what was typed intact, to be corrected.
-fn commit(edit: &mut FieldEdit, targets: &mut FieldTargets) {
-    let result = match edit.focus {
-        Some(FieldKind::Room) => commit_room(&edit.buffer, targets),
-        Some(FieldKind::Name) => commit_name(&edit.buffer, targets),
-        None => return,
+/// Commit a field's text. On success the field lets go of the keyboard; on a
+/// refusal it keeps it, with the reason beneath it and what was typed intact,
+/// to be corrected.
+fn commit(kind: FieldKind, text: &str, targets: &mut FieldTargets) {
+    let result = match kind {
+        FieldKind::Room => commit_room(text, targets),
+        FieldKind::Name => commit_name(text, targets),
     };
     match result {
-        Ok(()) => edit.close(),
-        Err(why) => edit.error = why,
+        Ok(()) => {
+            targets.focus.clear();
+            targets.refusal.0 = None;
+        }
+        Err(why) => targets.refusal.0 = Some((kind, why)),
     }
 }
 
@@ -2136,68 +2142,89 @@ fn commit_name(buffer: &str, targets: &mut FieldTargets) -> Result<(), String> {
 
 /// The name row's Apply button.
 ///
-/// This is what the button is *for*: a click commits the focused name. To type
-/// you must first focus the field, so a click on a never-focused field just
-/// focuses it (seeding the buffer with the current name) — the next Apply, or
-/// Enter, applies. One modal at a time: while the room field holds the
-/// keyboard, Apply stands down.
+/// This is what the button is *for*: a click commits the name being typed.
+/// Pressing it leaves the keyboard with the field (see `keep_focus`), so a
+/// click on Apply while the name is focused commits it; with the name field
+/// not focused, the click focuses it — the next Apply, or Enter, applies. One
+/// modal at a time: while the room field holds the keyboard, Apply stands
+/// down.
 pub fn apply_name(
-    buttons: Query<(&Pressed, &ApplyName), Added<Pressed>>,
-    mut edit: ResMut<FieldEdit>,
+    mut pressed: MessageReader<ApplyName>,
+    fields: Query<(Entity, &InputField, &EditableText)>,
     mut targets: FieldTargets,
 ) {
-    if buttons.is_empty() {
+    if pressed.is_empty() {
         return;
     }
-    match edit.focus {
-        Some(FieldKind::Room) => {}
-        Some(FieldKind::Name) => commit(&mut edit, &mut targets),
-        None => {
-            edit.open(FieldKind::Name, &targets.net.name);
-            targets.status.0 = "Editing the name - press Apply when done.".into();
+    pressed.clear();
+    let Some((name, _, text)) = fields.iter().find(|(_, f, _)| f.0 == FieldKind::Name) else {
+        return;
+    };
+    match targets.focus.get() {
+        Some(focused) if focused == name => {
+            commit(FieldKind::Name, &text.value().to_string(), &mut targets);
         }
+        Some(focused) if fields.contains(focused) => {}
+        _ => targets.focus.set(name, FocusCause::Navigated),
     }
 }
 
-/// Leave any focused field. Runs on leaving the lobby: a field still open when
-/// the game starts would otherwise come back focused.
-pub fn close_field(mut edit: ResMut<FieldEdit>) {
-    if edit.focus.is_some() {
-        edit.close();
+/// Let go of the keyboard on leaving the lobby: the field goes with the
+/// lobby, and a field left focused when the game starts must not come back
+/// holding the keys of the lobby the player returns to.
+pub fn release_field(
+    mut focus: ResMut<InputFocus>,
+    fields: Query<(), With<InputField>>,
+    mut refusal: ResMut<FieldRefusal>,
+) {
+    if focus.get().is_some_and(|focused| fields.contains(focused)) {
+        focus.clear();
     }
+    refusal.0 = None;
 }
 
-/// Draw both input boxes: the buffer with a caret in the focused one, the
-/// current value in the other, and a refusal beneath the focused one.
+/// Every field that does not hold the keyboard shows the committed value: an
+/// edit left with Esc or a click elsewhere is dropped, and a value changed
+/// from outside — a rename after a name clash — shows at once. A refusal shows
+/// beneath its field while that field still holds the keyboard.
 ///
 /// Compares before it writes instead of asking whether anything changed, so
-/// the boxes are right on the first frame of a rebuilt lobby too.
+/// the fields are right on the first frame of a rebuilt lobby too.
 fn draw_fields(
     room: Res<RoomId>,
     net: Res<NetState>,
-    edit: Res<FieldEdit>,
-    mut values: Query<(&mut Text, &InputText)>,
-    mut errors: Query<(&mut Text, &InputError), Without<InputText>>,
+    focus: Res<InputFocus>,
+    mut refusal: ResMut<FieldRefusal>,
+    mut fields: Query<(Entity, &InputField, &mut EditableText)>,
+    mut errors: Query<(&mut Text, &InputError)>,
 ) {
-    for (mut text, kind) in &mut values {
-        let wanted = if edit.focus == Some(kind.0) {
-            format!("{}_", edit.buffer)
-        } else {
-            match kind.0 {
-                FieldKind::Room => room.0.clone(),
-                FieldKind::Name => net.name.clone(),
-            }
+    for (field, InputField(kind), mut text) in &mut fields {
+        if focus.get() == Some(field) {
+            continue;
+        }
+        if refusal
+            .0
+            .as_ref()
+            .is_some_and(|(refused, _)| refused == kind)
+        {
+            refusal.0 = None;
+        }
+        let committed = match kind {
+            FieldKind::Room => room.0.as_str(),
+            FieldKind::Name => net.name.as_str(),
         };
-        text.set_if_neq(Text(wanted));
+        if text.value() != committed {
+            text.editor_mut().set_text(committed);
+            text.queue_edit(TextEdit::TextEnd(false));
+        }
     }
-    for (mut text, kind) in &mut errors {
-        let wanted = if edit.focus == Some(kind.0) {
-            edit.error.as_str()
-        } else {
-            ""
+    for (mut line, InputError(kind)) in &mut errors {
+        let wanted = match &refusal.0 {
+            Some((refused, why)) if refused == kind => why.as_str(),
+            _ => "",
         };
-        if text.as_str() != wanted {
-            **text = wanted.to_string();
+        if line.as_str() != wanted {
+            **line = wanted.to_string();
         }
     }
 }
@@ -2825,17 +2852,17 @@ mod tests {
         world.init_resource::<LobbyStatus>();
         world.init_resource::<PendingClaim>();
         world.init_resource::<ButtonInput<KeyCode>>();
+        world.init_resource::<Messages<StarHit>>();
 
-        // A press on corner 1's centroid — free, so a claim.
+        // A click on corner 1's centroid — free, so a claim.
         world.spawn((
-            Button,
-            Pressed,
             StarHit,
             RelativeCursorPosition {
                 cursor_over: true,
                 normalized: Some(normalized(wedge_centroid(1))),
             },
         ));
+        world.write_message(StarHit);
 
         world.run_system_once(select_corner).unwrap();
 

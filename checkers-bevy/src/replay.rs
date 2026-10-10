@@ -20,7 +20,7 @@ use std::collections::VecDeque;
 use std::time::Duration;
 
 use crate::board_view::{HOLE_RADIUS, coord_to_world, on_hole};
-use crate::{LastMove, Session};
+use crate::{AppState, LastMove, Session};
 
 /// Which hole a piece stands on: attached to every piece by the piece sync,
 /// this is how the flight finds the one that just landed on the destination.
@@ -224,6 +224,7 @@ pub fn sync_trace(
 /// Deliberately not the selection `Overlay` marker — that is cleared on every
 /// session change, while a trace must outlive the turn it arrived on.
 #[derive(Component)]
+#[require(DespawnOnExit<AppState> = DespawnOnExit(AppState::InGame))]
 pub struct TraceMarker;
 
 // --- The record viewer ------------------------------------------------------
