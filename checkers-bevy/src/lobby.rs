@@ -31,12 +31,14 @@ use bevy::input_focus::tab_navigation::TabIndex;
 use bevy::input_focus::{
     AcquireFocus, FocusCause, FocusGained, FocusedInput, InputFocus, InputFocusSystems,
 };
+use bevy::picking::events::PointerClick;
 use bevy::picking::hover::Hovered;
+use bevy::picking::pointer::PointerButton;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::text::{EditableText, TextCursorStyle, TextEdit};
 use bevy::ui::Pressed;
-use bevy::ui::RelativeCursorPosition;
+use bevy::ui::{ComputedUiRenderTargetInfo, RelativeCursorPosition, UiGlobalTransform};
 use bevy::ui_widgets::{Button, TextInput};
 use bevy_matchbox::prelude::*;
 use checkers_net::{CH_RELIABLE, NetMsg, NetState, RoomId, Seat, broadcast, decode};
@@ -265,10 +267,12 @@ pub fn plugin(app: &mut App) {
 }
 
 /// The lobby's buttons and the star, reported as messages: a press on a
-/// [`LobbyButton`] arrives as that `LobbyButton`, a press on the star as
-/// [`StarHit`]. Its own plugin so the flow tests click through the same path.
+/// [`LobbyButton`] arrives as that `LobbyButton`, a click on the star as the
+/// [`StarClick`] naming its wedge. Its own plugin so the flow tests click
+/// through the same path.
 pub fn clicks_plugin(app: &mut App) {
-    app.add_plugins((button_messages::<LobbyButton>, button_messages::<StarHit>));
+    app.add_plugins(button_messages::<LobbyButton>)
+        .add_message::<StarClick>();
 }
 
 /// The text fields: their keyboard, their commits, and the Apply button.
@@ -887,10 +891,11 @@ fn point_in_triangle(p: Vec2, v: [Vec2; 3]) -> bool {
     (s1 >= 0.0 && s2 >= 0.0 && s3 >= 0.0) || (s1 <= 0.0 && s2 <= 0.0 && s3 <= 0.0)
 }
 
-/// Which corner the cursor is over. `normalized` is [`RelativeCursorPosition`]'s
-/// centre-relative position (`-0.5 .. 0.5`, y down); it is mapped back into
-/// container coordinates so the wedges' own geometry can answer. `None` over
-/// the empty middle — the middle is the star, not a button.
+/// Which corner a point on the star is over. `normalized` is the
+/// centre-relative position [`RelativeCursorPosition`] reports (`-0.5 .. 0.5`,
+/// y down); it is mapped back into container coordinates so the wedges' own
+/// geometry can answer. `None` over the empty middle — the middle is the
+/// star, not a button.
 fn sector_at(normalized: Vec2) -> Option<usize> {
     let local = normalized * vec2(STAR_W, STAR_H) + STAR_CENTRE;
     (0..6).find(|&i| point_in_triangle(local, wedge_vertices(i)))
@@ -1087,13 +1092,13 @@ fn star(art: &SectorArt) -> impl Scene {
         .collect();
     let labels: Vec<_> = (0..6).map(corner_label).collect();
     bsn! {
-        Button
         StarHit
         RelativeCursorPosition
         Node {
             width: px(STAR_W),
             height: px(STAR_H),
         }
+        on(click_star)
         Children [
             {fills}
             --
@@ -1145,10 +1150,47 @@ fn corner_label(i: usize) -> impl Scene {
 #[derive(Component, Default, Clone)]
 struct CornerOutline(usize);
 
-/// Marker on the star's single hit area: the whole container is one button,
-/// and clicks are resolved to a corner by angle, not by rectangles.
-#[derive(Component, Message, Default, Clone, Copy)]
+/// Marker on the star's single hit area: the whole container takes the
+/// clicks, and they are resolved to a corner by angle, not by rectangles.
+#[derive(Component, Default, Clone, Copy)]
 pub struct StarHit;
+
+/// A click on the star: the wedge it landed on, or `None` for the star's
+/// empty middle.
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StarClick(pub Option<usize>);
+
+/// Resolve a click on the star (or on a wedge or label inside it) to a wedge,
+/// from where the click itself happened.
+///
+/// The click's own position rather than [`RelativeCursorPosition`]: a click
+/// completes on release, and on a touch screen there is no cursor by then —
+/// the finger has lifted, so the star would report no position at all.
+fn click_star(
+    click: On<PointerClick>,
+    star: Query<
+        (
+            &ComputedNode,
+            &UiGlobalTransform,
+            &ComputedUiRenderTargetInfo,
+        ),
+        With<StarHit>,
+    >,
+    ui_scale: Res<UiScale>,
+    mut clicks: MessageWriter<StarClick>,
+) {
+    if click.button != PointerButton::Primary {
+        return;
+    }
+    let Ok((node, transform, target)) = star.get(click.entity) else {
+        return;
+    };
+    // The pointer reports logical window pixels; the node's transform works
+    // in the camera's physical ones, and `scale_factor` includes `UiScale`.
+    let physical = click.pointer.position * target.scale_factor() / ui_scale.0;
+    let at = node.normalize_point(*transform, physical);
+    clicks.write(StarClick(at.and_then(sector_at)));
+}
 
 /// Which corner the cursor currently rests on, for wedge shading.
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -1698,32 +1740,13 @@ pub fn claim_answer(net: &NetState, claim: Option<u32>) -> Option<String> {
     }
 }
 
-/// Clicks on the star, as the wedges they landed on.
-#[derive(SystemParam)]
-pub struct StarClicks<'w, 's> {
-    clicks: MessageReader<'w, 's, StarHit>,
-    star: Query<'w, 's, &'static RelativeCursorPosition, With<StarHit>>,
-}
-
-impl StarClicks<'_, '_> {
-    /// The wedge under the cursor for each click since the last frame. A click
-    /// in the star's empty middle names none.
-    fn sectors(&mut self) -> Vec<usize> {
-        let at = self.star.single().ok().and_then(|rel| rel.normalized);
-        self.clicks
-            .read()
-            .filter_map(|_| at.and_then(sector_at))
-            .collect()
-    }
-}
-
 /// Select the corner a wedge click or digit key names.
 ///
 /// A system of its own rather than a branch of [`handle_buttons`] so a headless
-/// test can drive corner selection without a socket. The star has one button;
-/// the wedge under the cursor is resolved by angle in `sector_at`.
+/// test can drive corner selection without a socket. The star is one hit
+/// area; `click_star` resolves each click to a wedge by angle.
 pub fn select_corner(
-    mut clicks: StarClicks,
+    mut clicks: MessageReader<StarClick>,
     keys: Res<ButtonInput<KeyCode>>,
     mut socket: Option<ResMut<MatchboxSocket>>,
     mut net: ResMut<NetState>,
@@ -1731,7 +1754,7 @@ pub fn select_corner(
     mut status: ResMut<LobbyStatus>,
     mut pending: ResMut<PendingClaim>,
 ) {
-    for sector in clicks.sectors() {
+    for sector in clicks.read().filter_map(|click| click.0) {
         let me = net.my_seat().map(|s| s.peer.clone()).unwrap_or_default();
         match sector_click(&net, sector) {
             SectorClick::Select(i) => selected.0 = Some(i),
@@ -2852,17 +2875,12 @@ mod tests {
         world.init_resource::<LobbyStatus>();
         world.init_resource::<PendingClaim>();
         world.init_resource::<ButtonInput<KeyCode>>();
-        world.init_resource::<Messages<StarHit>>();
+        world.init_resource::<Messages<StarClick>>();
 
         // A click on corner 1's centroid — free, so a claim.
-        world.spawn((
-            StarHit,
-            RelativeCursorPosition {
-                cursor_over: true,
-                normalized: Some(normalized(wedge_centroid(1))),
-            },
-        ));
-        world.write_message(StarHit);
+        let wedge = sector_at(normalized(wedge_centroid(1)));
+        assert_eq!(wedge, Some(1));
+        world.write_message(StarClick(wedge));
 
         world.run_system_once(select_corner).unwrap();
 
@@ -2870,6 +2888,63 @@ mod tests {
             world.resource::<SelectedCorner>().0,
             Some(1),
             "the claimed corner must be the selected one"
+        );
+    }
+
+    /// A click names the wedge it landed on, read from the click itself: a
+    /// tap completes once the finger has lifted, when there is no cursor left
+    /// to ask where it was.
+    #[test]
+    fn a_click_on_the_star_names_the_wedge_under_it() {
+        use bevy::camera::NormalizedRenderTarget;
+        use bevy::picking::backend::HitData;
+        use bevy::picking::events::Pointer;
+        use bevy::picking::pointer::{Location, PointerId};
+        use std::time::Duration;
+
+        let mut world = World::new();
+        world.init_resource::<UiScale>();
+        world.init_resource::<Messages<StarClick>>();
+        // The star laid out with its top-left corner at `origin`. A UI node's
+        // transform sits at its centre.
+        let origin = vec2(100.0, 50.0);
+        let size = vec2(STAR_W, STAR_H);
+        let star = world
+            .spawn((
+                StarHit,
+                ComputedNode { size, ..default() },
+                UiGlobalTransform::from_translation(origin + size / 2.0),
+                ComputedUiRenderTargetInfo::default(),
+            ))
+            .observe(click_star)
+            .id();
+
+        for at in [wedge_centroid(4), STAR_CENTRE] {
+            let location = Location {
+                target: NormalizedRenderTarget::None {
+                    width: 800,
+                    height: 600,
+                },
+                position: origin + at,
+            };
+            world.trigger(PointerClick {
+                entity: star,
+                pointer: Pointer::new(PointerId::Touch(1), location),
+                button: PointerButton::Primary,
+                hit: HitData::new(star, 0.0, None, None),
+                duration: Duration::from_millis(80),
+                count: 1,
+            });
+        }
+
+        let clicks: Vec<_> = world
+            .resource_mut::<Messages<StarClick>>()
+            .drain()
+            .collect();
+        assert_eq!(
+            clicks,
+            [StarClick(Some(4)), StarClick(None)],
+            "a wedge click names its wedge; the middle names none"
         );
     }
 
