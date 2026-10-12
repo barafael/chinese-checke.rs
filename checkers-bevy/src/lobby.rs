@@ -44,6 +44,7 @@ use bevy_matchbox::prelude::*;
 use checkers_net::{CH_RELIABLE, NetMsg, NetState, RoomId, Seat, broadcast, decode};
 
 use crate::board_view::player_colour;
+use crate::lobby_backdrop::DEEP;
 use crate::setup::Seating;
 use crate::ui::{button_messages, ui_text};
 use crate::{AppState, Session};
@@ -529,15 +530,84 @@ const TEXT: Color = Color::srgb(0.9, 0.9, 0.92);
 const MUTED: Color = Color::srgb(0.62, 0.62, 0.68);
 const BORDER: Color = Color::srgb(0.35, 0.35, 0.40);
 
-/// The lobby is a two-column flex row filling the window: the star on the
-/// left, every control on the right. Side by side the columns stay short
-/// enough to fit a 600px-tall window by construction, which a single stacked
-/// column never could.
-fn spawn(mut commands: Commands, art: Res<SectorArt>) {
-    commands.spawn_scene(lobby(&art));
+/// The lobby is drawn over the animated backdrop: a scrim first — a vertical
+/// gradient of near-black in the manner of omdurman's panels, dark enough
+/// that the controls read, light enough that the field behind stays alive —
+/// and above it the two columns, exactly as they always were.
+fn spawn(mut commands: Commands, art: Res<SectorArt>, mut images: ResMut<Assets<Image>>) {
+    let scrim = images.add(scrim_image());
+    commands.spawn_scene(lobby(&art, scrim));
 }
 
-fn lobby(art: &SectorArt) -> impl Scene {
+/// The scrim texture: one column of RGBA the [`ImageNode`] stretches over the
+/// window, transparent enough at the top for the field to shine through,
+/// nearly opaque at the bottom where the eye rests.
+fn scrim_image() -> Image {
+    const ROWS: u32 = 64;
+    const TOP_ALPHA: f32 = 0.38;
+    const BOTTOM_ALPHA: f32 = 0.78;
+    let mut data = Vec::with_capacity((ROWS * 4) as usize);
+    for row in 0..ROWS {
+        // Rows run top to bottom; alpha eases downward.
+        let t = row as f32 / (ROWS - 1) as f32;
+        let shade = DEEP;
+        data.extend_from_slice(&[
+            (shade.red * 255.0) as u8,
+            (shade.green * 255.0) as u8,
+            (shade.blue * 255.0) as u8,
+            ((TOP_ALPHA + (BOTTOM_ALPHA - TOP_ALPHA) * t) * 255.0) as u8,
+        ]);
+    }
+    Image::new(
+        Extent3d {
+            width: 1,
+            height: ROWS,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        data,
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::RENDER_WORLD,
+    )
+}
+
+/// The full-window scrim: the backdrop dims behind it, the lobby sits above.
+/// Ignore pointers — clicks belong to whatever the player can see through it.
+fn scrim_layer(image: Handle<Image>) -> impl Scene {
+    bsn! {
+        Node {
+            position_type: PositionType::Absolute,
+            left: px(0),
+            top: px(0),
+            right: px(0),
+            bottom: px(0),
+        }
+        ImageNode { image }
+        Pickable::IGNORE
+    }
+}
+
+fn lobby(art: &SectorArt, scrim: Handle<Image>) -> impl Scene {
+    let scope = DespawnOnExit(AppState::Lobby);
+    bsn! {
+        scope
+        Node {
+            width: percent(100),
+            height: percent(100),
+        }
+        Children [
+            @scrim_layer(scrim)
+            --
+            @lobby_columns(art)
+        ]
+    }
+}
+
+/// The lobby proper: a two-column flex row filling the window — the star on
+/// the left, every control on the right. Side by side the columns stay short
+/// enough to fit a 600px-tall window by construction, which a single stacked
+/// column never could.
+fn lobby_columns(art: &SectorArt) -> impl Scene {
     // Presets are shortcuts for the symmetric setups; they fill the whole
     // table, so what is configured and what the shortcut leaves can never
     // silently disagree.
@@ -552,10 +622,7 @@ fn lobby(art: &SectorArt) -> impl Scene {
     let cpu = LobbyButton::CornerAction(CornerCommand::Cpu);
     let cancel = LobbyButton::CornerAction(CornerCommand::Off);
     let (foreign, start) = (LobbyButton::ForeignCamps, LobbyButton::Start);
-    let scope = DespawnOnExit(AppState::Lobby);
-
     bsn! {
-        scope
         Node {
             width: percent(100),
             height: percent(100),

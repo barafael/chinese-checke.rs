@@ -28,8 +28,8 @@ use checkers_bevy::replay;
 use checkers_bevy::setup::Seating;
 use checkers_bevy::ui::{button_messages, ui_text};
 use checkers_bevy::{
-    AppState, Selection, Session, audit, format_round_duration, lobby, move_log, net, record,
-    sound, web,
+    AppState, Selection, Session, audit, format_round_duration, lobby, lobby_backdrop, move_log,
+    net, record, sound, web,
 };
 use checkers_core::geometry::{all_holes, camp_of, on_board};
 use checkers_core::law::{LAWS, verify_all};
@@ -85,6 +85,9 @@ fn main() {
         .init_resource::<replay::Replay>()
         .add_plugins((
             lobby::plugin,
+            // The lobby's animated triangle-field backdrop, and the scrim
+            // that keeps the lobby legible over it.
+            lobby_backdrop::plugin,
             sound::plugin,
             button_messages::<ControlButton>,
         ))
