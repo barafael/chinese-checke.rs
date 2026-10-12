@@ -1,201 +1,68 @@
-# Chinese Checkers — specification and implementation
+# Chinese Checkers, in Rust
 
-A specification of six-player (star-shaped) Chinese Checkers, and a Rust
-implementation that is mechanically checked against it.
+A Chinese Checkers game whose rules are **generated from a formal specification**
+and checked three ways — machine-verified laws, Kani proofs, and a per-turn
+invariant audit — with a Bevy front-end that holds no rules of its own. Every
+destination a player can click is *found* by the rules engine; there is no code
+path to an illegal position.
 
-## The traceability chain
+![A turn in progress: a piece selected, its destinations lit](screenshots/game.png)
 
-The problem this layout solves: a `// §16` comment is just a string. Nothing
-detects it when a section is renumbered, a rule changes, or a claim is dropped.
-So every normative claim is a **Rust type** instead:
-
-```rust
-/// $\forall i \in P:\ |\{v \in V : s(v) = i\}| = 10$
-pub struct PieceConservation;
-
-impl Law for PieceConservation {
-    const ID: &'static str = "CC-POS-PIECES";   // stable anchor
-    const STATEMENT: &'static str = r"\forall i \in P: \ldots"; // the mathematics
-    const CHAPTER: Chapter = Chapter::Players;  // provenance, as a type
-    const SUMMARY: &'static str = "Every player owns exactly ten pieces in every position.";
-    const NOTE: &'static str = "Every player always owns exactly ten pieces.";
-    const EVIDENCE: Evidence = Evidence::Property; // how it is established
-    type Subject = Position;                    // what the ∀ ranges over
-    fn holds(p: &Position) -> Result<(), String> { /* the check */ }
-}
-register_law!(PieceConservation, PIECE_CONSERVATION);
-```
-
-Identity, mathematics, provenance, gloss, plain-language note, domain, and
-check live in one block and cannot drift. The note is the claim restated for
-a reader who skips the mathematics; the guard tests require it to be a
-sentence without a single backslash.
-Registration happens at **link time** (`linkme` distributed slice), so:
-
-- `cargo test` runs every law without naming any — you cannot declare a law and
-  forget to check it;
-- `checkers-spec-gen` documents every law from the same registry — a law cannot
-  be documented without being checked, or checked without being documented.
-
-`Subject` is what makes this more than decoration: it names the domain the
-quantifier ranges over, so the same law can be exhaustively enumerated, property
-tested, or proven.
-
-### Levels of evidence
-
-| Level | Meaning |
-|---|---|
-| `proof (Kani)` | Proven for the whole domain by bounded model checking. |
-| `exhaustive` | Checked over a finite domain in ordinary Rust. |
-| `property test` | Checked over inputs from a `proptest` strategy. |
-| `example` | Fixed examples only — weakest. |
-
-**What this does not give you.** `holds` is a runtime predicate; the type system
-does not verify that `STATEMENT` means what `holds` computes. That gap is
-irreducible without a proof assistant. The value is that a reviewer sees both in
-one place, and that the strongest claims are additionally Kani-proven.
-
-## Layout
-
-| Crate | Role |
-|---|---|
-| `checkers-core` | Engine-free rules. Laws, geometry, Kani proofs. |
-| `checkers-model` | Naive reference implementation, played in lockstep against `checkers-core` by its `tests/differential.rs`. |
-| `checkers-spec-gen` | Generates `specs/`, the wasm law registry, and the laws report from the law registry. |
-| `checkers-bevy` | Playable front-end. Renders and takes input; holds no rules. |
-| `specs/` | **Generated.** Do not edit; regenerate instead. |
-| `docs/superseded/` | The original hand-written prose. Not authoritative. |
-
-The two hand-written specification documents have been removed. Their prose now
-lives in `checkers-core/src/spec.rs` as [`Chapter`] text, and the generated
-`specs/specification.md` supersedes them.
-
-`docs/superseded/` retains the originals only as a source for prose not yet
-transcribed. All fifteen chapters are formalised: every normative claim is
-backed by a law, and the claims that are not — deliberately — are recorded
-with their reasons in `docs/claim-inventory.md`.
-
-### Reading order
-
-Chapters are a `Chapter` enum, not section numbers, so a law cannot cite a section
-that does not exist and there is no numbering to fall out of date. The enum's
-declaration order *is* the reading order, which is why the specification is
-generated rather than read out of rustdoc: rustdoc sorts items alphabetically and
-offers no stable way to override that (`--sort-modules-by-appearance` is
-nightly-only and orders modules, not items).
-
-Code cites **law IDs**, never section numbers.
-
-## Commands
+## Play
 
 ```sh
-cargo test                                          # all laws + tests
-cargo run -p checkers-bevy                          # play
-cargo doc --no-deps --open                           # rustdoc with rendered math
-cargo run -p checkers-spec-gen -- specs/specification.md          # regenerate
-cargo run -p checkers-spec-gen -- --check specs/specification.md  # CI staleness gate
-cargo run -p checkers-spec-gen -- --html /tmp/laws/index.html     # the laws report
+cargo run -p checkers-bevy
 ```
 
-### The laws report
+Pick a table in the lobby — solo against the engine, hotseat, or a shared room
+over WebRTC — then click a piece and a highlighted hole. Steps and jumps both
+**stage** before they commit; a jump chains one hop at a time, and nothing is
+final until Enter. Every turn is replayed as an animation, the lobby sits on a
+living Game-of-Life triangle field, and the lobby's buttons, text fields, and
+room roster work over the wire.
 
-The deploy workflow generates a single-page report of every law — formula,
-precise statement, plain-language meaning, evidence level, and board figures —
-and publishes it beside the game at
-<https://barafael.github.io/chinese-checke.rs/laws/>. Like `specs/`, it is
-generated output, never edited: the figures are drawn from the same geometry
-predicates the laws are checked against.
-
-### Rendered math in rustdoc
-
-rustdoc has **no native math support** — it strips `\(...\)` and passes `$$`
-through as literal text. KaTeX is injected via a rustdoc flag in
-`.cargo/config.toml`:
-
-```toml
-[build]
-rustdocflags = ["--html-in-header", "assets/katex-header.html"]
-```
-
-This must be a *flag*: `#![doc(html_in_header = ...)]` as a crate attribute is
-rejected by cargo as an unknown attribute. For docs.rs, declare it under
-`[package.metadata.docs.rs]` as well, since docs.rs ignores `.cargo/config.toml`.
-
-The path is relative, and the flag applies to **every crate rustdoc
-documents** — so documenting a dependency, whose sources have no `assets/`,
-fails with `error reading assets/katex-header.html`. Always pass
-`--no-deps` (CI does).
-
-### Running the proofs
-
-**Kani does not build on Windows** — it hard-depends on `std::os::unix`. Proofs
-therefore run under Linux, WSL, or CI, while `cargo test`, `cargo doc`, and the
-eventual Bevy app all work natively on Windows.
-
-```sh
-cargo install kani-verifier && kani setup   # once, on Linux/WSL
-./scripts/verify-proofs.sh
-```
-
-From a Windows shell:
-
-```sh
-MSYS_NO_PATHCONV=1 wsl.exe -d Debian bash /mnt/c/workspace/sources/amlah-spec/scripts/verify-proofs.sh
-```
-
-Current status: **14 proof harnesses, all verifying.**
-
-### Writing provable code
-
-Bounded model checking constrains how the geometry is written: a symbolic loop
-bound makes Kani diverge. `rotate_n` is therefore a loop-free `match` over
-`n % 6` rather than an idiomatic `fold` — an earlier `fold` version sent Kani
-unwinding past 6900 iterations. Keep functions intended for proof branch-bounded
-and arithmetic.
-
-## Playing
-
-`cargo run -p checkers-bevy`
-
-The main menu deals a game: play solo or against the computer, hand a seat to
-another person at the keyboard (hotseat), join a networked lobby, or watch two
-engines race ("Watch 2 Bots" — the menu itself sits over a live one). The
-hotseat panel picks the engine's strength from 1 (quick) to 5 (strong); the
-choice is applied when the game is dealt. When it is not your turn, the turn
-controls are inert; a spectator can watch but never click.
-
-Every turn is **staged** — steps and jumps alike. Selecting a piece highlights
-the destinations reachable in **one** hop; taking one moves the piece in the
-view, keeps it selected, and for a jump reveals the next hop. Nothing is
-committed until you confirm, so any chain can be abandoned.
+![The lobby, over its animated backdrop](screenshots/lobby.png)
 
 | Input | Effect |
 |---|---|
-| Click own piece | Select it |
-| Click a highlighted hole | Stage a step, or take one hop of a jump |
-| Enter / Confirm button | Commit the staged turn |
-| Backspace / Cancel button | Abandon the staged turn |
-| Resign button | Concede the round (local modes; not over the network yet) |
-| Save / Open / Replay buttons | Write a `.cchkrs` record, resume one, or walk through it (arrows step, Space autoplays, Esc back) |
-| S | Mute or unmute the sounds |
-| M (game over) | Back to the lobby |
-| Tap | Click, on a touchscreen |
-| U | Undo the last staged hop |
-| Escape | Clear the selection |
-| A | Let the computer play the current seat once |
-| T | Toggle the status panel |
-| R | Restart with a fresh two-player deal |
+| Click piece, click hole | Select, then stage a step or a hop |
+| Enter / Backspace | Commit or abandon the staged turn |
+| U | Undo one staged hop |
+| A | Let the engine play this seat once |
+| T / S | Status panel / sound |
+| R | Fresh two-player deal (solo) |
 
-Confirming before the piece has actually moved is refused. That is not a corner
-case to be tidied away: a piece can hop out over a blocker and straight back, so
-a turn can have taken two hops and still be at its origin — which chapter 9
-treats as not moving.
+## Trusting the rules
 
-A finished game shows a summary card: who won (or that every player is
-blocked), each seated player's moves, how many were jumps, and how long the
-round lasted.
+The game in `specs/specification.md` is law: numbered, falsifiable statements
+that are *transcribed into code* by `checkers-spec-gen` and checked at startup
+(`cargo test` runs them all). Position invariants are audited after every
+committed move, Kani proofs cover the geometry and turn machinery
+(`./scripts/verify-proofs.sh`), and the AI engine is differentially tested
+against a naive reference model. A rendered law report is generated for the
+project page.
 
-The front-end holds no rules. Destinations come from `checkers-core` and moves
-are *found* rather than constructed, so there is no code path to an illegal
-position. It checks the full law registry once at startup and the position
-invariants after every committed turn.
+## Driving it as an agent
+
+The window can be operated by a script — no mouse or keyboard of its own. The
+game opens a localhost socket speaking JSON: screenshots, clicks, keys, text,
+and the full game state. There is no privileged move command; an agent plays
+exactly what a hand on the mouse could.
+
+```sh
+python3 scripts/agent_client.py --port N demo   # play one move, start to finish
+```
+
+See `checkers-bevy/src/agent.rs` for the protocol.
+
+## Workspace
+
+| Crate | Holds |
+|---|---|
+| `checkers-core` | The rules, the laws, the machine-checked geometry |
+| `checkers-ai` | The search engine (bitboards, negamax/maxⁿ) |
+| `checkers-net` | The wire protocol and host-sequenced moves |
+| `checkers-bevy` | The Bevy front-end and the agent socket |
+| `checkers-spec-gen` | Specification → law code, and the staleness gate |
+
+Deeper material lives in `docs/` and `specs/`.
