@@ -3,3 +3,4 @@
 **/moves.log
 /dist
 window*.log
+__pycache__/

@@ -2474,14 +2474,18 @@ dependencies = [
 name = "checkers-bevy"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "bevy",
  "bevy_matchbox",
  "checkers-ai",
  "checkers-core",
  "checkers-net",
+ "image",
  "js-sys",
  "matchbox_signaling",
  "rfd",
+ "serde",
+ "serde_json",
  "tokio",
  "uuid",
  "web-sys",

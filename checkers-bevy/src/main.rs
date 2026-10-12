@@ -90,6 +90,10 @@ fn main() {
             lobby_backdrop::plugin,
             sound::plugin,
             button_messages::<ControlButton>,
+            // The localhost socket an external agent drives the window
+            // through — screenshots, clicks, keys. Off on wasm; disabled with
+            // `CHECKERS_AGENT_PORT=off`.
+            checkers_bevy::agent::plugin,
         ))
         .add_systems(Startup, setup)
         // Not state-scoped: the lobby is the first thing shown, and it is the
@@ -312,7 +316,14 @@ fn setup(mut commands: Commands) {
     //
     // One camera for the whole app: the lobby renders and picks through it
     // before any game exists, and every round draws through it after.
-    commands.spawn((Camera2d, fit_projection()));
+    //
+    // `Msaa` is named because its absence is invisible and its effect is not.
+    // `Camera2d` does not require it, and the 2D pipeline's view-target setup
+    // queries it as a required component — a camera without one simply gets
+    // no multisampled target, and *everything* renders aliased. On the lobby's
+    // backdrop, a triangle field that never stops turning and drifting, the
+    // crawling stair-stepped edges read as grain over the whole screen.
+    commands.spawn((Camera2d, Msaa::Sample4, fit_projection()));
 
     // The full law registry is worth its cost once, at startup.
     if let Err(violation) = verify_all() {

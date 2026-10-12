@@ -10,6 +10,7 @@
 //! the same path, so the networked code is always exercised. Confirming a
 //! turn that never moved is refused (chapter 9).
 
+pub mod agent;
 pub mod ai;
 pub mod board_view;
 pub mod lobby;
