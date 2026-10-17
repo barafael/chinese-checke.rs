@@ -1,15 +1,21 @@
-//! The lobby's living backdrop: an endless triangle field that slowly turns
-//! and drifts, carrying a Game of Life played out on its cells — and, now and
-//! then, a cell hopping over a neighbour the way a piece hops over another on
-//! the board.
+//! The lobby's living backdrop: a triangle universe seen from far above —
+//! the camera looms high and leans away from straight down, so the field
+//! falls away toward the distance — carrying a Game of Life played out on
+//! its cells, and, now and then, a cell hopping over a neighbour the way a
+//! piece hops over another on the board.
 //!
-//! The field is one vertex-coloured [`Mesh2d`]: an equilateral triangle grid,
-//! each triangle shrunk a little toward its centroid so the clear colour shows
-//! through as the grid lines. The grid's parallelogram is sized so its
-//! inscribed circle always swallows the whole viewport plus the pan and spin
-//! margins, so no edge is ever seen — an infinite grid, as far as the lobby
-//! can tell. The whole thing rotates about its centre and wanders on a slow
-//! Lissajous path, which is the panning and turning.
+//! The camera is a fake: the app builds Bevy without the 3D pipeline, so the
+//! [`Rig`] projects a ground plane through a tilted pinhole on the CPU, and
+//! the result is drawn as one ordinary vertex-coloured [`Mesh2d`]. The rig
+//! pans slowly over the plane and sways its lean; a gentle swell travels
+//! through the surface.
+//!
+//! Each triangle is a cell and is shaded flat in its own colour — the life
+//! reads as the triangular lattice itself, crisp and cell-by-cell, dissolving
+//! into the clear colour in the far distance. Every generation the field is
+//! cut into horizontal bands that advance at offset times, so the life
+//! staggers across the field rather than changing all at once, and the hops
+//! trickle in a slice at a time between generations.
 //!
 //! Life runs on the triangular tessellation itself: every triangle is a cell
 //! with twelve neighbours — three across its edges, nine at its corners —
@@ -19,15 +25,16 @@
 //! checkers hop, which the same-orientation cells form for free.
 //!
 //! The colour gradient is adapted from cake's sky: from the page's deep
-//! near-black (`#0f1014`) toward the violet of its nebula tint, brightening
-//! along a diagonal so the field is never flat. A seed comes from the room
-//! name, so everyone in a room watches the same sky live — the same trick the
-//! nebula plays.
+//! near-black (`#0f1014`) toward the violet of its nebula tint, drifting at a
+//! small scale so the tint visibly varies across the field. A seed comes from
+//! the room name, so everyone in a room watches the same sky live — the same
+//! trick the nebula plays.
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 use bevy::asset::RenderAssetUsages;
+use bevy::mesh::VertexAttributeValues;
 use bevy::prelude::*;
 use bevy::render::render_resource::PrimitiveTopology;
 use bevy::window::WindowResized;
@@ -40,52 +47,151 @@ pub fn plugin(app: &mut App) {
         .add_systems(OnExit(AppState::Lobby), teardown)
         .add_systems(
             Update,
-            (drift, tick_life, ensure_coverage).run_if(in_state(AppState::Lobby)),
+            (loom, tick_life, ensure_coverage).run_if(in_state(AppState::Lobby)),
         );
 }
 
-/// The backdrop entity: one mesh holding every triangle, and the life living
-/// on it. Gone with the lobby; the board deserves a quiet room.
+/// The backdrop entity: one continuous sheet of triangles, the life living
+/// on it, and the rig it is seen through. Gone with the lobby; the board
+/// deserves a quiet room.
 #[derive(Component)]
 #[require(DespawnOnExit<AppState> = DespawnOnExit(AppState::Lobby))]
 struct Backdrop {
     mesh: Handle<Mesh>,
+    rig: Rig,
     grid: LifeGrid,
+    /// Scratch for the projected vertices, reused every frame.
+    positions: Vec<[f32; 3]>,
+    /// One generation clock per stagger band, phase-spread across the tick.
+    clocks: Vec<f32>,
+    /// Half diagonal of the ground rect the field was built to cover.
+    covered: f32,
 }
 
-/// One revolution takes this many seconds.
-const SPIN_PERIOD_SECS: f32 = 720.0;
-/// How far the field wanders from centre, in world units. [`build`] leaves
-/// at least this much slack beyond the viewport's half diagonal.
-const PAN_AMPLITUDE: f32 = 30.0;
-/// How far the breathing scale may swell the field, as a fraction.
-const BREATH: f32 = 0.04;
-/// Seconds between generations.
-const TICK_SECS: f32 = 0.60;
+/// How far the camera leans from straight down, in degrees. Straight down
+/// would be a scan; this far over, the field reads as a universe seen from
+/// very high up.
+const TILT_DEG: f32 = 35.0;
+/// How high the camera looms, in plane units. High and tilted: distance is
+/// the whole look.
+const HEIGHT: f32 = 700.0;
+/// How far the camera wanders over the plane, in plane units.
+const CAM_PAN: f32 = 200.0;
+/// How far the lean sways either side of its heading, and how long a full
+/// sway takes.
+const YAW_SWAY: f32 = 9.0f32.to_radians();
+const YAW_SWAY_PERIOD_SECS: f32 = 480.0;
+/// Seconds between generations. The life is a slow bloom, not a busy one.
+const TICK_SECS: f32 = 1.5;
 /// The chance, per live cell per generation, of trying to hop.
 const HOP_CHANCE: f32 = 0.01;
 /// How many ticks a hop's landing cell stays lit.
-const FLASH_TICKS: u8 = 4;
-/// How triangles shrink toward their centroids; the remainder is the grid
-/// line the clear colour shows through.
-const GRID_LINE: f32 = 0.10;
+const FLASH_TICKS: u8 = 2;
+/// How many horizontal bands the field is cut into so its generations can
+/// stagger: each band advances at its own offset within the tick, so the
+/// whole field never changes in one simultaneous pulse.
+const LIFE_BANDS: usize = 6;
+/// How much a cell's glow bleeds into its twelve neighbours, from zero (flat
+/// per-cell shading — each triangle its own crisp colour) upward. Kept at
+/// zero: flat is the point.
+const SOFTNESS: f32 = 0.0;
+/// The swell travelling through the surface: how high it lifts, how long a
+/// wave is, and how long it takes to pass.
+const WAVE_HEIGHT: f32 = 7.0;
+const WAVE_LENGTH: f32 = 280.0;
+const WAVE_PERIOD_SECS: f32 = 30.0;
+/// Direction the swell travels across the plane, normalized by hand so it
+/// can be a constant.
+const WAVE_DIR: Vec2 = Vec2::new(0.330, 0.944);
 /// About how many triangles the eye should find on screen at once.
 const TARGET_VISIBLE: usize = 150;
-/// Where the backdrop sits in the 2D stack: under everything the game or the
-/// lobby will ever draw.
+/// Where the backdrop sits in the 2D stack: under everything the game or
+/// the lobby will ever draw.
 const LAYER: f32 = -10.0;
 /// Cake's page background, the cool end of the gradient (`#0f1014`, eased a
-/// touch darker so the grid lines read). The lobby's scrim shares it.
+/// touch darker so the field's depths read). The lobby's scrim shares it.
 pub(crate) const DEEP: Srgba = Srgba::rgb(0.050, 0.055, 0.072);
 /// The nebula's violet from cake's sky, the warm end.
 const VIOLET: Srgba = Srgba::rgb(0.500, 0.400, 0.800);
+/// The app's clear colour: distant triangles melt into it.
+const CLEAR: Srgba = Srgba::rgb(0.09, 0.09, 0.11);
+/// The nebula's wavelength across the plane: how many plane units one full
+/// swing of the colour gradient takes. Small, so the tint varies several
+/// times within a single screen instead of washing one uniform hue.
+const NEBULA_WAVELENGTH: f32 = 420.0;
 
-/// The world-space half diagonal the camera shows right now.
-fn half_diagonal(projection: &Projection) -> f32 {
+const SQRT3_2: f32 = 0.866_025_4;
+
+/// The world-space half extent the camera shows right now.
+fn view_half(projection: &Projection) -> Vec2 {
     match projection {
-        Projection::Orthographic(o) => o.area.half_size().length(),
-        _ => 400.0,
+        Projection::Orthographic(o) => o.area.half_size(),
+        _ => Vec2::new(450.0, 300.0),
     }
+}
+
+// ---- the camera ------------------------------------------------------------
+
+/// A tilted pinhole over the plane, projected on the CPU into the same 2D
+/// world space the lobby renders in.
+///
+/// The camera hangs at [`HEIGHT`] over the ground, leaning [`TILT_DEG`] from
+/// straight down toward the plane's north. The focal length is chosen so one
+/// plane unit at the focus point — the ground the screen centre looks at,
+/// `HEIGHT * tan(tilt)` north of the camera — draws as one world unit: the
+/// field's on-screen grain matches the lobby's, and perspective does the
+/// rest. Closer ground draws larger, distant ground falls away.
+struct Rig {
+    sin_tilt: f32,
+    cos_tilt: f32,
+    focal: f32,
+    focus_d: f32,
+    /// Where the camera hangs over the plane (it pans), and where its lean
+    /// points (it sways).
+    pos: Vec2,
+    yaw: f32,
+}
+
+impl Rig {
+    fn new() -> Self {
+        let (sin_tilt, cos_tilt) = TILT_DEG.to_radians().sin_cos();
+        Self {
+            sin_tilt,
+            cos_tilt,
+            focal: HEIGHT / (cos_tilt * cos_tilt),
+            focus_d: HEIGHT * sin_tilt / cos_tilt,
+            pos: Vec2::ZERO,
+            yaw: 0.0,
+        }
+    }
+
+    /// Project a ground point: where it lands on screen, and the local
+    /// scale (one plane unit draws as this many world units here).
+    fn project(&self, p: Vec2) -> (Vec2, f32) {
+        let rel = rotate(p - self.pos, -self.yaw);
+        let depth = rel.y * self.sin_tilt + HEIGHT * self.cos_tilt;
+        let screen = Vec2::new(
+            self.focal * rel.x / depth,
+            self.focal * (rel.y * self.cos_tilt - HEIGHT * self.sin_tilt) / depth,
+        );
+        (screen, self.focal * HEIGHT / (depth * depth))
+    }
+
+    /// Where a screen point's sight-line meets the ground.
+    fn unproject(&self, at: Vec2) -> Vec2 {
+        let depth = HEIGHT / (self.cos_tilt - at.y * self.sin_tilt / self.focal);
+        let rel = Vec2::new(
+            at.x * depth / self.focal,
+            (at.y * depth / self.focal + HEIGHT * self.sin_tilt) / self.cos_tilt,
+        );
+        self.pos + rotate(rel, self.yaw)
+    }
+}
+
+/// Rotate `v` by `a` radians.
+fn rotate(v: Vec2, a: f32) -> Vec2 {
+    let (s, c) = a.sin_cos();
+    Vec2::new(v.x * c - v.y * s, v.x * s + v.y * c)
 }
 
 /// Spawn the field, sized to whatever the camera currently frames.
@@ -96,16 +202,27 @@ fn spawn(
     room: Res<RoomId>,
     cameras: Query<&Projection, With<Camera>>,
 ) {
-    let half_diagonal = cameras.single().map(half_diagonal).unwrap_or(400.0);
-    let (grid, mesh) = build(half_diagonal, seed_of(&room.0));
+    let half = cameras
+        .single()
+        .map(view_half)
+        .unwrap_or(Vec2::new(450.0, 300.0));
+    let (rig, grid, mesh, covered) = build(half, seed_of(&room.0));
     let mesh = meshes.add(mesh);
     let material = materials.add(ColorMaterial::from_color(Color::WHITE));
+    let positions = vec![[0.0; 3]; grid.sheet.corners.len()];
     commands.spawn((
         Mesh2d(mesh.clone()),
         MeshMaterial2d(material),
         Transform::from_xyz(0.0, 0.0, LAYER),
         Pickable::IGNORE,
-        Backdrop { mesh, grid },
+        Backdrop {
+            mesh,
+            rig,
+            grid,
+            positions,
+            clocks: band_clocks(LIFE_BANDS, TICK_SECS),
+            covered,
+        },
     ));
 }
 
@@ -117,49 +234,104 @@ fn teardown(mut meshes: ResMut<Assets<Mesh>>, backdrops: Query<&Backdrop>) {
     }
 }
 
-/// Turn and wander. The rotation is slow enough to read as stillness that
-/// stirs; the pan is a two-frequency drift so the path never repeats on
-/// screen; the breathing scale keeps the whole field faintly alive.
-fn drift(time: Res<Time>, mut field: Query<&mut Transform, With<Backdrop>>) {
+/// Pan the camera and sway its lean, then re-project every vertex through
+/// the rig, with the swell riding on top. The positions are rewritten in
+/// place, so the draw follows on the same frame.
+fn loom(time: Res<Time>, mut backdrops: Query<&mut Backdrop>, mut meshes: ResMut<Assets<Mesh>>) {
+    let Ok(mut backdrop) = backdrops.single_mut() else {
+        return;
+    };
     let t = time.elapsed_secs();
-    for mut transform in &mut field {
-        transform.rotation = Quat::from_rotation_z(t * std::f32::consts::TAU / SPIN_PERIOD_SECS);
-        let pan = Vec2::new(
-            0.6 * (t * 0.037).sin() + 0.4 * (t * 0.016).sin(),
-            0.6 * (t * 0.028 + 1.7).sin() + 0.4 * (t * 0.010).cos(),
-        ) * PAN_AMPLITUDE;
-        transform.translation = pan.extend(LAYER);
-        let breath = 1.0 + BREATH * (t * 0.014).sin();
-        transform.scale = Vec3::splat(breath);
+    let mesh = backdrop.mesh.clone();
+    let Backdrop {
+        rig,
+        grid,
+        positions,
+        ..
+    } = &mut *backdrop;
+
+    rig.pos = Vec2::new(
+        0.6 * (t * 0.025).sin() + 0.4 * (t * 0.011).sin(),
+        0.6 * (t * 0.019 + 1.7).sin() + 0.4 * (t * 0.008).cos(),
+    ) * CAM_PAN;
+    rig.yaw = YAW_SWAY * (t * std::f32::consts::TAU / YAW_SWAY_PERIOD_SECS).sin();
+
+    let phase = t * std::f32::consts::TAU / WAVE_PERIOD_SECS;
+    for (i, &li) in grid.sheet.corners.iter().enumerate() {
+        let p = grid.sheet.lattice[li as usize];
+        let (screen, scale) = rig.project(p);
+        let swell =
+            WAVE_HEIGHT * (std::f32::consts::TAU * p.dot(WAVE_DIR) / WAVE_LENGTH - phase).sin();
+        positions[i] = [screen.x, screen.y + swell * scale, 0.0];
+    }
+
+    if let Some(mut mesh) = meshes.get_mut(&mesh) {
+        match mesh.try_attribute_mut(Mesh::ATTRIBUTE_POSITION) {
+            Ok(VertexAttributeValues::Float32x3(slot)) if slot.len() == positions.len() => {
+                slot.clone_from(positions);
+            }
+            _ => {
+                mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions.clone());
+            }
+        }
     }
 }
 
-/// Advance the life one generation every [`TICK_SECS`], and repaint the
-/// vertex colours to match. The mesh is rewritten in place, so the draw
-/// follows on the same frame.
+/// Advance the life and repaint the cell colours to match. The generations
+/// are staggered: the field is cut into [`LIFE_BANDS`] horizontal bands, each
+/// advancing at its own offset within the tick, so the life ripples across the
+/// field instead of pulsing as one. The hops are not saved up for the tick
+/// either — a slice flies every frame — and the upkeep (flashes, reseed) runs
+/// on its own clock. The mesh is rewritten in place, so the draw follows on
+/// the same frame.
 fn tick_life(
     time: Res<Time>,
     mut backdrops: Query<&mut Backdrop>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut clock: Local<f32>,
+    mut upkeep: Local<f32>,
 ) {
     let Ok(mut backdrop) = backdrops.single_mut() else {
         return;
     };
-    *clock += time.delta_secs();
-    if *clock < TICK_SECS {
+    let dt = time.delta_secs();
+    // This frame's share of the tick's hop attempts: frame-rate independent
+    // in expectation, and sparse enough that the hops trickle in.
+    let chance = (HOP_CHANCE * dt / TICK_SECS).min(1.0);
+    let mut dirty = backdrop.grid.hops(chance);
+    for band in 0..LIFE_BANDS {
+        backdrop.clocks[band] += dt;
+        if backdrop.clocks[band] >= TICK_SECS {
+            backdrop.clocks[band] -= TICK_SECS;
+            backdrop.grid.generation_band(band, LIFE_BANDS);
+            dirty = true;
+        }
+    }
+    *upkeep += dt;
+    if *upkeep >= TICK_SECS {
+        *upkeep -= TICK_SECS;
+        backdrop.grid.upkeep();
+        dirty = true;
+    }
+    if !dirty {
         return;
     }
-    *clock = 0.0;
-    backdrop.grid.step();
     if let Some(mut mesh) = meshes.get_mut(&backdrop.mesh) {
-        paint(&backdrop.grid, &mut mesh);
+        paint(&mut backdrop.grid, &mut mesh, SOFTNESS);
     }
 }
 
-/// Rebuild the field if the window has grown past the margins it was built
-/// with — a maximise mid-lobby must not bare the grid's edge. Shrinking is
-/// left alone: extra field off-screen costs nothing.
+/// The per-band generation clocks, phase-spread across one tick: band 0
+/// advances first, the last band a tick later, and every band thereafter once
+/// a tick — so no two bands tick together and the field never pulses as one.
+fn band_clocks(bands: usize, tick: f32) -> Vec<f32> {
+    (0..bands)
+        .map(|band| band as f32 / bands as f32 * tick)
+        .collect()
+}
+
+/// Rebuild the field if the window has grown past the ground it was built
+/// to cover — a maximise mid-lobby must not bare the sheet's edge.
+/// Shrinking is left alone: extra field off-screen costs nothing.
 fn ensure_coverage(
     mut resized: MessageReader<WindowResized>,
     cameras: Query<&Projection, With<Camera>>,
@@ -169,25 +341,27 @@ fn ensure_coverage(
     if resized.read().next().is_none() {
         return;
     }
-    let Ok(half_diagonal) = cameras.single().map(half_diagonal) else {
+    let Ok(half) = cameras.single().map(view_half) else {
         return;
     };
     let Ok(mut backdrop) = backdrops.single_mut() else {
         return;
     };
-    if half_diagonal + PAN_AMPLITUDE <= backdrop.grid.slack() {
+    if half.length() + CAM_PAN <= backdrop.covered {
         return;
     }
-    let (grid, mesh) = build_with_side(half_diagonal, backdrop.grid.side, backdrop.grid.seed());
+    let (rig, grid, mesh, covered) =
+        build_with_side(half, backdrop.grid.side, backdrop.grid.seed());
+    backdrop.rig = rig;
     backdrop.grid = grid;
+    backdrop.covered = covered;
+    backdrop.positions = vec![[0.0; 3]; backdrop.grid.sheet.corners.len()];
     if let Some(mut existing) = meshes.get_mut(&backdrop.mesh) {
         *existing = mesh;
     }
 }
 
 // ---- the grid --------------------------------------------------------------
-
-const SQRT3_2: f32 = 0.866_025_4;
 
 /// One cell of the field: an up-pointing or down-pointing triangle.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -202,49 +376,62 @@ const HOP_DIRECTIONS: [(i32, i32); 6] = [(1, 0), (-1, 0), (0, 1), (0, -1), (1, -
 
 /// The triangular field and the life on it.
 ///
-/// Cells are indexed `k = orientation * w * h + v * w + u`; triangle `k` of
-/// the mesh is cell `k`, its vertices at `3k .. 3k + 3`. The topology is a
-/// torus: indices wrap, so the life never notices an edge even if the camera
-/// somehow could.
+/// Cells are indexed `k = orientation * w * h + v * w + u`. The drawn mesh
+/// gives every cell its own three vertices, at the triangle's own corners —
+/// nothing is shared between neighbours — so each triangle can carry one flat
+/// colour, the cell's.
 pub(crate) struct LifeGrid {
     w: usize,
     h: usize,
-    /// Triangle side, in world units.
+    /// Triangle side, in plane units.
     side: f32,
-    /// The radius of open field guaranteed around the viewport's centre:
-    /// the inscribed circle the grid was sized to.
-    slack: f32,
     cells: Vec<u8>,
-    /// Generations since birth; newborns glow brighter, elders settle.
-    ages: Vec<u8>,
     /// Ticks of highlight left, set on a hop's landing cell.
     flash: Vec<u8>,
     /// Scratch for the generation step.
     next: Vec<u8>,
     /// The twelve neighbours of every cell, precomputed and wrapped.
     nbrs: Vec<[u32; 12]>,
-    /// Where each cell sits on the deep-to-violet gradient, `0..1`.
-    grad_t: Vec<f32>,
+    /// The sheet's static painting geometry.
+    sheet: Sheet,
     rng: Rng,
     seed: u64,
 }
 
+/// The drawn sheet's static geometry: the lattice points the triangles meet
+/// at, where each sits on the gradient and how far it has melted toward the
+/// clear colour, and, for every mesh vertex, which lattice point it stands on.
+struct Sheet {
+    lattice: Vec<Vec2>,
+    grad: Vec<f32>,
+    fade: Vec<f32>,
+    /// Three per cell, six per mesh triangle pair: the lattice vertex under
+    /// each mesh vertex, in mesh order.
+    corners: Vec<u32>,
+}
+
 impl LifeGrid {
-    /// A field `w * h` parallelogram cells across, seeded from `seed` and
-    /// sized to guarantee `slack` radius of coverage.
-    pub(crate) fn new(w: usize, h: usize, side: f32, slack: f32, seed: u64) -> Self {
+    /// A field of `w * h` cells anchored at `origin` in plane space, its
+    /// far distances melting out over `fade`.
+    pub(crate) fn new(
+        w: usize,
+        h: usize,
+        side: f32,
+        origin: Vec2,
+        fade_start: f32,
+        fade_end: f32,
+        seed: u64,
+    ) -> Self {
         let n = 2 * w * h;
         let mut grid = LifeGrid {
             w,
             h,
             side,
-            slack,
             cells: vec![0; n],
-            ages: vec![0; n],
             flash: vec![0; n],
             next: vec![0; n],
             nbrs: neighbor_table(w, h),
-            grad_t: gradient(w, h, side),
+            sheet: sheet(w, h, side, origin, fade_start, fade_end),
             rng: Rng(seed.max(1)),
             seed,
         };
@@ -252,7 +439,7 @@ impl LifeGrid {
         grid
     }
 
-    /// The cell index of orientation `o` at `(u, v)`, unwrapped.
+    /// The cell index of orientation `o` at `(u, v)`, wrapped on the torus.
     pub(crate) fn index(&self, u: i32, v: i32, o: Orientation) -> usize {
         let u = u.rem_euclid(self.w as i32) as usize;
         let v = v.rem_euclid(self.h as i32) as usize;
@@ -270,46 +457,53 @@ impl LifeGrid {
     /// Fresh soup. Called at birth, and by `step` whenever the population
     /// escapes its band: burned out, or grown to a churning near-solid.
     pub(crate) fn reseed(&mut self, p: f32) {
-        for ((cell, age), flash) in self
-            .cells
-            .iter_mut()
-            .zip(self.ages.iter_mut())
-            .zip(self.flash.iter_mut())
-        {
+        for (cell, flash) in self.cells.iter_mut().zip(self.flash.iter_mut()) {
             *cell = u8::from(self.rng.chance(p));
-            *age = 0;
             *flash = 0;
         }
     }
 
-    /// One generation: Conway's birth and survival over the twelve
-    /// neighbours, then the hops, then the upkeep.
-    pub(crate) fn step(&mut self) {
-        self.generation();
-        self.hops(HOP_CHANCE);
-        self.upkeep();
-    }
-
-    /// The B3/S23 generation over the 12-neighbourhood.
-    pub(crate) fn generation(&mut self) {
-        for i in 0..self.cells.len() {
-            let mut count = 0;
-            for &n in &self.nbrs[i] {
-                count += self.cells[n as usize];
+    /// The B3/S23 generation over the 12-neighbourhood, restricted to the
+    /// cells of band `band` of `bands` horizontal strips. Each band is
+    /// advanced at its own offset in time, so the field's life staggers
+    /// instead of pulsing as one. The rule still reads the previous state
+    /// everywhere, so a band never sees its own births mid-pass.
+    pub(crate) fn generation_band(&mut self, band: usize, bands: usize) {
+        let rows = self.h;
+        let v0 = rows * band / bands;
+        let v1 = rows * (band + 1) / bands;
+        for v in v0..v1 {
+            for u in 0..self.w {
+                for o in [Orientation::Up, Orientation::Down] {
+                    let i = self.index(u as i32, v as i32, o);
+                    let mut count = 0;
+                    for &n in &self.nbrs[i] {
+                        count += self.cells[n as usize];
+                    }
+                    // Conway's: three neighbours birth, two or three keep alive.
+                    let lives = matches!((self.cells[i], count), (1, 2 | 3) | (0, 3));
+                    self.next[i] = u8::from(lives);
+                }
             }
-            // Conway's: three neighbours birth, two or three keep alive.
-            let lives = matches!((self.cells[i], count), (1, 2 | 3) | (0, 3));
-            self.next[i] = u8::from(lives);
         }
-        std::mem::swap(&mut self.cells, &mut self.next);
+        for v in v0..v1 {
+            for u in 0..self.w {
+                for o in [Orientation::Up, Orientation::Down] {
+                    let i = self.index(u as i32, v as i32, o);
+                    self.cells[i] = self.next[i];
+                }
+            }
+        }
     }
 
     /// The checkers moves: each live cell may leap over an occupied
     /// same-orientation neighbour into the empty cell exactly beyond. The
     /// mover's cell empties; the jumped cell stays — a hop is a hop, not a
-    /// capture.
-    pub(crate) fn hops(&mut self, chance: f32) {
+    /// capture. Called with a small `chance` every frame, the hops stagger in
+    /// across the tick instead of all flying at once. True if any piece moved.
+    pub(crate) fn hops(&mut self, chance: f32) -> bool {
         let (w, h) = (self.w as i32, self.h as i32);
+        let mut moved = false;
         for u in 0..w {
             for v in 0..h {
                 for o in [Orientation::Up, Orientation::Down] {
@@ -317,10 +511,11 @@ impl LifeGrid {
                         continue;
                     }
                     let dir = HOP_DIRECTIONS[self.rng.below(HOP_DIRECTIONS.len())];
-                    self.try_hop(u, v, o, dir);
+                    moved |= self.try_hop(u, v, o, dir);
                 }
             }
         }
+        moved
     }
 
     /// One hop attempt from `(u, v, o)` along `dir`: it flies when the
@@ -338,7 +533,6 @@ impl LifeGrid {
         }
         self.cells[from] = 0;
         self.cells[landing] = 1;
-        self.ages[landing] = 0;
         self.flash[landing] = FLASH_TICKS;
         true
     }
@@ -346,11 +540,8 @@ impl LifeGrid {
     /// Ages and flashes advance; a population burnt out or grown past its
     /// band is reseeded.
     fn upkeep(&mut self) {
-        for i in 0..self.cells.len() {
-            if self.cells[i] == 1 {
-                self.ages[i] = self.ages[i].saturating_add(1);
-            }
-            self.flash[i] = self.flash[i].saturating_sub(1);
+        for flash in self.flash.iter_mut() {
+            *flash = flash.saturating_sub(1);
         }
         let n = self.cells.len() as u32;
         let pop = self.population();
@@ -367,29 +558,116 @@ impl LifeGrid {
         self.seed
     }
 
-    /// The coverage radius the grid guarantees around the viewport centre.
-    pub(crate) fn slack(&self) -> f32 {
-        self.slack
+    /// The life on cell `k`: one for a live cell, a little extra while its
+    /// landing flash lasts, and — when `softness` is above zero — a blend with
+    /// the mean of the twelve neighbours. At zero this is flat per-cell
+    /// shading, the default.
+    fn cell_lit(&self, k: usize, softness: f32) -> f32 {
+        let own = f32::from(self.cells[k]) + 0.35 * f32::from(self.flash[k]);
+        if softness <= 0.0 {
+            return own.min(1.0);
+        }
+        let mut sum = 0.0;
+        for &n in &self.nbrs[k] {
+            let n = n as usize;
+            sum += f32::from(self.cells[n]) + 0.35 * f32::from(self.flash[n]);
+        }
+        let mean = sum / 12.0;
+        ((1.0 - softness) * own + softness * mean).min(1.0)
     }
+}
 
-    /// The colour one cell wears this tick, as linear RGBA for the vertex
-    /// buffer.
-    fn cell_colour(&self, k: usize) -> [f32; 4] {
-        let t = self.grad_t[k];
-        let srgba = if self.cells[k] == 1 {
-            let base = DEEP.mix(&VIOLET, 0.45 + 0.45 * t);
-            // Newborns glow, elders settle, a fresh landing flashes.
-            let youth = 1.0 - (self.ages[k].min(16) as f32) / 16.0;
-            let lit = (0.08 + 0.16 * youth + 0.07 * self.flash[k] as f32).min(0.55);
-            base.mix(&Srgba::WHITE, lit)
-        } else {
-            // The empty field whispers: near cake's deep at the cool end,
-            // breathing faint violet toward the warm one.
-            DEEP.mix(&VIOLET, 0.10 + 0.30 * t).mix(&Srgba::BLACK, 0.30)
-        };
-        let lin = LinearRgba::from(srgba);
-        [lin.red, lin.green, lin.blue, 1.0]
+/// The colour of a cell at gradient `grad` (0..1 across the nebula) with life
+/// `lit` (0..1), melted toward the clear colour by `fade`. One flat colour per
+/// triangle; the far field dissolves into the clear.
+fn shade(lit: f32, grad: f32, fade: f32) -> [f32; 4] {
+    let still = DEEP
+        .mix(&VIOLET, 0.12 + 0.32 * grad)
+        .mix(&Srgba::BLACK, 0.28);
+    let alive = DEEP
+        .mix(&VIOLET, 0.55 + 0.40 * grad)
+        .mix(&Srgba::WHITE, 0.08 + 0.30 * lit);
+    let bloom = smoothstep(0.15, 0.5, lit);
+    let c = LinearRgba::from(still.mix(&alive, bloom));
+    let clear = LinearRgba::from(CLEAR);
+    [
+        c.red + (clear.red - c.red) * fade,
+        c.green + (clear.green - c.green) * fade,
+        c.blue + (clear.blue - c.blue) * fade,
+        1.0,
+    ]
+}
+
+/// `smoothstep(a, b, x)`, the tasteful climb from zero to one.
+fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
+    let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// Where a plane point sits on the nebula gradient, as a mix fraction from
+/// the deep near-black toward the violet. A small-scale drift summed from a
+/// few non-parallel sines, so it reads as soft blotches of tint rather than
+/// stripes, and the colour varies several times across a screen.
+fn nebula(p: Vec2) -> f32 {
+    let s = std::f32::consts::TAU / NEBULA_WAVELENGTH;
+    let n = (p.x * s).sin() + (p.y * s * 1.3 + 0.7).sin() + ((p.x - p.y) * s * 0.6 - 0.9).sin();
+    (0.5 + n / 6.0).clamp(0.0, 1.0)
+}
+
+/// The lattice vertex of `(u, v)` in a `w`-wide sheet.
+fn lattice_index(w: usize, u: usize, v: usize) -> usize {
+    v * (w + 1) + u
+}
+
+/// The sheet's geometry over a field of `w * h` cells: the lattice points
+/// the triangles meet at, their gradient and fade fractions, and the lattice
+/// vertex under each mesh vertex. Everything static about the painting lives
+/// here.
+fn sheet(w: usize, h: usize, side: f32, origin: Vec2, fade_start: f32, fade_end: f32) -> Sheet {
+    let a = Vec2::new(side, 0.0);
+    let b = Vec2::new(0.5 * side, side * SQRT3_2);
+    let at = |u: f32, v: f32| origin + u * a + v * b;
+
+    let mut lattice = Vec::with_capacity((w + 1) * (h + 1));
+    let mut grad = Vec::with_capacity(lattice.capacity());
+    let mut fade = Vec::with_capacity(lattice.capacity());
+    for v in 0..=h {
+        for u in 0..=w {
+            let p = at(u as f32, v as f32);
+            lattice.push(p);
+            grad.push(nebula(p));
+            fade.push(smoothstep(fade_start, fade_end, p.y));
+        }
     }
+    let corners = mesh_corners(w, h);
+    Sheet {
+        lattice,
+        grad,
+        fade,
+        corners,
+    }
+}
+
+/// The lattice vertex under every mesh vertex, in the order [`field_mesh`]
+/// emits them: for each cell in index order, its three corners. Up cells
+/// (indices `0..w*h`) use their low triangle, down cells their high one.
+fn mesh_corners(w: usize, h: usize) -> Vec<u32> {
+    let mut corners = Vec::with_capacity(6 * w * h);
+    for o in [Orientation::Up, Orientation::Down] {
+        for v in 0..h {
+            for u in 0..w {
+                let v00 = lattice_index(w, u, v) as u32;
+                let v10 = lattice_index(w, u + 1, v) as u32;
+                let v01 = lattice_index(w, u, v + 1) as u32;
+                let v11 = lattice_index(w, u + 1, v + 1) as u32;
+                corners.extend(match o {
+                    Orientation::Up => [v00, v10, v01],
+                    Orientation::Down => [v10, v11, v01],
+                });
+            }
+        }
+    }
+    corners
 }
 
 /// One cell's twelve neighbours as `(du, dv, orientation)` offsets, edge
@@ -463,129 +741,116 @@ fn index(u: i32, v: i32, o: Orientation, w: usize, h: usize) -> usize {
     base + v * w + u
 }
 
-/// Where each cell sits on the deep-to-violet gradient: a diagonal sweep,
-/// `0` at the grid's low corner, `1` at its high one.
-fn gradient(w: usize, h: usize, side: f32) -> Vec<f32> {
-    let span_x = side * (w as f32 + 0.5 * h as f32);
-    let span_y = side * SQRT3_2 * h as f32;
-    let mut ts = Vec::with_capacity(2 * w * h);
-    for o in [Orientation::Up, Orientation::Down] {
-        for v in 0..h {
-            for u in 0..w {
-                let c = cell_centroid(u, v, o, side);
-                let t = (c.x + c.y + 0.5 * (span_x + span_y)) / (span_x + span_y);
-                ts.push(t.clamp(0.0, 1.0));
-            }
-        }
-    }
-    ts
-}
-
-/// A cell's centroid, in grid-local world units, before centring.
-fn cell_centroid(u: usize, v: usize, o: Orientation, side: f32) -> Vec2 {
-    let a = Vec2::new(side, 0.0);
-    let b = Vec2::new(0.5 * side, side * SQRT3_2);
-    let p = |du: f32, dv: f32| du * a + dv * b;
-    match o {
-        Orientation::Up => {
-            (p(u as f32, v as f32) + p(u as f32 + 1.0, v as f32) + p(u as f32, v as f32 + 1.0))
-                / 3.0
-        }
-        Orientation::Down => {
-            (p(u as f32 + 1.0, v as f32)
-                + p(u as f32 + 1.0, v as f32 + 1.0)
-                + p(u as f32, v as f32 + 1.0))
-                / 3.0
-        }
-    }
-}
-
-/// Build a field covering a viewport of `half_diagonal` world-unit radius,
-/// plus the pan, spin, and breathing margins. Returns the life and its mesh.
-pub(crate) fn build(half_diagonal: f32, seed: u64) -> (LifeGrid, Mesh) {
-    let (w, h, side, slack, mesh) = geometry(half_diagonal, default_side(half_diagonal));
-    (LifeGrid::new(w, h, side, slack, seed), mesh)
+/// Build a field covering everything the camera can see of a viewport this
+/// many world units in half-extent, plus its whole roam. Returns the rig,
+/// the life, the mesh (already painted), and the coverage radius.
+fn build(view_half: Vec2, seed: u64) -> (Rig, LifeGrid, Mesh, f32) {
+    let side = default_side(view_half);
+    build_with_side(view_half, side, seed)
 }
 
 /// As [`build`], but at a given triangle size — the resize path keeps the
 /// field's grain and grows its reach instead.
-fn build_with_side(half_diagonal: f32, side: f32, seed: u64) -> (LifeGrid, Mesh) {
-    let (w, h, side, slack, mesh) = geometry(half_diagonal, side);
-    (LifeGrid::new(w, h, side, slack, seed), mesh)
+fn build_with_side(view_half: Vec2, side: f32, seed: u64) -> (Rig, LifeGrid, Mesh, f32) {
+    let rig = Rig::new();
+    // The ground rect the viewport can show, with the camera at home.
+    let (mut min, mut max) = (Vec2::splat(f32::MAX), Vec2::splat(f32::MIN));
+    for corner in [Vec2::NEG_ONE, Vec2::X, Vec2::Y, Vec2::ONE] {
+        let g = rig.unproject(corner * view_half);
+        min = min.min(g);
+        max = max.max(g);
+    }
+    // The camera roams over its pan and sways its lean: every rect corner
+    // shoved around the pan, every corner swung both ways about the origin,
+    // and the bbox of all of it is what the field must cover.
+    let mut corners = Vec::new();
+    for x in [min.x, max.x] {
+        for y in [min.y, max.y] {
+            let c = Vec2::new(x, y);
+            corners.push(c);
+            corners.push(rotate(c, YAW_SWAY));
+            corners.push(rotate(c, -YAW_SWAY));
+        }
+    }
+    min = Vec2::splat(f32::MAX);
+    max = Vec2::splat(f32::MIN);
+    for c in corners {
+        min = min.min(c);
+        max = max.max(c);
+    }
+    let margin = Vec2::splat(CAM_PAN + WAVE_HEIGHT + side);
+    min -= margin;
+    max += margin;
+
+    let centre = (min + max) / 2.0;
+    let span = max - min;
+    let covered = span.length() / 2.0;
+
+    // The sheet is a parallelogram of cells; its slanted sides mean the
+    // largest axis-aligned rectangle inside it is narrower than its bounding
+    // box by the rectangle's own height over √3. Size for that, or a slanted
+    // edge of missing sheet shows up mid-view.
+    let h = (span.y / (side * SQRT3_2)).ceil() as usize;
+    let w = (((span.x + span.y / SQRT3_2) / side).ceil() as usize).max(1);
+    // Anchor the parallelogram so the visible rect hugs its wide part: the
+    // slanted left side starts a full inset west of the rect's left edge.
+    let origin = Vec2::new(
+        centre.x + span.x / 2.0 - w as f32 * side,
+        centre.y - span.y / 2.0,
+    );
+
+    // The melt lives past the ground the screen's top edge can reach at
+    // home, and finishes a view-height further out: a whisper of dissolve
+    // at the top of the frame, never a bare edge.
+    let fade_start = rig.focus_d + view_half.y;
+    let fade_end = fade_start + view_half.y * 1.2;
+    let mut grid = LifeGrid::new(w, h, side, origin, fade_start, fade_end, seed);
+    let mut mesh = field_mesh(w, h);
+    paint(&mut grid, &mut mesh, SOFTNESS);
+    (rig, grid, mesh, covered)
 }
 
 /// The triangle size that puts about [`TARGET_VISIBLE`] triangles on a
-/// viewport of this half diagonal, assuming a 16:10-ish frame.
-fn default_side(half_diagonal: f32) -> f32 {
-    // A typical viewport area from its half diagonal, at a plump aspect.
-    let area = 4.0 * half_diagonal * half_diagonal * 0.62;
+/// viewport of this half extent.
+fn default_side(view_half: Vec2) -> f32 {
+    // A typical viewport area from its half extent, at a plump aspect.
+    let area = 4.0 * view_half.x * view_half.y * 0.62;
     let per_triangle = SQRT3_2 / 2.0;
     (area / (TARGET_VISIBLE as f32 * per_triangle))
         .sqrt()
         .clamp(48.0, 110.0)
 }
 
-/// The grid dimensions whose inscribed circle swallows the viewport plus
-/// every motion margin, and the mesh itself.
-fn geometry(half_diagonal: f32, side: f32) -> (usize, usize, f32, f32, Mesh) {
-    // Room for the pan, one triangle of spin sweep, and the breath.
-    let slack = half_diagonal * (1.0 + BREATH) + PAN_AMPLITUDE + side;
-    // An inscribed circle of radius `slack` needs the parallelogram's two
-    // edge separations to be at least twice that.
-    let n = (2.0 * slack / (side * SQRT3_2)).ceil() as usize;
-    let (w, h) = (n, n);
-    (w, h, side, slack, field_mesh(w, h, side))
-}
-
-/// The whole field as one triangle list, every triangle shrunk toward its
-/// centroid so the gaps read as grid lines.
-pub(crate) fn field_mesh(w: usize, h: usize, side: f32) -> Mesh {
-    let a = Vec2::new(side, 0.0);
-    let b = Vec2::new(0.5 * side, side * SQRT3_2);
-    // Centre the covered parallelogram on the origin.
-    let origin = -Vec2::new(
-        side * (w as f32 + 0.5 * h as f32) / 2.0,
-        side * SQRT3_2 * h as f32 / 2.0,
-    );
-    let shrink = 1.0 - GRID_LINE;
-
-    let mut positions = Vec::with_capacity(6 * w * h);
-    let mut uvs = Vec::with_capacity(6 * w * h);
-    for v in 0..h {
-        for u in 0..w {
-            let at = |du: f32, dv: f32| origin + (u as f32 + du) * a + (v as f32 + dv) * b;
-            for (p0, p1, p2) in [
-                // Up: (u,v), (u+1,v), (u,v+1).
-                (at(0.0, 0.0), at(1.0, 0.0), at(0.0, 1.0)),
-                // Down: (u+1,v), (u+1,v+1), (u,v+1).
-                (at(1.0, 0.0), at(1.0, 1.0), at(0.0, 1.0)),
-            ] {
-                let centroid = (p0 + p1 + p2) / 3.0;
-                for p in [p0, p1, p2] {
-                    let p = centroid + (p - centroid) * shrink;
-                    positions.push([p.x, p.y, 0.0]);
-                    uvs.push([0.0, 0.0]);
-                }
-            }
-        }
-    }
-
+/// The sheet as a flat-shaded triangle list: each cell owns its three
+/// vertices, at the triangle's own corners, so the cell can carry one flat
+/// colour. Nothing is shared, so the triangles are crisp.
+fn field_mesh(w: usize, h: usize) -> Mesh {
+    let vertices = 6 * w * h;
     let mut mesh = Mesh::new(
         PrimitiveTopology::TriangleList,
         RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
     );
-    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
-    // Painted by `paint` before the first draw; white stands in until then.
-    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, vec![[1.0, 1.0, 1.0, 1.0]; 6 * w * h]);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, vec![[0.0; 3]; vertices]);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0.0; 2]; vertices]);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, vec![[0.0; 4]; vertices]);
     mesh
 }
 
-/// Write every cell's colour into the mesh's vertex colours.
-pub(crate) fn paint(grid: &LifeGrid, mesh: &mut Mesh) {
-    let colours: Vec<[f32; 4]> = (0..grid.cells.len())
-        .flat_map(|k| std::iter::repeat_n(grid.cell_colour(k), 3))
-        .collect();
+/// Write the sheet's colours: one flat colour per cell, from its own life and
+/// the nebula at its corners. With `softness` above zero each cell blends a
+/// touch with its neighbours; at zero the lattice reads cell-by-cell and the
+/// far distances melt into the clear colour.
+pub(crate) fn paint(grid: &mut LifeGrid, mesh: &mut Mesh, softness: f32) {
+    let cells = 2 * grid.w * grid.h;
+    let mut colours = Vec::with_capacity(grid.sheet.corners.len());
+    for k in 0..cells {
+        let lit = grid.cell_lit(k, softness);
+        for c in 0..3 {
+            let vi = k * 3 + c;
+            let li = grid.sheet.corners[vi] as usize;
+            colours.push(shade(lit, grid.sheet.grad[li], grid.sheet.fade[li]));
+        }
+    }
     mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colours);
 }
 
@@ -622,6 +887,19 @@ impl Rng {
 mod tests {
     use super::*;
     use bevy::mesh::VertexAttributeValues;
+
+    /// A small grid away from any fade, for the life tests.
+    fn test_grid(w: usize, h: usize, seed: u64) -> LifeGrid {
+        LifeGrid::new(w, h, 10.0, Vec2::ZERO, 1.0e30, 2.0e30, seed)
+    }
+
+    /// One generation the way the lobby runs it: the rule, a pass of hops,
+    /// then the upkeep.
+    fn step(grid: &mut LifeGrid) {
+        grid.generation_band(0, 1);
+        grid.hops(HOP_CHANCE);
+        grid.upkeep();
+    }
 
     /// Every cell's twelve neighbours: all distinct, all in range.
     #[test]
@@ -681,7 +959,7 @@ mod tests {
     /// Conway's own: three neighbours birth, two keep alive, solitude dies.
     #[test]
     fn the_generation_rule_is_conways() {
-        let mut grid = LifeGrid::new(6, 6, 10.0, 100.0, 7);
+        let mut grid = test_grid(6, 6, 7);
         grid.reseed(0.0);
         // A birth: three neighbours around an empty cell.
         let born = grid.index(3, 3, Orientation::Up);
@@ -701,17 +979,41 @@ mod tests {
         let lone = grid.index(5, 5, Orientation::Up);
         grid.cells[lone] = 1;
         // No upkeep: the population band must not interfere.
-        grid.generation();
+        grid.generation_band(0, 1);
         assert_eq!(grid.cells[born], 1, "three neighbours birth");
         assert_eq!(grid.cells[kept], 1, "two neighbours survive");
         assert_eq!(grid.cells[lone], 0, "a lone cell dies");
+    }
+
+    /// The stagger: a generation runs only over its own band's rows, so a
+    /// birth in another band's rows is left for that band's turn.
+    #[test]
+    fn a_generation_band_only_advances_its_own_rows() {
+        let (w, h, bands) = (8, 4, 2);
+        let mut grid = test_grid(w, h, 17);
+        grid.reseed(0.0);
+        // A birth in band 0's rows (v=0) and one in band 1's (v=3).
+        let low = grid.index(3, 0, Orientation::Up);
+        let high = grid.index(3, 3, Orientation::Up);
+        for target in [low, high] {
+            let (u, v) = (target % w, target / w);
+            for (du, dv) in [(1, 0), (0, 1), (1, -1)] {
+                let i = grid.index(u as i32 + du, v as i32 + dv, Orientation::Up);
+                grid.cells[i] = 1;
+            }
+        }
+        grid.generation_band(0, bands);
+        assert_eq!(grid.cells[low], 1, "band 0's birth happens");
+        assert_eq!(grid.cells[high], 0, "band 1's birth waits its turn");
+        grid.generation_band(1, bands);
+        assert_eq!(grid.cells[high], 1, "band 1's birth happens on its turn");
     }
 
     /// With a lane open, a hop leaps over the occupied neighbour into the
     /// empty cell exactly beyond, which stays alive — a hop is not a capture.
     #[test]
     fn a_hop_leaps_over_an_occupied_neighbour_into_an_empty_landing() {
-        let mut grid = LifeGrid::new(8, 8, 10.0, 200.0, 11);
+        let mut grid = test_grid(8, 8, 11);
         grid.reseed(0.0);
         let (from, over, landing) = (
             grid.index(3, 3, Orientation::Up),
@@ -731,7 +1033,7 @@ mod tests {
     /// or an occupied landing, and the cell does not move.
     #[test]
     fn a_hop_needs_an_occupied_neighbour_and_an_empty_landing() {
-        let mut grid = LifeGrid::new(8, 8, 10.0, 200.0, 13);
+        let mut grid = test_grid(8, 8, 13);
         grid.reseed(0.0);
         let (from, empty, landing) = (
             grid.index(3, 3, Orientation::Up),
@@ -751,7 +1053,7 @@ mod tests {
     /// A landing's flash decays away over a few ticks.
     #[test]
     fn a_landing_flashes_and_fades() {
-        let mut grid = LifeGrid::new(6, 6, 10.0, 100.0, 17);
+        let mut grid = test_grid(6, 6, 17);
         grid.reseed(0.0);
         let (a, b, c) = (
             grid.index(2, 2, Orientation::Up),
@@ -773,10 +1075,10 @@ mod tests {
     /// reseeding rescues a burnt-out field and prunes a churning solid one.
     #[test]
     fn the_population_stays_in_its_band() {
-        let mut grid = LifeGrid::new(14, 10, 10.0, 150.0, 23);
+        let mut grid = test_grid(14, 10, 23);
         let n = grid.cells.len() as u32;
         for _ in 0..400 {
-            grid.step();
+            step(&mut grid);
             let pop = grid.population();
             assert!(pop >= n / 20, "burned out: {pop}/{n}");
             assert!(pop <= n * 9 / 10, "saturated: {pop}/{n}");
@@ -784,74 +1086,184 @@ mod tests {
         }
     }
 
-    /// The mesh holds two triangles per cell, centred on the origin, and the
-    /// vertex colour slots line up with the cells.
+    /// A pass of hops never changes the population: every hop is a move. The
+    /// lobby slices these passes thin across the tick, but each slice is still
+    /// only a move.
     #[test]
-    fn the_mesh_holds_two_centred_triangles_per_cell() {
-        let (w, h) = (6, 5);
-        let mesh = field_mesh(w, h, 12.0);
-        let positions = mesh
-            .attribute(Mesh::ATTRIBUTE_POSITION)
-            .expect("positions present")
-            .as_float3()
-            .expect("positions are float3");
-        assert_eq!(positions.len(), 6 * w * h);
-        let centre: Vec2 = positions
-            .iter()
-            .map(|[x, y, _]| Vec2::new(*x, *y))
-            .sum::<Vec2>()
-            / (positions.len() as f32);
-        assert!(centre.length() < 1.0, "field off centre: {centre}");
+    fn hops_conserve_the_population() {
+        let mut grid = test_grid(16, 12, 31);
+        for _ in 0..10 {
+            let before = grid.population();
+            // One tick's hops, sliced the way the lobby staggers them.
+            for _ in 0..90 {
+                grid.hops(HOP_CHANCE / 90.0);
+            }
+            assert_eq!(grid.population(), before, "a hop is a move, not a birth");
+            step(&mut grid);
+        }
+    }
 
-        let mut grid = LifeGrid::new(w, h, 12.0, 100.0, 29);
-        let mut mesh = mesh;
-        // Triangle k is cell k: a dead field paints exactly the dead colour.
-        grid.reseed(0.0);
-        paint(&grid, &mut mesh);
-        let VertexAttributeValues::Float32x4(colours) = mesh
-            .attribute(Mesh::ATTRIBUTE_COLOR)
-            .expect("colours present")
-        else {
-            panic!("colours are float4");
+    /// `hops` reports whether any piece moved — the lobby repaints only when
+    /// a hop lands, and an empty field moves nothing.
+    #[test]
+    fn hops_report_whether_anything_moved() {
+        let mut empty = test_grid(16, 12, 31);
+        empty.reseed(0.0);
+        assert!(!empty.hops(1.0), "an empty field hops nowhere");
+    }
+
+    /// The camera looks down from far away: the ground at the focus lands
+    /// dead centre at unit scale, and equal steps either side of the focus
+    /// are compressed the further they are.
+    #[test]
+    fn the_rig_looms_rather_than_scans() {
+        let rig = Rig::new();
+        let (at, scale) = rig.project(rig.pos + Vec2::new(0.0, rig.focus_d));
+        assert!(at.distance(Vec2::ZERO) < 0.01, "focus off centre: {at}");
+        assert!((scale - 1.0).abs() < 0.01, "focus scale {scale}");
+
+        let near = rig
+            .project(rig.pos + Vec2::new(0.0, rig.focus_d - 100.0))
+            .0
+            .y;
+        let far = rig
+            .project(rig.pos + Vec2::new(0.0, rig.focus_d + 100.0))
+            .0
+            .y;
+        assert!(near < 0.0 && far > 0.0, "near {near}, far {far}");
+        assert!(
+            far.abs() < near.abs(),
+            "the far step must travel less on screen: {far} vs {near}"
+        );
+    }
+
+    /// Every screen point's sight-line meets the ground where projecting
+    /// that ground point put it.
+    #[test]
+    fn projection_round_trips_through_the_rig() {
+        let rig = Rig::new();
+        for p in [
+            Vec2::ZERO,
+            Vec2::new(300.0, -200.0),
+            Vec2::new(-500.0, 400.0),
+            Vec2::new(600.0, rig.focus_d + 300.0),
+        ] {
+            let (screen, _) = rig.project(p);
+            assert!(
+                rig.unproject(screen).distance(p) < 0.5,
+                "{p} -> {screen:?} does not round-trip"
+            );
+        }
+    }
+
+    /// Flat shading: a cell's life lights all three of its vertices, and
+    /// lights them by the same amount — the cell is one flat glow, only the
+    /// nebula varying across its corners. At the default zero softness the
+    /// rest of the field cannot brighten a cell.
+    #[test]
+    fn flat_shading_paints_each_cell_by_its_own_life() {
+        let mut grid = test_grid(9, 9, 5);
+        let k = grid.index(4, 4, Orientation::Up);
+        let paint_cell = |grid: &mut LifeGrid, alive: bool| {
+            grid.reseed(0.0);
+            grid.cells[k] = u8::from(alive);
+            let mut mesh = field_mesh(9, 9);
+            paint(grid, &mut mesh, SOFTNESS);
+            match mesh.attribute(Mesh::ATTRIBUTE_COLOR) {
+                Some(VertexAttributeValues::Float32x4(colours)) => colours.clone(),
+                _ => panic!("colours are float4"),
+            }
         };
-        assert_eq!(colours.len(), 6 * w * h);
-        // Triangle k is cell k: each vertex triple carries exactly the
-        // colour its cell was painted.
-        for k in 0..grid.cells.len() {
-            let wanted = grid.cell_colour(k);
-            for c in &colours[3 * k..3 * k + 3] {
-                assert_eq!(*c, wanted, "triangle {k} mismatched");
+        let lum = |c: [f32; 4]| c[0] + c[1] + c[2];
+        let lit = paint_cell(&mut grid, true);
+        let dark = paint_cell(&mut grid, false);
+        let gains: Vec<f32> = (0..3)
+            .map(|c| lum(lit[3 * k + c]) - lum(dark[3 * k + c]))
+            .collect();
+        assert!(
+            gains.iter().all(|&g| g > 0.0),
+            "a live cell glows at all three corners: {gains:?}"
+        );
+        let (lo, hi) = (
+            gains.iter().cloned().fold(f32::INFINITY, f32::min),
+            gains.iter().cloned().fold(f32::NEG_INFINITY, f32::max),
+        );
+        assert!(
+            hi - lo < 0.05,
+            "the cell's life is flat across it: {gains:?}"
+        );
+    }
+
+    /// Every cell owns its three corners: the mesh is a flat-shaded triangle
+    /// list with no shared vertices, and the corner table maps each cell's
+    /// mesh vertices to the lattice points its own triangle spans.
+    #[test]
+    fn each_cell_owns_its_three_vertices() {
+        let (w, h) = (6, 5);
+        let mesh = field_mesh(w, h);
+        assert!(mesh.indices().is_none(), "flat shading shares no vertices");
+        assert_eq!(
+            mesh.attribute(Mesh::ATTRIBUTE_POSITION).unwrap().len(),
+            6 * w * h
+        );
+
+        let grid = test_grid(w, h, 3);
+        assert_eq!(grid.sheet.corners.len(), 6 * w * h);
+        let corner = |vi: usize| grid.sheet.corners[vi];
+        for v in 0..h {
+            for u in 0..w {
+                let k = v * w + u;
+                assert_eq!(
+                    [corner(3 * k), corner(3 * k + 1), corner(3 * k + 2)],
+                    [
+                        lattice_index(w, u, v) as u32,
+                        lattice_index(w, u + 1, v) as u32,
+                        lattice_index(w, u, v + 1) as u32,
+                    ],
+                    "up cell ({u},{v}) owns its low triangle"
+                );
+                let kd = w * h + v * w + u;
+                assert_eq!(
+                    [corner(3 * kd), corner(3 * kd + 1), corner(3 * kd + 2)],
+                    [
+                        lattice_index(w, u + 1, v) as u32,
+                        lattice_index(w, u + 1, v + 1) as u32,
+                        lattice_index(w, u, v + 1) as u32,
+                    ],
+                    "down cell ({u},{v}) owns its high triangle"
+                );
             }
         }
     }
 
-    /// A pass of hops never changes the population: every hop is a move.
+    /// The field covers everything the camera can see, even pushed to the
+    /// far corner of its roam: every seen ground point lands inside the
+    /// sheet, in lattice coordinates, with room to spare.
     #[test]
-    fn hops_conserve_the_population() {
-        let mut grid = LifeGrid::new(16, 12, 10.0, 150.0, 31);
-        for _ in 0..10 {
-            let before = grid.population();
-            grid.hops(1.0);
-            assert_eq!(grid.population(), before, "a hop is a move, not a birth");
-            grid.step();
+    fn the_field_covers_everything_the_camera_can_see() {
+        let view = Vec2::new(450.0, 300.0);
+        let (rig, grid, _mesh, _covered) = build(view, 3);
+        let a = Vec2::new(grid.side, 0.0);
+        let b = Vec2::new(0.5 * grid.side, grid.side * SQRT3_2);
+        // The sheet's anchor: back it out of any lattice vertex.
+        let origin = grid.sheet.lattice[0];
+        for corner in [Vec2::NEG_ONE, Vec2::X, Vec2::Y, Vec2::ONE] {
+            for offset in [
+                Vec2::splat(CAM_PAN),
+                Vec2::splat(-CAM_PAN),
+                Vec2::new(CAM_PAN, -CAM_PAN),
+                Vec2::ZERO,
+            ] {
+                let d = rig.unproject(corner * view) + offset - origin;
+                let v = d.y / b.y;
+                let u = (d.x - v * b.x) / a.x;
+                assert!(
+                    (-1.0..=grid.w as f32 + 1.0).contains(&u)
+                        && (-1.0..=grid.h as f32 + 1.0).contains(&v),
+                    "corner {corner:?} at {offset:?} sees past the field: u={u}, v={v}"
+                );
+            }
         }
-    }
-
-    /// The gradient is cake's: the cool end sits near the page's deep, the
-    /// warm end well toward the nebula's violet.
-    #[test]
-    fn the_gradient_runs_from_deep_to_violet() {
-        let cool = DEEP.mix(&VIOLET, 0.12);
-        let warm = DEEP.mix(&VIOLET, 0.54);
-        let toward = |c: Srgba| {
-            let v = Vec3::new(c.red, c.green, c.blue);
-            let violet = Vec3::new(VIOLET.red, VIOLET.green, VIOLET.blue);
-            v.distance(violet)
-        };
-        assert!(
-            toward(warm) < toward(cool),
-            "warm end must be nearer violet"
-        );
     }
 
     /// The same room seeds the same field.
