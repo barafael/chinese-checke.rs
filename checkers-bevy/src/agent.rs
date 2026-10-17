@@ -80,12 +80,10 @@ pub fn screenshot_timeout_frames() -> u32 {
 /// The port tried when `CHECKERS_AGENT_PORT` says nothing.
 const DEFAULT_PORT: u16 = 4310;
 
-/// Registers the agent socket and the systems that serve it. A no-op on wasm,
-/// where there is no socket to bind.
+/// Registers the agent socket and the systems that serve it. On wasm the
+/// whole module is swapped for a no-op (see `lib.rs`): there is no socket to
+/// bind there.
 pub fn plugin(app: &mut App) {
-    if cfg!(target_family = "wasm") {
-        return;
-    }
     let port = match std::env::var("CHECKERS_AGENT_PORT") {
         Ok(v) if matches!(v.as_str(), "off" | "none") => return,
         Ok(v) => v.parse::<u16>().unwrap_or(DEFAULT_PORT),

@@ -10,7 +10,17 @@
 //! the same path, so the networked code is always exercised. Confirming a
 //! turn that never moved is refused (chapter 9).
 
+#[cfg(not(target_family = "wasm"))]
 pub mod agent;
+/// On the web there is no socket to bind, and the crates the agent interface
+/// leans on are native-only, so the module is replaced by a plugin that does
+/// nothing.
+#[cfg(target_family = "wasm")]
+pub mod agent {
+    use bevy::prelude::*;
+
+    pub fn plugin(_: &mut App) {}
+}
 pub mod ai;
 pub mod board_view;
 pub mod lobby;
