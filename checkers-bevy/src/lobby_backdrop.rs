@@ -27,8 +27,9 @@
 //! The colour gradient is adapted from cake's sky: from the page's deep
 //! near-black (`#0f1014`) toward the violet of its nebula tint, drifting at a
 //! small scale so the tint visibly varies across the field. A seed comes from
-//! the room name, so everyone in a room watches the same sky live — the same
-//! trick the nebula plays.
+//! the room name — the same trick the nebula plays — so everyone in a room
+//! starts from the same soup; the fields drift apart from there, since the
+//! hops roll their dice once per frame.
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -47,7 +48,11 @@ pub fn plugin(app: &mut App) {
         .add_systems(OnExit(AppState::Lobby), teardown)
         .add_systems(
             Update,
-            (loom, tick_life, ensure_coverage).run_if(in_state(AppState::Lobby)),
+            // A rebuild first, so the frame that resizes the sheet also
+            // projects and paints it; never a frame of the blank new mesh.
+            (ensure_coverage, loom, tick_life)
+                .chain()
+                .run_if(in_state(AppState::Lobby)),
         );
 }
 
@@ -64,8 +69,11 @@ struct Backdrop {
     positions: Vec<[f32; 3]>,
     /// One generation clock per stagger band, phase-spread across the tick.
     clocks: Vec<f32>,
-    /// Half diagonal of the ground rect the field was built to cover.
-    covered: f32,
+    /// The clock for the flashes and the reseed.
+    upkeep: f32,
+    /// The viewport half extent the field was built to cover, with the
+    /// camera's whole roam. A window that outgrows it needs a wider sheet.
+    built_for: Vec2,
 }
 
 /// How far the camera leans from straight down, in degrees. Straight down
@@ -91,10 +99,6 @@ const FLASH_TICKS: u8 = 2;
 /// stagger: each band advances at its own offset within the tick, so the
 /// whole field never changes in one simultaneous pulse.
 const LIFE_BANDS: usize = 6;
-/// How much a cell's glow bleeds into its twelve neighbours, from zero (flat
-/// per-cell shading — each triangle its own crisp colour) upward. Kept at
-/// zero: flat is the point.
-const SOFTNESS: f32 = 0.0;
 /// The swell travelling through the surface: how high it lifts, how long a
 /// wave is, and how long it takes to pass.
 const WAVE_HEIGHT: f32 = 7.0;
@@ -121,12 +125,14 @@ const CLEAR: Srgba = Srgba::rgb(0.09, 0.09, 0.11);
 const NEBULA_WAVELENGTH: f32 = 420.0;
 
 const SQRT3_2: f32 = 0.866_025_4;
+/// The viewport assumed when there is no orthographic camera to ask.
+const FALLBACK_VIEW_HALF: Vec2 = Vec2::new(450.0, 300.0);
 
 /// The world-space half extent the camera shows right now.
 fn view_half(projection: &Projection) -> Vec2 {
     match projection {
         Projection::Orthographic(o) => o.area.half_size(),
-        _ => Vec2::new(450.0, 300.0),
+        _ => FALLBACK_VIEW_HALF,
     }
 }
 
@@ -177,12 +183,17 @@ impl Rig {
         (screen, self.focal * HEIGHT / (depth * depth))
     }
 
-    /// Where a screen point's sight-line meets the ground.
+    /// Where a screen point's sight-line meets the ground. A sight-line at
+    /// or above the horizon never does, so those are bent down to a line
+    /// well under it: a freakishly tall window then sizes a huge field, not
+    /// a nonsensical one.
     fn unproject(&self, at: Vec2) -> Vec2 {
-        let depth = HEIGHT / (self.cos_tilt - at.y * self.sin_tilt / self.focal);
+        let horizon = self.focal * self.cos_tilt / self.sin_tilt;
+        let y = at.y.min(0.8 * horizon);
+        let depth = HEIGHT / (self.cos_tilt - y * self.sin_tilt / self.focal);
         let rel = Vec2::new(
             at.x * depth / self.focal,
-            (at.y * depth / self.focal + HEIGHT * self.sin_tilt) / self.cos_tilt,
+            (y * depth / self.focal + HEIGHT * self.sin_tilt) / self.cos_tilt,
         );
         self.pos + rotate(rel, self.yaw)
     }
@@ -205,8 +216,8 @@ fn spawn(
     let half = cameras
         .single()
         .map(view_half)
-        .unwrap_or(Vec2::new(450.0, 300.0));
-    let (rig, grid, mesh, covered) = build(half, seed_of(&room.0));
+        .unwrap_or(FALLBACK_VIEW_HALF);
+    let (rig, grid, mesh) = build(half, seed_of(&room.0));
     let mesh = meshes.add(mesh);
     let material = materials.add(ColorMaterial::from_color(Color::WHITE));
     let positions = vec![[0.0; 3]; grid.sheet.corners.len()];
@@ -221,7 +232,8 @@ fn spawn(
             grid,
             positions,
             clocks: band_clocks(LIFE_BANDS, TICK_SECS),
-            covered,
+            upkeep: 0.0,
+            built_for: half,
         },
     ));
 }
@@ -242,8 +254,8 @@ fn loom(time: Res<Time>, mut backdrops: Query<&mut Backdrop>, mut meshes: ResMut
         return;
     };
     let t = time.elapsed_secs();
-    let mesh = backdrop.mesh.clone();
     let Backdrop {
+        mesh,
         rig,
         grid,
         positions,
@@ -265,7 +277,7 @@ fn loom(time: Res<Time>, mut backdrops: Query<&mut Backdrop>, mut meshes: ResMut
         positions[i] = [screen.x, screen.y + swell * scale, 0.0];
     }
 
-    if let Some(mut mesh) = meshes.get_mut(&mesh) {
+    if let Some(mut mesh) = meshes.get_mut(mesh.id()) {
         match mesh.try_attribute_mut(Mesh::ATTRIBUTE_POSITION) {
             Ok(VertexAttributeValues::Float32x3(slot)) if slot.len() == positions.len() => {
                 slot.clone_from(positions);
@@ -288,7 +300,6 @@ fn tick_life(
     time: Res<Time>,
     mut backdrops: Query<&mut Backdrop>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut upkeep: Local<f32>,
 ) {
     let Ok(mut backdrop) = backdrops.single_mut() else {
         return;
@@ -306,9 +317,9 @@ fn tick_life(
             dirty = true;
         }
     }
-    *upkeep += dt;
-    if *upkeep >= TICK_SECS {
-        *upkeep -= TICK_SECS;
+    backdrop.upkeep += dt;
+    if backdrop.upkeep >= TICK_SECS {
+        backdrop.upkeep -= TICK_SECS;
         backdrop.grid.upkeep();
         dirty = true;
     }
@@ -316,12 +327,12 @@ fn tick_life(
         return;
     }
     if let Some(mut mesh) = meshes.get_mut(&backdrop.mesh) {
-        paint(&mut backdrop.grid, &mut mesh, SOFTNESS);
+        paint(&backdrop.grid, &mut mesh);
     }
 }
 
-/// The per-band generation clocks, phase-spread across one tick: band 0
-/// advances first, the last band a tick later, and every band thereafter once
+/// The per-band generation clocks, phase-spread across one tick: the last
+/// band advances first, band 0 a full tick in, and every band thereafter once
 /// a tick — so no two bands tick together and the field never pulses as one.
 fn band_clocks(bands: usize, tick: f32) -> Vec<f32> {
     (0..bands)
@@ -347,14 +358,13 @@ fn ensure_coverage(
     let Ok(mut backdrop) = backdrops.single_mut() else {
         return;
     };
-    if half.length() + CAM_PAN <= backdrop.covered {
+    if half.x <= backdrop.built_for.x && half.y <= backdrop.built_for.y {
         return;
     }
-    let (rig, grid, mesh, covered) =
-        build_with_side(half, backdrop.grid.side, backdrop.grid.seed());
+    let (rig, grid, mesh) = build_with_side(half, backdrop.grid.side, backdrop.grid.seed());
     backdrop.rig = rig;
     backdrop.grid = grid;
-    backdrop.covered = covered;
+    backdrop.built_for = half;
     backdrop.positions = vec![[0.0; 3]; backdrop.grid.sheet.corners.len()];
     if let Some(mut existing) = meshes.get_mut(&backdrop.mesh) {
         *existing = mesh;
@@ -454,7 +464,7 @@ impl LifeGrid {
         self.cells.iter().map(|&c| u32::from(c)).sum()
     }
 
-    /// Fresh soup. Called at birth, and by `step` whenever the population
+    /// Fresh soup. Called at birth, and by `upkeep` whenever the population
     /// escapes its band: burned out, or grown to a churning near-solid.
     pub(crate) fn reseed(&mut self, p: f32) {
         for (cell, flash) in self.cells.iter_mut().zip(self.flash.iter_mut()) {
@@ -537,8 +547,8 @@ impl LifeGrid {
         true
     }
 
-    /// Ages and flashes advance; a population burnt out or grown past its
-    /// band is reseeded.
+    /// The flashes decay; a population burnt out or grown past its band is
+    /// reseeded.
     fn upkeep(&mut self) {
         for flash in self.flash.iter_mut() {
             *flash = flash.saturating_sub(1);
@@ -559,21 +569,9 @@ impl LifeGrid {
     }
 
     /// The life on cell `k`: one for a live cell, a little extra while its
-    /// landing flash lasts, and — when `softness` is above zero — a blend with
-    /// the mean of the twelve neighbours. At zero this is flat per-cell
-    /// shading, the default.
-    fn cell_lit(&self, k: usize, softness: f32) -> f32 {
-        let own = f32::from(self.cells[k]) + 0.35 * f32::from(self.flash[k]);
-        if softness <= 0.0 {
-            return own.min(1.0);
-        }
-        let mut sum = 0.0;
-        for &n in &self.nbrs[k] {
-            let n = n as usize;
-            sum += f32::from(self.cells[n]) + 0.35 * f32::from(self.flash[n]);
-        }
-        let mean = sum / 12.0;
-        ((1.0 - softness) * own + softness * mean).min(1.0)
+    /// landing flash lasts. Flat per-cell shading: the neighbours have no say.
+    fn cell_lit(&self, k: usize) -> f32 {
+        (f32::from(self.cells[k]) + 0.35 * f32::from(self.flash[k])).min(1.0)
     }
 }
 
@@ -743,15 +741,15 @@ fn index(u: i32, v: i32, o: Orientation, w: usize, h: usize) -> usize {
 
 /// Build a field covering everything the camera can see of a viewport this
 /// many world units in half-extent, plus its whole roam. Returns the rig,
-/// the life, the mesh (already painted), and the coverage radius.
-fn build(view_half: Vec2, seed: u64) -> (Rig, LifeGrid, Mesh, f32) {
+/// the life, and the mesh (already painted).
+fn build(view_half: Vec2, seed: u64) -> (Rig, LifeGrid, Mesh) {
     let side = default_side(view_half);
     build_with_side(view_half, side, seed)
 }
 
 /// As [`build`], but at a given triangle size — the resize path keeps the
 /// field's grain and grows its reach instead.
-fn build_with_side(view_half: Vec2, side: f32, seed: u64) -> (Rig, LifeGrid, Mesh, f32) {
+fn build_with_side(view_half: Vec2, side: f32, seed: u64) -> (Rig, LifeGrid, Mesh) {
     let rig = Rig::new();
     // The ground rect the viewport can show, with the camera at home.
     let (mut min, mut max) = (Vec2::splat(f32::MAX), Vec2::splat(f32::MIN));
@@ -784,7 +782,6 @@ fn build_with_side(view_half: Vec2, side: f32, seed: u64) -> (Rig, LifeGrid, Mes
 
     let centre = (min + max) / 2.0;
     let span = max - min;
-    let covered = span.length() / 2.0;
 
     // The sheet is a parallelogram of cells; its slanted sides mean the
     // largest axis-aligned rectangle inside it is narrower than its bounding
@@ -804,10 +801,10 @@ fn build_with_side(view_half: Vec2, side: f32, seed: u64) -> (Rig, LifeGrid, Mes
     // at the top of the frame, never a bare edge.
     let fade_start = rig.focus_d + view_half.y;
     let fade_end = fade_start + view_half.y * 1.2;
-    let mut grid = LifeGrid::new(w, h, side, origin, fade_start, fade_end, seed);
+    let grid = LifeGrid::new(w, h, side, origin, fade_start, fade_end, seed);
     let mut mesh = field_mesh(w, h);
-    paint(&mut grid, &mut mesh, SOFTNESS);
-    (rig, grid, mesh, covered)
+    paint(&grid, &mut mesh);
+    (rig, grid, mesh)
 }
 
 /// The triangle size that puts about [`TARGET_VISIBLE`] triangles on a
@@ -837,14 +834,12 @@ fn field_mesh(w: usize, h: usize) -> Mesh {
 }
 
 /// Write the sheet's colours: one flat colour per cell, from its own life and
-/// the nebula at its corners. With `softness` above zero each cell blends a
-/// touch with its neighbours; at zero the lattice reads cell-by-cell and the
-/// far distances melt into the clear colour.
-pub(crate) fn paint(grid: &mut LifeGrid, mesh: &mut Mesh, softness: f32) {
+/// the nebula at its corners, the far distances melted into the clear colour.
+fn paint(grid: &LifeGrid, mesh: &mut Mesh) {
     let cells = 2 * grid.w * grid.h;
     let mut colours = Vec::with_capacity(grid.sheet.corners.len());
     for k in 0..cells {
-        let lit = grid.cell_lit(k, softness);
+        let lit = grid.cell_lit(k);
         for c in 0..3 {
             let vi = k * 3 + c;
             let li = grid.sheet.corners[vi] as usize;
@@ -1137,6 +1132,19 @@ mod tests {
         );
     }
 
+    /// A sight-line at or above the horizon is bent down to the ground, not
+    /// sent off to infinity or behind the camera.
+    #[test]
+    fn unprojecting_above_the_horizon_stays_on_the_ground() {
+        let rig = Rig::new();
+        let under = rig.unproject(Vec2::new(0.0, 500.0));
+        for sky in [2_000.0, 1.0e6, f32::MAX] {
+            let g = rig.unproject(Vec2::new(0.0, sky));
+            assert!(g.is_finite(), "{sky} unprojects to {g}");
+            assert!(g.y > under.y, "{sky} lands at {g}, nearer than {under}");
+        }
+    }
+
     /// Every screen point's sight-line meets the ground where projecting
     /// that ground point put it.
     #[test]
@@ -1158,8 +1166,7 @@ mod tests {
 
     /// Flat shading: a cell's life lights all three of its vertices, and
     /// lights them by the same amount — the cell is one flat glow, only the
-    /// nebula varying across its corners. At the default zero softness the
-    /// rest of the field cannot brighten a cell.
+    /// nebula varying across its corners.
     #[test]
     fn flat_shading_paints_each_cell_by_its_own_life() {
         let mut grid = test_grid(9, 9, 5);
@@ -1168,7 +1175,7 @@ mod tests {
             grid.reseed(0.0);
             grid.cells[k] = u8::from(alive);
             let mut mesh = field_mesh(9, 9);
-            paint(grid, &mut mesh, SOFTNESS);
+            paint(grid, &mut mesh);
             match mesh.attribute(Mesh::ATTRIBUTE_COLOR) {
                 Some(VertexAttributeValues::Float32x4(colours)) => colours.clone(),
                 _ => panic!("colours are float4"),
@@ -1242,7 +1249,7 @@ mod tests {
     #[test]
     fn the_field_covers_everything_the_camera_can_see() {
         let view = Vec2::new(450.0, 300.0);
-        let (rig, grid, _mesh, _covered) = build(view, 3);
+        let (rig, grid, _mesh) = build(view, 3);
         let a = Vec2::new(grid.side, 0.0);
         let b = Vec2::new(0.5 * grid.side, grid.side * SQRT3_2);
         // The sheet's anchor: back it out of any lattice vertex.

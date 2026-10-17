@@ -44,6 +44,7 @@ use bevy_matchbox::prelude::*;
 use checkers_net::{CH_RELIABLE, NetMsg, NetState, RoomId, Seat, broadcast, decode};
 
 use crate::board_view::player_colour;
+use crate::lobby_backdrop::DEEP;
 use crate::setup::Seating;
 use crate::ui::{button_messages, ui_text};
 use crate::{AppState, Session};
@@ -528,6 +529,9 @@ pub(crate) const CHOSEN_DOWN: Color = Color::srgb(0.16, 0.37, 0.23);
 const TEXT: Color = Color::srgb(0.9, 0.9, 0.92);
 const MUTED: Color = Color::srgb(0.62, 0.62, 0.68);
 const BORDER: Color = Color::srgb(0.35, 0.35, 0.40);
+/// How opaque the scrim over the backdrop is: dark enough that the controls
+/// read, light enough that the field behind stays alive.
+const SCRIM_ALPHA: f32 = 0.55;
 
 /// The lobby is drawn over the animated backdrop: a flat scrim first —
 /// translucent near-black in the manner of omdurman's panels, dark enough
@@ -541,6 +545,7 @@ fn spawn(mut commands: Commands, art: Res<SectorArt>) {
 /// are flat too — that dims the animated field behind it so the lobby reads.
 /// Ignore pointers: clicks belong to whatever the player sees through it.
 fn scrim_layer() -> impl Scene {
+    let shade = Color::from(DEEP.with_alpha(SCRIM_ALPHA));
     bsn! {
         Node {
             position_type: PositionType::Absolute,
@@ -549,7 +554,7 @@ fn scrim_layer() -> impl Scene {
             right: px(0),
             bottom: px(0),
         }
-        BackgroundColor(Color::srgba(0.045, 0.05, 0.07, 0.55))
+        BackgroundColor(shade)
         Pickable::IGNORE
     }
 }
