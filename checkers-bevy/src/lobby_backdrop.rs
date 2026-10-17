@@ -5,7 +5,7 @@
 //! piece hops over another on the board.
 //!
 //! The camera is a fake: the app builds Bevy without the 3D pipeline, so the
-//! [`Rig`] projects a ground plane through a tilted pinhole on the CPU, and
+//! `Rig` projects a ground plane through a tilted pinhole on the CPU, and
 //! the result is drawn as one ordinary vertex-coloured [`Mesh2d`]. The rig
 //! pans slowly over the plane and sways its lean; a gentle swell travels
 //! through the surface.
