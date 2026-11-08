@@ -17,11 +17,10 @@ cargo run -p checkers-bevy
 Pick a table in the lobby — solo against the engine, hotseat, or a shared room
 over WebRTC — then click a piece and a highlighted hole. Steps and jumps both
 **stage** before they commit; a jump chains one hop at a time, and nothing is
-final until Enter. Every turn is replayed as an animation, the lobby sits on a
-living Game-of-Life triangle field, and the lobby's buttons, text fields, and
-room roster work over the wire.
+final until Enter. Every turn is replayed as an animation, and the lobby's
+buttons, text fields, and room roster work over the wire.
 
-![The lobby, over its animated backdrop](screenshots/lobby.png)
+![The lobby](screenshots/lobby.png)
 
 | Input | Effect |
 |---|---|

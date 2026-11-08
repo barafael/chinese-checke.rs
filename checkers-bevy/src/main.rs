@@ -28,8 +28,8 @@ use checkers_bevy::replay;
 use checkers_bevy::setup::Seating;
 use checkers_bevy::ui::{button_messages, ui_text};
 use checkers_bevy::{
-    AppState, Selection, Session, audit, format_round_duration, lobby, lobby_backdrop, move_log,
-    net, record, sound, web,
+    AppState, Selection, Session, audit, format_round_duration, lobby, move_log, net, record,
+    sound, web,
 };
 use checkers_core::geometry::{all_holes, camp_of, on_board};
 use checkers_core::law::{LAWS, verify_all};
@@ -85,9 +85,6 @@ fn main() {
         .init_resource::<replay::Replay>()
         .add_plugins((
             lobby::plugin,
-            // The lobby's animated triangle-field backdrop, and the scrim
-            // that keeps the lobby legible over it.
-            lobby_backdrop::plugin,
             sound::plugin,
             button_messages::<ControlButton>,
             // The localhost socket an external agent drives the window
@@ -320,9 +317,7 @@ fn setup(mut commands: Commands) {
     // `Msaa` is named because its absence is invisible and its effect is not.
     // `Camera2d` does not require it, and the 2D pipeline's view-target setup
     // queries it as a required component — a camera without one simply gets
-    // no multisampled target, and *everything* renders aliased. On the lobby's
-    // backdrop, a triangle field that never stops turning and drifting, the
-    // crawling stair-stepped edges read as grain over the whole screen.
+    // no multisampled target, and *everything* renders aliased.
     commands.spawn((Camera2d, Msaa::Sample4, fit_projection()));
 
     // The full law registry is worth its cost once, at startup.

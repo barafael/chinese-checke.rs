@@ -24,7 +24,6 @@ pub mod agent {
 pub mod ai;
 pub mod board_view;
 pub mod lobby;
-pub mod lobby_backdrop;
 pub mod move_log;
 pub mod net;
 pub mod record;
