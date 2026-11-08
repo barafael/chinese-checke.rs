@@ -18,13 +18,12 @@ checkers-net.workspace = true
 uuid = "1"
 
 # The live multiplayer integration test (`tests/multiplayer.rs`) hosts an
-# in-process full-mesh signaling server to introduce the real peers. The repo
-# builds its own copy of bevy_matchbox from a fork of matchbox, and the fork
-# re-versions `matchbox_signaling` to 0.15.0 *without changing a line of
-# signaling or protocol source*, so the published 0.14.0 crate on crates.io is
-# byte-identical code and talks the same wire protocol. Test-only: the app
-# itself never runs a signaling server.
-matchbox_signaling = "0.14" # registry keeps the underscore name
+# in-process full-mesh signaling server to introduce the real peers. It comes
+# from the same matchbox fork as bevy_matchbox (the workspace's git source, so
+# Cargo.lock pins both to one commit): the fork's server tells two peers that
+# join a room at the same moment of each other, which the published crate's
+# does not. Test-only: the app itself never runs a signaling server.
+matchbox_signaling = { git = "https://github.com/barafael/matchbox.git", branch = "main" }
 tokio = { version = "1", features = ["rt-multi-thread"] }
 
 [lints]
@@ -33,7 +32,7 @@ workspace = true
 # Saving and opening `.cchkrs` rounds through a file dialog. Web builds use
 # localStorage instead, so the dialog crate is native-only.
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
-rfd = "0.17"
+rfd = "0.18"
 
 # The agent interface (see `src/agent.rs`): a localhost socket an external
 # script drives the window through — screenshots, clicks, keys, game state.
