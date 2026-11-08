@@ -44,7 +44,6 @@ use bevy_matchbox::prelude::*;
 use checkers_net::{CH_RELIABLE, NetMsg, NetState, RoomId, Seat, broadcast, decode};
 
 use crate::board_view::player_colour;
-use crate::lobby_backdrop::DEEP;
 use crate::setup::Seating;
 use crate::ui::{button_messages, ui_text};
 use crate::{AppState, Session};
@@ -529,57 +528,16 @@ pub(crate) const CHOSEN_DOWN: Color = Color::srgb(0.16, 0.37, 0.23);
 const TEXT: Color = Color::srgb(0.9, 0.9, 0.92);
 const MUTED: Color = Color::srgb(0.62, 0.62, 0.68);
 const BORDER: Color = Color::srgb(0.35, 0.35, 0.40);
-/// How opaque the scrim over the backdrop is: dark enough that the controls
-/// read, light enough that the field behind stays alive.
-const SCRIM_ALPHA: f32 = 0.55;
 
-/// The lobby is drawn over the animated backdrop: a flat scrim first —
-/// translucent near-black in the manner of omdurman's panels, dark enough
-/// that the controls read, light enough that the field behind stays alive —
-/// and above it the two columns, exactly as they always were.
+/// The lobby is a two-column flex row filling the window: the star on the
+/// left, every control on the right. Side by side the columns stay short
+/// enough to fit a 600px-tall window by construction, which a single stacked
+/// column never could.
 fn spawn(mut commands: Commands, art: Res<SectorArt>) {
     commands.spawn_scene(lobby(&art));
 }
 
-/// The full-window scrim: a flat translucent near-black — omdurman's panels
-/// are flat too — that dims the animated field behind it so the lobby reads.
-/// Ignore pointers: clicks belong to whatever the player sees through it.
-fn scrim_layer() -> impl Scene {
-    let shade = Color::from(DEEP.with_alpha(SCRIM_ALPHA));
-    bsn! {
-        Node {
-            position_type: PositionType::Absolute,
-            left: px(0),
-            top: px(0),
-            right: px(0),
-            bottom: px(0),
-        }
-        BackgroundColor(shade)
-        Pickable::IGNORE
-    }
-}
-
 fn lobby(art: &SectorArt) -> impl Scene {
-    let scope = DespawnOnExit(AppState::Lobby);
-    bsn! {
-        scope
-        Node {
-            width: percent(100),
-            height: percent(100),
-        }
-        Children [
-            @scrim_layer()
-            --
-            @lobby_columns(art)
-        ]
-    }
-}
-
-/// The lobby proper: a two-column flex row filling the window — the star on
-/// the left, every control on the right. Side by side the columns stay short
-/// enough to fit a 600px-tall window by construction, which a single stacked
-/// column never could.
-fn lobby_columns(art: &SectorArt) -> impl Scene {
     // Presets are shortcuts for the symmetric setups; they fill the whole
     // table, so what is configured and what the shortcut leaves can never
     // silently disagree.
@@ -594,7 +552,10 @@ fn lobby_columns(art: &SectorArt) -> impl Scene {
     let cpu = LobbyButton::CornerAction(CornerCommand::Cpu);
     let cancel = LobbyButton::CornerAction(CornerCommand::Off);
     let (foreign, start) = (LobbyButton::ForeignCamps, LobbyButton::Start);
+    let scope = DespawnOnExit(AppState::Lobby);
+
     bsn! {
+        scope
         Node {
             width: percent(100),
             height: percent(100),
@@ -639,20 +600,40 @@ fn lobby_columns(art: &SectorArt) -> impl Scene {
                 @header("Table")
                 --
                 // Solo-only: a shared table is claimed corner by corner on
-                // the star.
-                @control_row()
+                // the star. The row wraps: unwrapped, its three buttons are
+                // wider than the column a 900px window leaves them, and the
+                // last one ran off the edge.
+                Node {
+                    column_gap: px(10),
+                    row_gap: px(10),
+                    align_items: AlignItems::Center,
+                    justify_content: JustifyContent::Center,
+                    flex_wrap: FlexWrap::Wrap,
+                }
                 SoloOnly
                 Children [ {presets} ]
                 --
                 // What to do with the selected corner. [`sync_corner_actions`]
                 // shows exactly one of these rows: a free corner offers
-                // seating, a claimed corner offers cancelling it.
-                @column(10.0)
+                // seating, a claimed corner offers cancelling it. Both share
+                // one grid cell: the slot keeps its height while hidden, so
+                // selecting a corner never shifts the column, but it is one
+                // row tall rather than two.
+                Node {
+                    display: Display::Grid,
+                    justify_items: JustifyItems::Center,
+                    align_items: AlignItems::Center,
+                }
                 Children [
                     // Seat a free corner. Seating an engine is the host's
                     // call alone — the engine runs in the host's process —
                     // so guests never see the button.
-                    @control_row()
+                    Node {
+                        grid_row: GridPlacement::start(1),
+                        grid_column: GridPlacement::start(1),
+                        column_gap: px(10),
+                        align_items: AlignItems::Center,
+                    }
                     SeatButtons
                     Children [
                         @button("Human") human
@@ -663,7 +644,12 @@ fn lobby_columns(art: &SectorArt) -> impl Scene {
                     // Cancel a claimed corner — yours (release), another
                     // player's (host un-seats), or an engine's (host removes
                     // it). [`corner_effect`] picks the right move.
-                    @control_row()
+                    Node {
+                        grid_row: GridPlacement::start(1),
+                        grid_column: GridPlacement::start(1),
+                        column_gap: px(10),
+                        align_items: AlignItems::Center,
+                    }
                     CancelSeat
                     Children [ @button("Cancel Seat") cancel ]
                 ]
