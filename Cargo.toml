@@ -21,7 +21,10 @@ linkme = "0.3"
 # arrives by message, and pasting it is how it gets into the room field. It
 # matters on native builds only (arboard); the web build always reads and
 # writes the browser's clipboard.
-bevy = { version = "0.20", default-features = false, features = ["2d", "ui", "audio", "system_clipboard"] }
+#
+# `bevy_feathers` is Bevy's own widget set (sliders, checkboxes, dialogs), for
+# the Ctrl+Shift tweak pane.
+bevy = { version = "0.20", default-features = false, features = ["2d", "ui", "audio", "system_clipboard", "bevy_feathers"] }
 # The same fork omdurman uses (Cargo.lock pins the commit): the crates.io
 # release does not yet support Bevy 0.20.
 bevy_matchbox = { git = "https://github.com/barafael/matchbox.git", branch = "main" }

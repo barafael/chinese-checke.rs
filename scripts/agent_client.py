@@ -14,7 +14,8 @@ Commands (each is one request):
     state              print the game state as JSON
     click X Y          click at logical pixel coordinates
     move X Y           move the cursor
-    key NAME           press a key (enter, escape, a, ...)
+    key NAME           press a key (enter, escape, a, ...); ctrl+NAME holds Ctrl
+                       around it (ctrl+shift opens the tweak pane)
     text STRING        type a string
     resize W H         set the window size
     click-hole Q R     click the board hole at hex coordinates (q, r)
@@ -198,6 +199,8 @@ def main() -> int:
             agent.click(float(x), float(y))
         case ["move", x, y]:
             agent.ask(cmd="move", x=float(x), y=float(y))
+        case ["key", name] if name.startswith("ctrl+"):
+            agent.ask(cmd="key", key=name.removeprefix("ctrl+"), ctrl=True)
         case ["key", name]:
             agent.key(name)
         case ["text", s]:

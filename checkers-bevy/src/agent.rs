@@ -21,6 +21,7 @@
 //! {"cmd":"click","x":640,"y":468}       -> {"ok":true}
 //! {"cmd":"move","x":640,"y":468}        -> {"ok":true}
 //! {"cmd":"key","key":"enter"}           -> {"ok":true}
+//! {"cmd":"key","key":"shift","ctrl":true} -> {"ok":true}   (Ctrl held around it)
 //! {"cmd":"text","text":"hello"}         -> {"ok":true,"typed":5}
 //! {"cmd":"state"}                       -> {"ok":true,"state":{...}}
 //! {"cmd":"window"}                      -> {"ok":true,"width":...,"scale_factor":...}
@@ -210,12 +211,15 @@ enum Command {
     /// Press and release a named key. Names are lowercase: `enter`, `space`,
     /// `escape`, `backspace`, `tab`, `delete`, `home`, `end`, `pageup`,
     /// `pagedown`, `left`/`right`/`up`/`down`, `a`–`z`, `0`–`9`, and the
-    /// punctuation names `comma`, `period`, `minus`, `equal`. `shift`
-    /// uppercases letters.
+    /// punctuation names `comma`, `period`, `minus`, `equal`, and the
+    /// modifiers `shift` and `ctrl`. `shift` uppercases letters; `ctrl` holds
+    /// Ctrl down around the key, for a chord such as Ctrl+Shift.
     Key {
         key: String,
         #[serde(default)]
         shift: bool,
+        #[serde(default)]
+        ctrl: bool,
     },
     /// Type a string character by character, through the same path a real
     /// keyboard takes — text fields see it as typing.
@@ -323,10 +327,15 @@ struct AgentQueue {
 /// One synthetic input event, mirroring what winit would have sent.
 #[derive(Clone)]
 enum Injection {
-    Cursor { physical: bevy::math::DVec2 },
+    Cursor {
+        physical: bevy::math::DVec2,
+    },
     Press(MouseButton),
     Release(MouseButton),
     KeyPress(KeyboardInput),
+    /// A press that stays down until a queued [`Injection::KeyRelease`]: a
+    /// chord's modifier.
+    KeyHold(KeyboardInput),
     KeyRelease(KeyboardInput),
 }
 
@@ -458,12 +467,30 @@ fn handle(request: Request, agent: &mut AgentCtx) {
                 .push_back(Injection::Press(MouseButton::Left));
             request.reply.ok(json!({}));
         }
-        Command::Key { key, shift } => match parse_key(&key, shift) {
+        Command::Key { key, shift, ctrl } => match parse_key(&key, shift) {
             Some((key_code, logical, text)) => {
-                agent
-                    .queue
-                    .pending
-                    .push_back(key_injection(key_code, logical, text));
+                // Ctrl goes down a frame ahead of the key and comes up with
+                // its release, as a hand plays a chord.
+                let ctrl_key = |state| KeyboardInput {
+                    key_code: KeyCode::ControlLeft,
+                    logical_key: Key::Control,
+                    state,
+                    text: None,
+                    repeat: false,
+                    window: Entity::PLACEHOLDER,
+                };
+                let pending = &mut agent.queue.pending;
+                if ctrl {
+                    pending.push_back(Injection::KeyHold(ctrl_key(
+                        bevy::input::ButtonState::Pressed,
+                    )));
+                }
+                pending.push_back(key_injection(key_code, logical, text));
+                if ctrl {
+                    pending.push_back(Injection::KeyRelease(ctrl_key(
+                        bevy::input::ButtonState::Released,
+                    )));
+                }
                 request.reply.ok(json!({}));
             }
             None => request.reply.err(format!("unknown key name {key:?}")),
@@ -579,6 +606,10 @@ fn inject_queued(agent: &mut AgentCtx) {
                 let mut release = input;
                 release.state = bevy::input::ButtonState::Released;
                 agent.queue.next_frame.push(Injection::KeyRelease(release));
+                pressed = true;
+            }
+            Injection::KeyHold(input) => {
+                write_key(agent, &input, bevy::input::ButtonState::Pressed);
                 pressed = true;
             }
             Injection::KeyRelease(input) => {
@@ -891,6 +922,8 @@ fn parse_key(name: &str, shift: bool) -> Option<(KeyCode, Key, Option<String>)> 
         "numpadenter" => named(KeyCode::NumpadEnter, Key::Enter),
         "space" => Some((KeyCode::Space, Key::Space, Some(" ".into()))),
         "escape" => named(KeyCode::Escape, Key::Escape),
+        "shift" => named(KeyCode::ShiftLeft, Key::Shift),
+        "ctrl" | "control" => named(KeyCode::ControlLeft, Key::Control),
         "backspace" => named(KeyCode::Backspace, Key::Backspace),
         "delete" => named(KeyCode::Delete, Key::Delete),
         "tab" => named(KeyCode::Tab, Key::Tab),
@@ -997,7 +1030,12 @@ mod tests {
         assert!(matches!(click, Command::Click { x: 1.5, y: 2.0 }));
 
         let key: Command = serde_json::from_str(r#"{"cmd":"key","key":"enter"}"#).unwrap();
-        assert!(matches!(key, Command::Key { ref key, shift: false } if key == "enter"));
+        assert!(
+            matches!(key, Command::Key { ref key, shift: false, ctrl: false } if key == "enter")
+        );
+        let chord: Command =
+            serde_json::from_str(r#"{"cmd":"key","key":"shift","ctrl":true}"#).unwrap();
+        assert!(matches!(chord, Command::Key { ref key, ctrl: true, .. } if key == "shift"));
 
         let text: Command = serde_json::from_str(r#"{"cmd":"text","text":"hi"}"#).unwrap();
         assert!(matches!(text, Command::Text { .. }));

@@ -26,11 +26,13 @@ pub mod board_view;
 pub mod coord_labels;
 pub mod lobby;
 pub mod move_log;
+pub mod nebula;
 pub mod net;
 pub mod record;
 pub mod replay;
 pub mod setup;
 pub mod sound;
+pub mod tweak;
 pub mod ui;
 pub mod web;
 

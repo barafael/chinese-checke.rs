@@ -30,6 +30,7 @@ buttons, text fields, and room roster work over the wire.
 | A | Let the engine play this seat once |
 | T / S | Status panel / sound |
 | O | Coordinates on every hole, for the whole table |
+| Ctrl+Shift | Backdrop tweak pane |
 | R | Fresh two-player deal (solo) |
 
 ## Trusting the rules

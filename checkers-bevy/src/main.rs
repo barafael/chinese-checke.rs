@@ -28,8 +28,8 @@ use checkers_bevy::replay;
 use checkers_bevy::setup::Seating;
 use checkers_bevy::ui::{button_messages, ui_text};
 use checkers_bevy::{
-    AppState, Selection, Session, audit, coord_labels, format_round_duration, lobby, move_log, net,
-    record, sound, web,
+    AppState, Selection, Session, audit, coord_labels, format_round_duration, lobby, move_log,
+    nebula, net, record, sound, tweak, web,
 };
 use checkers_core::geometry::{all_holes, camp_of, on_board};
 use checkers_core::law::{LAWS, verify_all};
@@ -87,6 +87,10 @@ fn main() {
             lobby::plugin,
             sound::plugin,
             coord_labels::plugin,
+            // The faint, slowly wavering backdrop behind the lobby and the
+            // board, and the Ctrl+Shift pane that tunes it.
+            nebula::plugin,
+            tweak::plugin,
             button_messages::<ControlButton>,
             // The localhost socket an external agent drives the window
             // through — screenshots, clicks, keys. Off on wasm; disabled with
@@ -133,7 +137,11 @@ fn main() {
                     // `handle_view_keys` is the lone exception, opening and
                     // stepping the viewer.
                     handle_buttons.run_if(not(resource_exists::<replay::ReplayView>)),
-                    handle_clicks.run_if(not(resource_exists::<replay::ReplayView>)),
+                    // The tweak pane clears the mouse while it is open, but
+                    // taps arrive as touch messages, which it leaves alone.
+                    handle_clicks
+                        .run_if(not(resource_exists::<replay::ReplayView>))
+                        .run_if(tweak::pane_closed),
                     replay::handle_view_keys,
                     handle_keys.run_if(not(resource_exists::<replay::ReplayView>)),
                     // The game-over card's way out, next to its `M` key.
