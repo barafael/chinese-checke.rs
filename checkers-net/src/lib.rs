@@ -137,6 +137,11 @@ pub enum NetMsg {
     /// guest never told would wait for a move that is not coming. Sent on the
     /// channel the moves travel, so it lands after the last of them.
     Abandon,
+    /// Any -> all: the board's coordinate labels are now shown, or hidden.
+    /// The switch is the table's, so one player can point the others at a
+    /// hole by name; the new state rather than a toggle, so a press always
+    /// leaves every peer agreeing.
+    Coordinates { shown: bool },
 }
 
 pub fn encode(msg: &NetMsg) -> Option<Box<[u8]>> {

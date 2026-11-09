@@ -1025,8 +1025,9 @@ fn ensure_sector_art(mut art: ResMut<SectorArt>, mut images: ResMut<Assets<Image
 
 /// The eight offsets the label's black border copies take around the white
 /// fill (a ~1px ring). Bevy's text pipeline has no stroke, so a legible
-/// border over the coloured wedges is a shadow ring of copies.
-const OUTLINE_OFFSETS: [Vec2; 8] = [
+/// border over the coloured wedges is a shadow ring of copies. The board's
+/// coordinate labels take the same ring.
+pub(crate) const OUTLINE_OFFSETS: [Vec2; 8] = [
     Vec2::new(1.0, 0.0),
     Vec2::new(-1.0, 0.0),
     Vec2::new(0.0, 1.0),
@@ -1507,7 +1508,10 @@ pub fn pump_socket(socket: Option<ResMut<MatchboxSocket>>, lobby: LobbyWorld) {
             // Moves cannot arrive before the game starts, but a late duplicate
             // from a previous game in the same room could. Ignore rather than
             // mis-apply.
-            NetMsg::Move(_) | NetMsg::Sequenced { .. } | NetMsg::Abandon => {}
+            NetMsg::Move(_)
+            | NetMsg::Sequenced { .. }
+            | NetMsg::Abandon
+            | NetMsg::Coordinates { .. } => {}
         }
     }
 }

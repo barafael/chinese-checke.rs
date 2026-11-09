@@ -23,6 +23,7 @@ pub mod agent {
 }
 pub mod ai;
 pub mod board_view;
+pub mod coord_labels;
 pub mod lobby;
 pub mod move_log;
 pub mod net;

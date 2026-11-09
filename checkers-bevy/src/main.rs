@@ -28,8 +28,8 @@ use checkers_bevy::replay;
 use checkers_bevy::setup::Seating;
 use checkers_bevy::ui::{button_messages, ui_text};
 use checkers_bevy::{
-    AppState, Selection, Session, audit, format_round_duration, lobby, move_log, net, record,
-    sound, web,
+    AppState, Selection, Session, audit, coord_labels, format_round_duration, lobby, move_log, net,
+    record, sound, web,
 };
 use checkers_core::geometry::{all_holes, camp_of, on_board};
 use checkers_core::law::{LAWS, verify_all};
@@ -86,6 +86,7 @@ fn main() {
         .add_plugins((
             lobby::plugin,
             sound::plugin,
+            coord_labels::plugin,
             button_messages::<ControlButton>,
             // The localhost socket an external agent drives the window
             // through — screenshots, clicks, keys. Off on wasm; disabled with
@@ -139,6 +140,10 @@ fn main() {
                     exit_to_lobby,
                     ai_one_shot,
                     toggle_status,
+                    // Before the pump, so a press goes out the frame it
+                    // happens; anyone at the table may press it, spectators
+                    // and the record viewer included.
+                    coord_labels::toggle,
                     // A viewer session is rebuilt per step; without this guard
                     // the game-over card would report the viewer's age, not
                     // the round's length.
@@ -171,6 +176,8 @@ fn main() {
                     sync_buttons,
                     sync_turn_indicator,
                     sync_camp_indicator,
+                    // After every board layer it is drawn over.
+                    coord_labels::sync,
                     sync_game_over,
                 )
                     .chain(),
@@ -1186,7 +1193,7 @@ fn sync_status(session: Res<Session>, mut text: Query<&mut Text, With<StatusText
     **text = format!(
         "{header}{staged}\n{}\n{} laws checked at startup  |  invariants checked each turn\n\
          Click a piece, then a highlighted hole. Jumps chain one hop at a time.\n\
-         Enter confirms, Backspace cancels, U undoes a hop, {restart}T hides this.",
+         Enter confirms, Backspace cancels, U undoes a hop, O labels holes, {restart}T hides this.",
         session.message,
         LAWS.len(),
     );

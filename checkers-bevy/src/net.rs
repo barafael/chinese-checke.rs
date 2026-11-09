@@ -12,6 +12,7 @@ use checkers_core::position::{Move, Player};
 use checkers_core::rules::Outcome;
 use checkers_net::{CH_RELIABLE, NetMsg, NetState, WireMove, broadcast, decode, send_to};
 
+use crate::coord_labels::CoordLabels;
 use crate::lobby::{ChosenVariants, accept_start};
 use crate::{AppState, Selection, Session, audit};
 
@@ -54,6 +55,7 @@ pub fn pump(
     mut session: ResMut<Session>,
     mut variants: ResMut<ChosenVariants>,
     mut next_state: ResMut<NextState<AppState>>,
+    mut labels: ResMut<CoordLabels>,
 ) {
     let Some(mut socket) = socket else {
         // No socket at all: apply locally so the game is still playable. Only
@@ -122,6 +124,10 @@ pub fn pump(
                 if !session.game.is_over() {
                     end_stalled(&mut session);
                 }
+            }
+            // Someone at the table flipped the coordinate labels.
+            NetMsg::Coordinates { shown } => {
+                labels.set_if_neq(CoordLabels { shown });
             }
             // A guest cannot sequence, and the rest is lobby furniture.
             NetMsg::Move(_)

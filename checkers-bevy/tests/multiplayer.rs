@@ -97,8 +97,14 @@ fn instance(name: &str, room: &RoomId, port: u16) -> App {
         .add_systems(OnEnter(AppState::Lobby), checkers_net::open_socket)
         .add_systems(
             Update,
-            checkers_bevy::net::pump.run_if(in_state(AppState::InGame)),
+            (
+                checkers_bevy::coord_labels::toggle,
+                checkers_bevy::net::pump,
+            )
+                .chain()
+                .run_if(in_state(AppState::InGame)),
         )
+        .add_plugins(checkers_bevy::coord_labels::plugin)
         .add_systems(
             Update,
             (
@@ -567,6 +573,44 @@ fn an_abandoned_engine_race_ends_everywhere() {
         |apps| session(&apps[guest_i]).game.outcome() == Some(Outcome::Abandoned),
     );
     println!("PASS: the host's abandonment ended the round on the guest too.");
+}
+
+/// `O` is the table's switch: a guest's press shows the coordinate labels on
+/// the host too, and the host's press hides them again on the guest.
+#[test]
+#[ignore = "runs live WebRTC peers on an in-process signaling server"]
+fn the_coordinate_labels_are_shown_to_the_whole_table() {
+    use checkers_bevy::coord_labels::CoordLabels;
+
+    let mut apps = connect("coords", &["A", "B"]);
+    wait_greeted(&mut apps);
+    let host_i = host_index(&apps);
+    let guest_i = 1 - host_i;
+
+    choose(&mut apps[host_i], CornerCommand::Human, 0);
+    choose(&mut apps[guest_i], CornerCommand::Human, 3);
+    wait_players(&mut apps, &[0, 3], "the corners were never claimed");
+    start(&mut apps, host_i, "the round never started");
+
+    let shown = |app: &App| app.world().resource::<CoordLabels>().shown;
+    assert!(apps.iter().all(|a| !shown(a)), "a round starts unlabelled");
+
+    press(&mut apps[guest_i], KeyCode::KeyO);
+    wait_for(
+        &mut apps,
+        BRIEF,
+        "the guest's press never reached the host",
+        |apps| apps.iter().all(shown),
+    );
+
+    press(&mut apps[host_i], KeyCode::KeyO);
+    wait_for(
+        &mut apps,
+        BRIEF,
+        "the host's press never reached the guest",
+        |apps| !apps.iter().any(shown),
+    );
+    println!("PASS: either peer's O labels or unlabels the board for both.");
 }
 
 /// Two instances that drew the same name end up with two names, the host

@@ -29,6 +29,7 @@ buttons, text fields, and room roster work over the wire.
 | U | Undo one staged hop |
 | A | Let the engine play this seat once |
 | T / S | Status panel / sound |
+| O | Coordinates on every hole, for the whole table |
 | R | Fresh two-player deal (solo) |
 
 ## Trusting the rules
